@@ -1,0 +1,115 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install host tools used by the Makefile
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends make unzip
+
+      - name: make clean
+        run: make clean
+
+      - name: make (build agent jar + stage controller)
+        run: make
+
+      - name: make test (py_compile + agent manifest check + unit tests)
+        run: make test
+
+      - name: make release (build tarball)
+        run: make release VERSION=${GITHUB_REF_NAME#v}
+
+      - name: Verify tarball layout
+        run: |
+          tar -tzf dist/ibg-controller-*.tar.gz
+
+      - name: Verify install.sh extracts cleanly
+        run: |
+          mkdir -p /tmp/install-test /tmp/install-dest
+          cd /tmp/install-test
+          tar -xzf $GITHUB_WORKSPACE/dist/ibg-controller-*.tar.gz
+          cd ibg-controller-*
+          DESTDIR=/tmp/install-dest ./install.sh
+          test -f /tmp/install-dest/gateway-input-agent.jar
+          test -f /tmp/install-dest/scripts/gateway_controller.py
+
+      - name: Upload release tarball
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tarball
+          path: dist/ibg-controller-*.tar.gz
+
+  smoke-test-image:
+    runs-on: ubuntu-24.04
+    needs: build-and-test
+    # Smoke-test in a Docker container that mirrors the target
+    # runtime: Python 3 + pyatspi2 + ATK bridge. Verifies the module
+    # loads with the real gi stack (not just mocked sys.modules).
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: make
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends make unzip
+          make
+
+      - name: Real-pyatspi2 module-load smoke test
+        run: |
+          docker run --rm \
+            -v $PWD:/src \
+            -w /src \
+            ubuntu:24.04 \
+            bash -c '
+              set -e
+              apt-get update -qq
+              apt-get install -y --no-install-recommends \
+                python3 python3-gi gir1.2-atspi-2.0 at-spi2-core \
+                2>/dev/null
+              # Try to import the module with the real pyatspi2 stack.
+              # Module load reads env vars and validates hostnames;
+              # this catches any type / import regression the mocked
+              # unit tests would miss.
+              TWS_USERID=x TWS_PASSWORD=x TRADING_MODE=paper \
+                python3 -c "
+              import sys
+              sys.path.insert(0, \"/src\")
+              import gateway_controller as gc
+              print(\"module loaded, version check OK\")
+              print(f\"  TRADING_MODE={gc.TRADING_MODE}\")
+              print(f\"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}\")
+              print(f\"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries\")
+              "
+            '
