@@ -57,12 +57,23 @@ jobs:
           test -f /tmp/install-dest/gateway-input-agent.jar
           test -f /tmp/install-dest/scripts/gateway_controller.py
 
-      - name: Upload release tarball
+      - name: Upload release tarball (artifact)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@v4
         with:
           name: release-tarball
           path: dist/ibg-controller-*.tar.gz
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "$TAG" dist/ibg-controller-*.tar.gz \
+            --title "$TAG" \
+            --notes "See [CHANGELOG.md](https://github.com/code-hustler-ft3d/ibg-controller/blob/main/CHANGELOG.md) for details." \
+            --repo "$GITHUB_REPOSITORY"
 
   smoke-test-image:
     runs-on: ubuntu-24.04
