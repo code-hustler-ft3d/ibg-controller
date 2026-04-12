@@ -4,6 +4,30 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-04-12
+
+### Fixed
+
+- **Root cause of persistent auth timeouts**: the install4j launcher
+  passes `-DjtsConfigDir=${installer:jtsConfigDir}` (an unsubstituted
+  placeholder) to Java BEFORE any `INSTALL4J_ADD_VM_PARAMS` override.
+  Java uses the first `-D` definition, so our override was silently
+  ignored and Gateway read a nonexistent config path. Fixed by passing
+  `-VjtsConfigDir=<path>` as a command-line argument to the install4j
+  launcher, which substitutes the variable before constructing the
+  Java command. Live dual-mode auth now completes in 3 seconds.
+
+### Added
+
+- 19 `--add-opens` / `--add-exports` JVM module-access flags (matching
+  IBC's `ibcstart.sh`) added to `INSTALL4J_ADD_VM_PARAMS`. Gateway's
+  auth and UI code uses reflection into `java.desktop` and `java.base`
+  internals that Java 17's module system blocks by default.
+- CI auto-release: pushing a `v*` tag now builds the tarball and
+  publishes a GitHub Release automatically.
+- Issue template and PR template for contributors.
+- `.gitignore` expanded for IDE, editor, and `.env` patterns.
+
 ## [0.2.0] - 2026-04-11
 
 Full IBC replacement for common production deployments of
@@ -199,5 +223,6 @@ case of a paper-or-live-only `gnzsnz/ib-gateway-docker` container.
 - Full docs: `README.md`, `docs/ARCHITECTURE.md`, `docs/BOOTSTRAP.md`,
   `docs/MIGRATION.md`
 
+[0.2.1]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.1
 [0.2.0]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.0
 [0.1.0]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.1.0
