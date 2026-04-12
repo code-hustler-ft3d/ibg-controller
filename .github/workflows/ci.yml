@@ -104,12 +104,12 @@ jobs:
               # unit tests would miss.
               TWS_USERID=x TWS_PASSWORD=x TRADING_MODE=paper \
                 python3 -c "
-              import sys
-              sys.path.insert(0, \"/src\")
-              import gateway_controller as gc
-              print(\"module loaded, version check OK\")
-              print(f\"  TRADING_MODE={gc.TRADING_MODE}\")
-              print(f\"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}\")
-              print(f\"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries\")
-              "
+import sys
+sys.path.insert(0, \"/src\")
+import gateway_controller as gc
+print(\"module loaded, version check OK\")
+print(f\"  TRADING_MODE={gc.TRADING_MODE}\")
+print(f\"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}\")
+print(f\"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries\")
+"
             '
