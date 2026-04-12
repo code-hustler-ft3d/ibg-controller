@@ -434,8 +434,8 @@ gnzsnz/ib-gateway-docker, all credited below.
 
 ## Acknowledgements
 
-- **@rlktradewright** for IBC. Most of what we know about driving
-  Gateway's dialogs comes from reading IBC.
+- **@rlktradewright** for [IBC](https://github.com/IbcAlpha/IBC). Most
+  of what we know about driving Gateway's dialogs comes from reading IBC.
 - **[Lcstyle/ibctl](https://github.com/Lcstyle/ibctl)** for the Java-agent
   architecture and the edge-case catalog. The idea of using an in-JVM
   agent for the operations that Swing rejects externally came from ibctl.
