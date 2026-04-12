@@ -1014,7 +1014,43 @@ def launch_gateway():
     ensure_jts_ini()
 
     env = os.environ.copy()
-    vm_params = [
+    # Java module-access flags required by Gateway's auth and UI code.
+    # Without these, reflective access to internal JDK classes fails
+    # silently and AuthDispatcher.connect never fires — the auth request
+    # is never sent, producing a 20-second silent timeout.
+    #
+    # These are the same flags IBC's ibcstart.sh passes. The install4j
+    # launcher's .vmoptions file does NOT include them; IBC adds them
+    # externally. We must do the same via INSTALL4J_ADD_VM_PARAMS.
+    #
+    # Root cause: Gateway 10.45+ uses reflection into java.desktop and
+    # java.base internals for Swing threading, AWT event dispatch, and
+    # the auth connection handshake. Java 17's module system blocks
+    # this by default. The --add-opens/--add-exports flags grant the
+    # access Gateway expects.
+    module_access = [
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/java.util.concurrent=ALL-UNNAMED",
+        "--add-exports=java.base/sun.util=ALL-UNNAMED",
+        "--add-exports=java.desktop/com.sun.java.swing.plaf.motif=ALL-UNNAMED",
+        "--add-opens=java.desktop/java.awt=ALL-UNNAMED",
+        "--add-opens=java.desktop/java.awt.dnd=ALL-UNNAMED",
+        "--add-opens=java.desktop/javax.swing=ALL-UNNAMED",
+        "--add-opens=java.desktop/javax.swing.event=ALL-UNNAMED",
+        "--add-opens=java.desktop/javax.swing.plaf.basic=ALL-UNNAMED",
+        "--add-opens=java.desktop/javax.swing.table=ALL-UNNAMED",
+        "--add-opens=java.desktop/sun.awt=ALL-UNNAMED",
+        "--add-exports=java.desktop/sun.awt.X11=ALL-UNNAMED",
+        "--add-exports=java.desktop/sun.swing=ALL-UNNAMED",
+        "--add-opens=javafx.graphics/com.sun.javafx.application=ALL-UNNAMED",
+        "--add-exports=javafx.media/com.sun.media.jfxmedia=ALL-UNNAMED",
+        "--add-exports=javafx.media/com.sun.media.jfxmedia.events=ALL-UNNAMED",
+        "--add-exports=javafx.media/com.sun.media.jfxmedia.locator=ALL-UNNAMED",
+        "--add-exports=javafx.media/com.sun.media.jfxmediaimpl=ALL-UNNAMED",
+        "--add-exports=javafx.web/com.sun.javafx.webkit=ALL-UNNAMED",
+        "--add-opens=jdk.management/com.sun.management.internal=ALL-UNNAMED",
+    ]
+    vm_params = module_access + [
         "-Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar",
         f"-DjtsConfigDir={JTS_CONFIG_DIR}",
     ]
@@ -1030,8 +1066,25 @@ def launch_gateway():
         log.warning(f"Input agent jar not found at {AGENT_JAR} — text input will fail")
     env["INSTALL4J_ADD_VM_PARAMS"] = " ".join(vm_params)
 
+    # The install4j launcher has a literal unsubstituted placeholder
+    # `-DjtsConfigDir=${installer:jtsConfigDir}` that it passes to Java
+    # BEFORE our INSTALL4J_ADD_VM_PARAMS. Java uses the FIRST -D for
+    # any given property, so our `-DjtsConfigDir=...` override gets
+    # ignored and Gateway reads a nonexistent path.
+    #
+    # Fix: pass `-VjtsConfigDir=<path>` as a command-line argument to
+    # the install4j launcher. The `-V` flag sets the installer variable
+    # BEFORE the launcher constructs the Java command line, so the
+    # `${installer:jtsConfigDir}` placeholder gets correctly substituted
+    # to our desired path. Same mechanism for `installerType`.
+    launcher_args = [
+        launcher,
+        f"-VjtsConfigDir={JTS_CONFIG_DIR}",
+        "-VinstallerType=standalone",
+    ]
+
     proc = subprocess.Popen(
-        [launcher],
+        launcher_args,
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
