@@ -1,7 +1,28 @@
+# Build artifacts
 build/
 dist/
+
+# Python
 *.pyc
 __pycache__/
+
+# Java
 *.class
+
+# macOS
 .DS_Store
 **/.DS_Store
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.classpath
+
+# Environment / secrets (never commit)
+.env
+*.env
+*_password.txt
