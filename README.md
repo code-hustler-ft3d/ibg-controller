@@ -1,5 +1,7 @@
 # ibg-controller
 
+[![CI](https://github.com/code-hustler-ft3d/ibg-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/code-hustler-ft3d/ibg-controller/actions)
+
 A Python + in-JVM Java agent drop-in replacement for
 [IBC](https://github.com/IbcAlpha/IBC) on IB Gateway, targeted at the
 headless Docker use case. Launches Gateway, drives the login dialog
