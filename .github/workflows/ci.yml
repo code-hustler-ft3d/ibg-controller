@@ -88,9 +88,23 @@ jobs:
 
       - name: Real-pyatspi2 module-load smoke test
         run: |
+          cat > /tmp/smoke_test.py << 'PYEOF'
+          import sys
+          sys.path.insert(0, "/src")
+          import gateway_controller as gc
+          print("module loaded, version check OK")
+          print(f"  TRADING_MODE={gc.TRADING_MODE}")
+          print(f"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}")
+          print(f"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries")
+          PYEOF
+          sed -i 's/^          //' /tmp/smoke_test.py
           docker run --rm \
             -v $PWD:/src \
+            -v /tmp/smoke_test.py:/tmp/smoke_test.py \
             -w /src \
+            -e TWS_USERID=x \
+            -e TWS_PASSWORD=x \
+            -e TRADING_MODE=paper \
             ubuntu:24.04 \
             bash -c '
               set -e
@@ -98,18 +112,5 @@ jobs:
               apt-get install -y --no-install-recommends \
                 python3 python3-gi gir1.2-atspi-2.0 at-spi2-core \
                 2>/dev/null
-              # Try to import the module with the real pyatspi2 stack.
-              # Module load reads env vars and validates hostnames;
-              # this catches any type / import regression the mocked
-              # unit tests would miss.
-              TWS_USERID=x TWS_PASSWORD=x TRADING_MODE=paper \
-                python3 -c "
-import sys
-sys.path.insert(0, \"/src\")
-import gateway_controller as gc
-print(\"module loaded, version check OK\")
-print(f\"  TRADING_MODE={gc.TRADING_MODE}\")
-print(f\"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}\")
-print(f\"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries\")
-"
+              python3 /tmp/smoke_test.py
             '
