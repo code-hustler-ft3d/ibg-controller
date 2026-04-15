@@ -1849,6 +1849,113 @@ def handle_post_login_config():
     return True
 
 
+# ── CCP lockout detection + exponential backoff ──────────────────────
+#
+# IBKR's auth server silently drops fresh-password auth requests when
+# it's in a "CCP lockout" state (AuthTimeoutMonitor-CCP: Timeout! in
+# launcher.log, with no preceding NS_AUTH_START). The controller's
+# TWOFA_TIMEOUT_ACTION=restart path was inadvertently feeding this
+# lockout by immediately retrying auth with zero backoff — every retry
+# extended the lockout window.
+#
+# The fix: after clicking Log In, poll launcher.log for the CCP Timeout
+# signature. If detected, skip the 2FA wait (it can't succeed if auth
+# was rejected) and enter an exponential backoff before the next retry.
+
+_ccp_backoff_seconds = 0.0  # current backoff; 0 = no backoff active
+_CCP_BACKOFF_INITIAL = 60.0
+_CCP_BACKOFF_MAX = 600.0
+_CCP_BACKOFF_MULTIPLIER = 2.0
+
+
+def _detect_ccp_lockout(timeout=25):
+    """Poll launcher.log for CCP auth timeout within `timeout` seconds
+    of the Log In click. Returns True if CCP lockout is detected (auth
+    was silently rejected), False if auth appears to have proceeded
+    normally (NS_AUTH_START appeared, or no timeout within the window).
+
+    Gateway's auth protocol:
+      1. Click Log In → Gateway sends auth request
+      2. Server replies with NS_AUTH_START within ~200ms (success)
+         OR server is silent for 20s → CCP Timeout (lockout)
+
+    We check by reading the LAST few lines of launcher.log repeatedly
+    for up to `timeout` seconds. If we see 'AuthTimeoutMonitor-CCP:
+    Timeout!' without a preceding 'NS_AUTH_START', auth was rejected.
+    """
+    launcher_log = os.path.join(JTS_CONFIG_DIR, "launcher.log")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with open(launcher_log, encoding="utf-8", errors="replace") as f:
+                # Read last 4KB — enough to catch the recent auth sequence
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - 4096))
+                tail = f.read()
+        except (FileNotFoundError, PermissionError):
+            time.sleep(1)
+            continue
+
+        timeout_str = "AuthTimeoutMonitor-CCP: Timeout!"
+        activate_str = "AuthTimeoutMonitor-CCP: activate"
+        if timeout_str in tail:
+            timeout_pos = tail.rfind(timeout_str)
+            activate_pos = tail.rfind(activate_str)
+
+            # Stale detection: if a NEW auth cycle started (activate)
+            # AFTER the Timeout!, the Timeout! is from a previous
+            # attempt and the current one is still in progress. Keep
+            # polling — don't false-positive.
+            if activate_pos > timeout_pos:
+                time.sleep(1)
+                continue
+
+            # Check if NS_AUTH_START appeared AFTER the most recent
+            # "Authenticating" line. If it did, auth progressed past
+            # the CCP check and the timeout is a different failure.
+            auth_pos = tail.rfind("Authenticating")
+            ns_pos = tail.rfind("NS_AUTH_START")
+            if ns_pos > auth_pos and auth_pos >= 0:
+                # NS_AUTH_START came after Authenticating — auth
+                # reached the server, this is a credential or
+                # post-auth failure, not CCP lockout.
+                return False
+            log.warning("CCP LOCKOUT DETECTED — IBKR's auth server "
+                        "silently dropped the auth request (no "
+                        "NS_AUTH_START before Timeout)")
+            return True
+        time.sleep(1)
+    return False
+
+
+def _apply_ccp_backoff():
+    """Sleep for the current CCP backoff duration, doubling it for
+    the next call. Logs the delay so the user can see what's happening.
+    Returns the duration slept."""
+    global _ccp_backoff_seconds
+    if _ccp_backoff_seconds == 0:
+        _ccp_backoff_seconds = _CCP_BACKOFF_INITIAL
+    else:
+        _ccp_backoff_seconds = min(
+            _ccp_backoff_seconds * _CCP_BACKOFF_MULTIPLIER,
+            _CCP_BACKOFF_MAX,
+        )
+    log.warning(f"CCP backoff: waiting {int(_ccp_backoff_seconds)}s before "
+                "next auth attempt (exponential backoff to let IBKR's "
+                "rate limiter clear)")
+    time.sleep(_ccp_backoff_seconds)
+    return _ccp_backoff_seconds
+
+
+def _reset_ccp_backoff():
+    """Reset the backoff after a successful auth."""
+    global _ccp_backoff_seconds
+    if _ccp_backoff_seconds > 0:
+        log.info("CCP backoff reset — auth succeeded")
+        _ccp_backoff_seconds = 0.0
+
+
 def _diagnose_login_failure():
     """Parse Gateway's launcher.log to turn a generic 'API port never
     opened' failure into a specific, actionable error message.
@@ -2130,6 +2237,24 @@ def main():
         _dump_tree(app, max_depth=15)
         sys.exit(0)
 
+    # 3a. Check for CCP lockout BEFORE entering the 2FA wait. Gateway's
+    # auth timeout fires ~20s after the Log In click. If we detect it,
+    # there's no point waiting 120s for a 2FA dialog — auth was rejected.
+    # Back off and retry instead of hammering IBKR.
+    if _detect_ccp_lockout(timeout=25):
+        _apply_ccp_backoff()
+        log.info("Retrying auth after CCP backoff via do_restart_in_place")
+        if do_restart_in_place():
+            _reset_ccp_backoff()
+            # do_restart_in_place re-drives the full login pipeline
+            # including 2FA, config, and signal_ready. Skip the rest
+            # of main()'s startup sequence — we're already in the
+            # monitor loop via the restart path.
+            return
+        else:
+            log.error("CCP backoff retry failed; exiting")
+            sys.exit(1)
+
     _set_state(State.POST_LOGIN)
     # 3b. Dismiss any modal dialog Gateway shows immediately after the
     # Log In click — most commonly the existing-session-detected dialog
@@ -2137,6 +2262,8 @@ def main():
     if not handle_post_login_dialogs(app):
         log.error("Post-login dialog handling failed")
         sys.exit(1)
+
+    _reset_ccp_backoff()  # auth progressed past CCP — clear any backoff
 
     _set_state(State.TWO_FA)
     # 4. 2FA if applicable
@@ -2422,6 +2549,19 @@ def do_restart_in_place():
     if not handle_login(new_app):
         log.error("RESTART: login dialog handling failed")
         return False
+
+    # Check for CCP lockout before entering post-login/2FA waits.
+    # Without this, the restart path feeds the lockout by immediately
+    # retrying auth every ~3 minutes with zero backoff.
+    if _detect_ccp_lockout(timeout=25):
+        _apply_ccp_backoff()
+        log.info("RESTART: CCP lockout detected, will retry after backoff")
+        # Recurse — do_restart_in_place calls itself after the backoff.
+        # The exponential backoff prevents infinite tight recursion.
+        return do_restart_in_place()
+
+    _reset_ccp_backoff()
+
     if not handle_post_login_dialogs(new_app):
         log.error("RESTART: post-login dialog handling failed")
         return False
@@ -2644,6 +2784,16 @@ def attempt_reauth(app):
     if not handle_login(fresh_app):
         log.error("Re-auth: login failed")
         return False
+
+    # Check for CCP lockout before burning 120s+ on 2FA/API waits
+    if _detect_ccp_lockout(timeout=25):
+        _apply_ccp_backoff()
+        log.info("Re-auth: CCP lockout detected — backing off. "
+                 "Monitor loop will retry on next heartbeat cycle.")
+        return True  # let the monitor loop re-check after the backoff
+
+    _reset_ccp_backoff()
+
     if not handle_post_login_dialogs(fresh_app):
         log.error("Re-auth: post-login dialogs failed")
         return False
