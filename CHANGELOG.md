@@ -4,6 +4,47 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] - 2026-04-16
+
+### Fixed
+
+- **CCP backoff counter defeated by premature reset during
+  stuck-connecting cycles**: v0.3.1's `handle_2fa` detection worked
+  (the tight 90s relogin loop stopped), but the exponential ramp
+  never fired — every cycle applied a flat 60s backoff. Verified in
+  production over 4 consecutive cycles, ~160s apart, all at 60s
+  instead of the expected 60 → 120 → 240 → 480s ramp.
+- Root cause: three sites unconditionally called `_reset_ccp_backoff()`
+  right after `_detect_ccp_lockout(timeout=25)` returned False, on the
+  implicit assumption that "no `Timeout!` in 25s ⇒ auth progressed
+  past CCP". That assumption holds for the v0.2.2 CCP-Timeout failure
+  mode, but it breaks for exactly the stuck-connecting mode v0.3.1
+  just taught the controller to recognize: Gateway's internal
+  "connecting to server (trying for another N)" retry loop never
+  emits a `Timeout!` signature, so `_detect_ccp_lockout` returns
+  False, and the reset then fires even though auth hasn't made any
+  progress. `do_restart_in_place` recurses, `handle_2fa` detects
+  stuck again, applies backoff — but from a freshly-reset counter,
+  so always 60s.
+- Fix: gate the three premature resets on
+  `not _detect_login_stuck_connecting()`. If the login dialog still
+  shows the retry-loop label, we've passed the `Timeout!` check but
+  haven't actually progressed past the auth gate — keep the backoff
+  counter intact. The three gated sites are in `main()`,
+  `do_restart_in_place()`, and `attempt_reauth()`. Three other
+  reset sites (after 2FA success in `handle_2fa`, and after
+  `do_restart_in_place` returns True from the lockout-retry arm)
+  are left unchanged — those are true-success signals.
+
+### Validation
+
+- All 66 unit tests pass unchanged. The fix is a three-line gate at
+  three call sites; the helper it gates on (`_detect_login_stuck_connecting`)
+  was added and unit-tested in v0.3.1.
+- Live-side paths and healthy-restart paths are unaffected: when auth
+  genuinely progresses past the CCP gate, `_detect_login_stuck_connecting`
+  returns False and the reset fires exactly as before.
+
 ## [0.3.1] - 2026-04-16
 
 ### Fixed
@@ -312,6 +353,7 @@ case of a paper-or-live-only `gnzsnz/ib-gateway-docker` container.
 - Full docs: `README.md`, `docs/ARCHITECTURE.md`, `docs/BOOTSTRAP.md`,
   `docs/MIGRATION.md`
 
+[0.3.2]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.3.2
 [0.3.1]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.3.1
 [0.3.0]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.3.0
 [0.2.2]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.2

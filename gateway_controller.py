@@ -2308,7 +2308,12 @@ def main():
         log.error("Post-login dialog handling failed")
         sys.exit(1)
 
-    _reset_ccp_backoff()  # auth progressed past CCP — clear any backoff
+    # Gate: _detect_ccp_lockout==False is ambiguous — it can mean "auth
+    # progressed past CCP" OR "stuck in the connecting-to-server retry
+    # loop, which doesn't emit the Timeout! signature". Only reset when
+    # we're confident we've actually progressed. See v0.3.2 CHANGELOG.
+    if not _detect_login_stuck_connecting():
+        _reset_ccp_backoff()
 
     _set_state(State.TWO_FA)
     # 4. 2FA if applicable
@@ -2605,7 +2610,10 @@ def do_restart_in_place():
         # The exponential backoff prevents infinite tight recursion.
         return do_restart_in_place()
 
-    _reset_ccp_backoff()
+    # Gate: same reasoning as the main() path — don't reset on the
+    # stuck-connecting case, only on genuine CCP-gate progress.
+    if not _detect_login_stuck_connecting():
+        _reset_ccp_backoff()
 
     if not handle_post_login_dialogs(new_app):
         log.error("RESTART: post-login dialog handling failed")
@@ -2837,7 +2845,10 @@ def attempt_reauth(app):
                  "Monitor loop will retry on next heartbeat cycle.")
         return True  # let the monitor loop re-check after the backoff
 
-    _reset_ccp_backoff()
+    # Gate: same reasoning as the main() path — don't reset on the
+    # stuck-connecting case, only on genuine CCP-gate progress.
+    if not _detect_login_stuck_connecting():
+        _reset_ccp_backoff()
 
     if not handle_post_login_dialogs(fresh_app):
         log.error("Re-auth: post-login dialogs failed")
