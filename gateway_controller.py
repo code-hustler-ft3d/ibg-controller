@@ -1499,10 +1499,13 @@ def handle_2fa(app):
     # re-drive handle_login once on the assumption that the login form
     # is still up and the user got distracted/approval-expired.
     if relogin_after_timeout is True:
-        log.info("RELOGIN_AFTER_TWOFA_TIMEOUT=yes — re-driving login once")
+        log.info("RELOGIN_AFTER_TWOFA_TIMEOUT=yes — in-JVM relogin")
         fresh_app = find_app(APP_NAME_CANDIDATES, timeout=10,
                              match_pid=JVM_PID) or app
-        if handle_login(fresh_app):
+        # v0.4.1: route through attempt_inplace_relogin so the
+        # "In-JVM relogin attempt..." log line fires for observability
+        # and the dismiss-error-modal / skip-progress-dialog guards run.
+        if attempt_inplace_relogin(fresh_app):
             # Re-enter the wait with a fresh timer
             log.info("Relogin triggered, waiting again for 2FA dialog")
             start = time.monotonic()
@@ -2089,6 +2092,74 @@ def attempt_inplace_relogin(app):
     return handle_login(app)
 
 
+def wait_for_api_port_with_retry(app, port_timeout=180,
+                                 max_attempts=_INPLACE_RELOGIN_MAX_ATTEMPTS):
+    """wait_for_api_port wrapped in an in-JVM relogin retry loop.
+
+    v0.4.1: the v0.4.0 CCP-lockout loop in main() only catches the
+    launcher.log ``AuthTimeoutMonitor-CCP: Timeout!`` signature.
+    Stuck-connecting mode — Gateway's login dialog stuck in its
+    internal "connecting to server (trying for another N seconds)"
+    retry — emits no Timeout! line, so it slipped past the v0.4.0
+    outer poll at main():2383 and flowed into handle_2fa, which did
+    a single RELOGIN_AFTER_TWOFA_TIMEOUT re-drive and then fell
+    through to wait_for_api_port with no further retry. On timeout,
+    the controller exited and the JVM was orphaned.
+
+    This helper catches both failure modes at the final indicator
+    (the API port). If the port doesn't open and either CCP-Timeout
+    or stuck-connecting is currently visible, back off and relogin
+    in-JVM on the same app reference. Capped at ``max_attempts``
+    relogins; past that the controller exits for container-level
+    recovery.
+
+    Does NOT call launch_gateway, terminate GATEWAY_PROC, or unlink
+    AGENT_SOCKET. The retry primitive is ``attempt_inplace_relogin``.
+
+    Returns True when the API port opens. Calls ``sys.exit(1)`` on
+    terminal failure (no lockout signature) or cap exhaustion —
+    matching the behavior of the existing v0.4.0 CCP-lockout loop
+    in main().
+    """
+    if wait_for_api_port(timeout=port_timeout):
+        _reset_ccp_backoff()
+        return True
+    for attempt in range(1, max_attempts + 1):
+        ccp = _detect_ccp_lockout(timeout=25)
+        stuck = _detect_login_stuck_connecting()
+        if not (ccp or stuck):
+            # No lockout signature — this is a terminal failure
+            # (wrong credentials, wrong server, network problem).
+            # Preserve the v0.4.0 diagnostic dump for operators.
+            log.error("API port never opened and no lockout signature "
+                      "detected — treating as terminal failure (wrong "
+                      "creds, wrong server, or network)")
+            _diagnose_login_failure()
+            log.error("Final state dump:")
+            log.error(f"  windows: {agent_windows()}")
+            labels = agent_labels()
+            for wtitle, text in labels[:30]:
+                log.error(f"  label [{wtitle}] {text!r}")
+            sys.exit(1)
+        log.warning(f"API port timeout with lockout signature "
+                    f"(ccp_timeout={ccp}, stuck_connecting={stuck}); "
+                    f"in-JVM relogin attempt {attempt}/{max_attempts}")
+        _apply_ccp_backoff()
+        if not attempt_inplace_relogin(app):
+            log.error("In-JVM relogin failed during API-port retry "
+                      "(login frame never reappeared or handle_login "
+                      "failed); exiting")
+            sys.exit(1)
+        if wait_for_api_port(timeout=port_timeout):
+            _reset_ccp_backoff()
+            return True
+    log.error(f"CCP lockout persists after {max_attempts} in-JVM "
+              "relogin attempts at API-port wait; exiting for "
+              "container-level recovery (docker restart policy "
+              "takes over)")
+    sys.exit(1)
+
+
 def _diagnose_login_failure():
     """Parse Gateway's launcher.log to turn a generic 'API port never
     opened' failure into a specific, actionable error message.
@@ -2431,22 +2502,14 @@ def main():
     # definitive readiness signal — Swing-level "main window detected"
     # markers turned out to be unreliable (the buttons we look for exist
     # in Gateway's empty pre-login shell too). API port == authenticated.
-    if not wait_for_api_port(timeout=180):
-        log.error("API port never opened — Gateway did not authenticate")
-        # Diagnose *why* from Gateway's own launcher.log. Three common
-        # failure modes look identical at this point:
-        #   (a) IBKR silent cooldown: Authenticating → Timeout, NO
-        #       NS_AUTH_START. Server is ignoring us.
-        #   (b) Wrong credentials: Authenticating → NS_AUTH_START →
-        #       Timeout (or an auth error dialog we missed).
-        #   (c) Wrong server / network: never reaches Authenticating.
-        _diagnose_login_failure()
-        log.error("Final state dump:")
-        log.error(f"  windows: {agent_windows()}")
-        labels = agent_labels()
-        for wtitle, text in labels[:30]:
-            log.error(f"  label [{wtitle}] {text!r}")
-        sys.exit(1)
+    #
+    # v0.4.1: wrapped in an in-JVM relogin retry loop so late-manifesting
+    # stuck-connecting failures (which don't emit the launcher.log
+    # ``Timeout!`` signature caught by the v0.4.0 outer CCP loop at
+    # line 2383) are still recovered via attempt_inplace_relogin. A
+    # terminal failure with no lockout signature still exits with the
+    # same diagnostic dump as before.
+    wait_for_api_port_with_retry(CURRENT_APP)
 
     _set_state(State.CONFIG)
     # 5b. Apply post-login API configuration (Master Client ID, Read-Only

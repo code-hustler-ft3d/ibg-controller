@@ -400,5 +400,129 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
             hl.assert_called_once_with(app)
 
 
+class TestWaitForApiPortWithRetry(unittest.TestCase):
+    """wait_for_api_port_with_retry is v0.4.1's outer retry loop at the
+    final auth indicator (the API port). It catches both CCP-Timeout
+    and stuck-connecting lockout modes that the v0.4.0 main() outer
+    loop misses. Behavior contract:
+      - Port opens on first call -> return True, reset CCP backoff.
+      - Port timeout + no lockout signature -> sys.exit(1) (terminal
+        failure: wrong creds, wrong server, network).
+      - Port timeout + CCP Timeout! OR stuck-connecting -> backoff,
+        attempt_inplace_relogin, retry. Same app reference throughout.
+      - Cap at _INPLACE_RELOGIN_MAX_ATTEMPTS relogins then sys.exit(1)
+        for container-level recovery.
+      - attempt_inplace_relogin failure -> sys.exit(1).
+      - Eventual success resets CCP backoff.
+    """
+
+    def _fake_app(self):
+        return object()
+
+    def test_returns_true_immediately_on_success(self):
+        app = self._fake_app()
+        with patch.object(gc, "wait_for_api_port", return_value=True), \
+             patch.object(gc, "_reset_ccp_backoff") as reset, \
+             patch.object(gc, "_detect_ccp_lockout") as ccp, \
+             patch.object(gc, "_detect_login_stuck_connecting") as stuck, \
+             patch.object(gc, "attempt_inplace_relogin") as relogin:
+            self.assertTrue(gc.wait_for_api_port_with_retry(app))
+            reset.assert_called_once()
+            ccp.assert_not_called()
+            stuck.assert_not_called()
+            relogin.assert_not_called()
+
+    def test_retries_on_ccp_lockout_signature(self):
+        app = self._fake_app()
+        with patch.object(gc, "wait_for_api_port", side_effect=[False, True]), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=True), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_apply_ccp_backoff") as backoff, \
+             patch.object(gc, "_reset_ccp_backoff") as reset, \
+             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin:
+            self.assertTrue(gc.wait_for_api_port_with_retry(app))
+            backoff.assert_called_once()
+            # Critical: same app reference, no new JVM
+            relogin.assert_called_once_with(app)
+            reset.assert_called_once()
+
+    def test_retries_on_stuck_connecting_signature(self):
+        # This is the bug-producing mode from v0.4.0 production: CCP
+        # Timeout! never fires but the login dialog is stuck in its
+        # "connecting to server" retry. Must still recover.
+        app = self._fake_app()
+        with patch.object(gc, "wait_for_api_port", side_effect=[False, True]), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=False), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=True), \
+             patch.object(gc, "_apply_ccp_backoff"), \
+             patch.object(gc, "_reset_ccp_backoff") as reset, \
+             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin:
+            self.assertTrue(gc.wait_for_api_port_with_retry(app))
+            relogin.assert_called_once_with(app)
+            reset.assert_called_once()
+
+    def test_terminal_failure_when_no_lockout_signature(self):
+        # Port didn't open AND neither detector fires. Treat as wrong-
+        # creds / wrong-server / network failure. Must exit, must NOT
+        # attempt relogin (no point retrying a terminal failure).
+        app = self._fake_app()
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=False), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_diagnose_login_failure"), \
+             patch.object(gc, "agent_windows", return_value=[]), \
+             patch.object(gc, "agent_labels", return_value=[]), \
+             patch.object(gc, "attempt_inplace_relogin") as relogin:
+            with self.assertRaises(SystemExit) as ctx:
+                gc.wait_for_api_port_with_retry(app)
+            self.assertEqual(ctx.exception.code, 1)
+            relogin.assert_not_called()
+
+    def test_exits_when_max_attempts_exceeded(self):
+        # Port never opens, CCP always detected, relogin always
+        # succeeds (frame reappears, handle_login succeeds). Loop must
+        # cap at _INPLACE_RELOGIN_MAX_ATTEMPTS and exit — not spin
+        # forever.
+        app = self._fake_app()
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=True), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_apply_ccp_backoff"), \
+             patch.object(gc, "_reset_ccp_backoff"), \
+             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin:
+            with self.assertRaises(SystemExit) as ctx:
+                gc.wait_for_api_port_with_retry(app)
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertEqual(relogin.call_count,
+                             gc._INPLACE_RELOGIN_MAX_ATTEMPTS)
+
+    def test_exits_when_relogin_returns_false(self):
+        # attempt_inplace_relogin returns False (login frame never
+        # reappeared or handle_login failed). Must exit cleanly, not
+        # loop forever.
+        app = self._fake_app()
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=True), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_apply_ccp_backoff"), \
+             patch.object(gc, "attempt_inplace_relogin", return_value=False) as relogin:
+            with self.assertRaises(SystemExit) as ctx:
+                gc.wait_for_api_port_with_retry(app)
+            self.assertEqual(ctx.exception.code, 1)
+            relogin.assert_called_once()
+
+    def test_respects_custom_max_attempts(self):
+        # Caller can override the cap (useful for tests / debugging).
+        app = self._fake_app()
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=True), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_apply_ccp_backoff"), \
+             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin:
+            with self.assertRaises(SystemExit):
+                gc.wait_for_api_port_with_retry(app, max_attempts=3)
+            self.assertEqual(relogin.call_count, 3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

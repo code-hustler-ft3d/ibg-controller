@@ -4,6 +4,63 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-04-16
+
+### Fixed
+
+- **v0.4.0 recovery loop never iterated on the production lockout
+  path**: the in-JVM relogin primitive was added and wired into
+  `main()`'s outer CCP loop (gateway_controller.py:2383) and into
+  `do_restart_in_place()`, but the lockout pattern observed in paper-
+  side production (stuck-connecting retry loop — Gateway's login
+  dialog stuck on "connecting to server (trying for another N
+  seconds)") emits NO launcher.log `AuthTimeoutMonitor-CCP: Timeout!`
+  line, so `_detect_ccp_lockout(timeout=25)` returned False and the
+  8-attempt relogin loop never entered. Control flowed into
+  `handle_2fa()`, whose `RELOGIN_AFTER_TWOFA_TIMEOUT=yes` branch
+  re-drove login exactly once via `handle_login()` (not via
+  `attempt_inplace_relogin`), then fell through to
+  `wait_for_api_port(timeout=180)`. On timeout, `sys.exit(1)` —
+  controller dead, JVM orphaned to PPID=1.
+- Fix: added `wait_for_api_port_with_retry(app)` (gateway_controller.py
+  next to `attempt_inplace_relogin`). It wraps the final API-port
+  wait in an 8-attempt relogin loop: if the port doesn't open and
+  EITHER `_detect_ccp_lockout` OR `_detect_login_stuck_connecting`
+  returns True, it applies `_apply_ccp_backoff()`, runs
+  `attempt_inplace_relogin(app)`, and retries. No lockout signature
+  = terminal failure (wrong creds / wrong server / network) with the
+  same diagnostic dump as before. Cap exhaustion exits for container-
+  level recovery. Replaces the bare `wait_for_api_port` call at
+  main() line 2434.
+- `handle_2fa`'s `RELOGIN_AFTER_TWOFA_TIMEOUT=yes` branch now calls
+  `attempt_inplace_relogin(fresh_app)` instead of `handle_login`
+  directly. The characteristic "In-JVM relogin attempt (no JVM
+  restart — matches IBC's LoginManager.initiateLogin semantics)"
+  warning now fires on this path, so validation scripts can actually
+  observe the primitive running. The dismiss-error-modal /
+  skip-connecting-to-server-progress-dialog guards also run.
+- Unit tests: `TestWaitForApiPortWithRetry` mocks
+  `wait_for_api_port`, `_detect_ccp_lockout`,
+  `_detect_login_stuck_connecting`, `_apply_ccp_backoff`, and
+  `attempt_inplace_relogin` to exercise the immediate-success,
+  CCP-retry-then-success, stuck-connecting-retry-then-success,
+  no-signature-terminal, cap-exhausted, and relogin-failure
+  branches. Also asserts that successful retries clear the backoff
+  via `_reset_ccp_backoff`.
+- `do_restart_in_place` is still reserved for legitimate process-death
+  recovery (monitor-loop wedge at :2894, command-server RESTART at
+  :2763, opt-in `TWOFA_TIMEOUT_ACTION=restart` at :1537). Auth-failure
+  paths still route through `attempt_inplace_relogin`.
+
+### Known — not v0.4.1 scope
+
+- `AUTO_RESTART_TIME` (gateway_controller.py:1760) is a Gateway-
+  internal config value set via the Configure → Lock and Exit dialog
+  at post-login time; Gateway itself handles the daily restart. If
+  Gateway never authenticates, the post-login config never applies
+  and there's nothing for Gateway to auto-restart from. Not a
+  controller bug.
+
 ## [0.4.0] - 2026-04-16
 
 ### Fixed
