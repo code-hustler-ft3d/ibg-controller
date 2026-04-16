@@ -51,6 +51,30 @@ Full migration instructions in [`docs/MIGRATION.md`](docs/MIGRATION.md).
 Finding your regional server (`TWS_SERVER`): [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md).
 Why each piece is necessary: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+## Using the shipped Dockerfile
+
+A ready-to-use `Dockerfile` is shipped at the repo root. It extends
+[`gnzsnz/ib-gateway-docker`](https://github.com/gnzsnz/ib-gateway-docker),
+installs the AT-SPI stack, configures the Java accessibility bridge
+into Gateway's JRE, and drops the controller artifacts from `dist/`
+into `/home/ibgateway/`:
+
+```bash
+# Build the agent jar and stage the controller
+make
+
+# Build the image. UPSTREAM_IMAGE defaults to ghcr.io/gnzsnz/ib-gateway:stable
+# (a moving tag). For reproducible production builds, pin a digest:
+docker build -t ibg-controller:local \
+  --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1c@sha256:... \
+  .
+```
+
+Use this when you want a single ready-to-run image with no further
+customization. If you're composing ibg-controller into a larger image
+of your own, use the `make install DESTDIR=...` path shown in the
+Quick start above instead.
+
 ## System requirements
 
 | Requirement | Notes |

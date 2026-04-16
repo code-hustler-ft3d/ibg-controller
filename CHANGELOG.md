@@ -4,6 +4,61 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] - 2026-04-16
+
+The repo's `Dockerfile` and `docker/run.sh` are now tracked and shipped
+as first-class deliverables. Previously they lived outside version
+control as a temporary scaffold intended to be upstreamed into
+`gnzsnz/ib-gateway-docker`. That fork has been retired, so this repo
+is now the canonical home of both the controller *and* its image
+recipe. No controller behavior has changed between v0.2.2 and v0.3.0
+— only what the repo ships.
+
+### Added
+
+- `Dockerfile` at repo root. Extends a gnzsnz/ib-gateway base
+  (`UPSTREAM_IMAGE` build-arg, default `:stable`), installs the
+  AT-SPI stack, configures the ATK bridge into Gateway's JRE, and
+  drops the controller artifacts from `dist/` into
+  `/home/ibgateway/`. Pin a digest via `--build-arg UPSTREAM_IMAGE=...@sha256:...`
+  for reproducible production builds.
+- `docker/run.sh` — the `USE_PYATSPI2_CONTROLLER=yes`-aware launcher
+  that replaces upstream's IBC-first entrypoint. Starts the
+  controller, waits for the readiness signal, then brings up socat
+  port forwarding.
+- "Using the shipped Dockerfile" section in `README.md` with
+  build-arg examples.
+
+### Changed
+
+- `Dockerfile` header rewritten: removed the stopgap framing that
+  described the file as a wrapper pending an upstream PR. That PR
+  was cancelled and the fork retired; this is now the canonical
+  image recipe. Documented the `UPSTREAM_IMAGE` digest-pin pattern
+  in the header comment.
+
+## [0.2.2] - 2026-04-15
+
+### Fixed
+
+- **CCP lockout exponential backoff**: when IBKR's auth server
+  silently drops an auth request (CCP lockout), the controller's
+  `TWOFA_TIMEOUT_ACTION=restart` path immediately retried with zero
+  backoff. Each retry extended the lockout — observed in production
+  as ~15 auth attempts over 27 minutes, each resetting the cooldown
+  timer. Fix: after clicking Log In, poll `launcher.log` for 25s
+  for the `AuthTimeoutMonitor-CCP: Timeout!` signature. If
+  detected, skip the 2FA wait, apply exponential backoff
+  (60s → 120s → 240s → 480s → 600s cap), log `CCP LOCKOUT
+  DETECTED` + the backoff duration, then retry via
+  `do_restart_in_place`. Detection includes a stale-guard that
+  checks whether a new auth cycle's `activate` appears after the
+  `Timeout!` — if so, the Timeout is from a previous attempt and
+  the poll keeps going rather than false-positive. Wired into all
+  three auth paths: `main()` initial startup,
+  `do_restart_in_place()` restart path, and `attempt_reauth()`
+  monitor-loop re-login.
+
 ## [0.2.1] - 2026-04-12
 
 ### Fixed
@@ -223,6 +278,8 @@ case of a paper-or-live-only `gnzsnz/ib-gateway-docker` container.
 - Full docs: `README.md`, `docs/ARCHITECTURE.md`, `docs/BOOTSTRAP.md`,
   `docs/MIGRATION.md`
 
+[0.3.0]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.3.0
+[0.2.2]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.2
 [0.2.1]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.1
 [0.2.0]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.0
 [0.1.0]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.1.0
