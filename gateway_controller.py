@@ -1463,6 +1463,7 @@ def handle_2fa(app):
                     log.error("CLICK_IN_WIN OK on 2FA dialog failed")
                     return False
                 log.info("2FA handled successfully")
+                _reset_ccp_backoff()
                 return True
 
         # Periodic status line
@@ -1477,6 +1478,21 @@ def handle_2fa(app):
         time.sleep(1.0)
 
     log.warning(f"No 2FA dialog appeared within {wait_seconds}s")
+
+    # If Gateway's login dialog is stuck in its internal "connecting to
+    # server (trying for another N seconds)" retry loop, IBKR's auth
+    # server isn't accepting sessions for this account right now. The
+    # 2FA dialog never appeared because the auth protocol never got
+    # off the ground. Re-clicking Log In here or immediately falling
+    # through to TWOFA_TIMEOUT_ACTION=restart (which re-launches the
+    # JVM and re-clicks) extends the lockout. Apply the same CCP
+    # exponential backoff the pre-auth path uses before the relogin
+    # or restart dispatch kicks in.
+    if _detect_login_stuck_connecting():
+        log.warning("Login dialog stuck in 'connecting to server' retry "
+                    "loop — IBKR auth server isn't accepting sessions "
+                    "right now. Applying CCP backoff before retry.")
+        _apply_ccp_backoff()
 
     # Optional relogin attempt before dispatching the timeout action.
     # Mirrors IBC's RELOGIN_AFTER_TWOFA_TIMEOUT behavior: if set, we
@@ -1503,6 +1519,7 @@ def handle_2fa(app):
                             time.sleep(0.5)
                             if agent_click_in_window(TWOFA_WINDOW_SUBSTR, "OK"):
                                 log.info("2FA handled successfully (post-relogin)")
+                                _reset_ccp_backoff()
                                 return True
                 time.sleep(1.0)
             log.warning("2FA dialog didn't appear in relogin window either")
@@ -1954,6 +1971,34 @@ def _reset_ccp_backoff():
     if _ccp_backoff_seconds > 0:
         log.info("CCP backoff reset — auth succeeded")
         _ccp_backoff_seconds = 0.0
+
+
+def _detect_login_stuck_connecting():
+    """Return True if the login dialog is displaying the 'connecting to
+    server (trying for another N seconds)' retry-loop label.
+
+    This is a sibling signal to _detect_ccp_lockout's launcher.log
+    signature. CCP detection catches the case where IBKR's auth server
+    replies with a silent `AuthTimeoutMonitor-CCP: Timeout!`; this
+    helper catches an earlier failure mode where Gateway can't even
+    establish the session — the login window shows an internal retry
+    counter and the auth protocol never starts. Both states have the
+    same remediation: back off, don't re-click Log In.
+
+    Implementation: ask the agent for all currently-visible JLabel text
+    and look for the signature substrings. Cheap (one socket round-trip,
+    no polling) because the caller is already in a post-timeout
+    decision path and we don't want to add another long wait on top.
+    """
+    try:
+        labels = agent_labels()
+    except Exception:
+        return False
+    for _wtitle, text in labels:
+        lower = text.lower()
+        if "connecting to server" in lower or "trying for another" in lower:
+            return True
+    return False
 
 
 def _diagnose_login_failure():

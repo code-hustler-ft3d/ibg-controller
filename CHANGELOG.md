@@ -4,6 +4,40 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] - 2026-04-16
+
+### Fixed
+
+- **Paper-side infinite relogin loop with no backoff**: when IBKR's
+  auth server stops accepting new sessions for an account, Gateway's
+  login dialog enters an internal `"Attempt N: connecting to server
+  (trying for another XX seconds)"` retry state rather than emitting
+  the `AuthTimeoutMonitor-CCP: Timeout!` line that the v0.2.2 backoff
+  watches for. `handle_2fa` was timing out after not seeing a 2FA
+  dialog, falling into the `RELOGIN_AFTER_TWOFA_TIMEOUT=yes` branch,
+  and re-clicking Log In with zero backoff — approximately every
+  ~90s indefinitely. Observed in production on the paper instance
+  while live was healthy: 30+ minutes of unbacked-off retries, each
+  resetting Gateway's internal attempt counter and extending the
+  lockout from IBKR's perspective.
+- Added `_detect_login_stuck_connecting()` that inspects visible
+  JLabel text for the "connecting to server" / "trying for another"
+  signature. `handle_2fa` now calls it on 2FA-wait timeout and, if
+  Gateway is stuck in the retry loop, applies the same CCP
+  exponential backoff (60s → 600s cap) the pre-auth path uses
+  before any relogin or `TWOFA_TIMEOUT_ACTION` dispatch. The fix
+  covers all three auth paths that eventually call `handle_2fa`:
+  `main()`, `do_restart_in_place()`, and `attempt_reauth()`.
+- Added `_reset_ccp_backoff()` at the two 2FA-success return points
+  in `handle_2fa` so the backoff counter doesn't carry stale state
+  when an earlier stuck-connecting detection applied backoff and
+  the subsequent retry succeeded.
+- 6 new unit tests cover the helper: positive matches for
+  `connecting to server`, `trying for another`, case-insensitive
+  matches; negative cases for unrelated labels, empty label lists,
+  and agent-socket exceptions (should return False rather than
+  propagate).
+
 ## [0.3.0] - 2026-04-16
 
 The repo's `Dockerfile` and `docker/run.sh` are now tracked and shipped
@@ -278,6 +312,7 @@ case of a paper-or-live-only `gnzsnz/ib-gateway-docker` container.
 - Full docs: `README.md`, `docs/ARCHITECTURE.md`, `docs/BOOTSTRAP.md`,
   `docs/MIGRATION.md`
 
+[0.3.1]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.3.1
 [0.3.0]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.3.0
 [0.2.2]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.2
 [0.2.1]: https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/v0.2.1

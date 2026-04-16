@@ -256,5 +256,52 @@ class TestApiPortForMode(unittest.TestCase):
         self.assertEqual(gc.api_port_for_mode(), 4002)
 
 
+class TestDetectLoginStuckConnecting(unittest.TestCase):
+    """_detect_login_stuck_connecting reads JLabel text via agent_labels
+    and matches against the 'connecting to server' / 'trying for
+    another' retry-loop signature. We mock agent_labels directly to
+    exercise the positive + negative paths without a running agent."""
+
+    def test_detects_connecting_to_server(self):
+        with patch.object(gc, "agent_labels", return_value=[
+            ("IB Gateway", "Attempt 3: connecting to server (trying for another 45 seconds)"),
+        ]):
+            self.assertTrue(gc._detect_login_stuck_connecting())
+
+    def test_detects_trying_for_another(self):
+        # Even if the "connecting to server" part gets truncated, the
+        # "trying for another" substring alone is enough to flag the state.
+        with patch.object(gc, "agent_labels", return_value=[
+            ("IB Gateway", "trying for another 12 seconds"),
+        ]):
+            self.assertTrue(gc._detect_login_stuck_connecting())
+
+    def test_case_insensitive(self):
+        with patch.object(gc, "agent_labels", return_value=[
+            ("IB Gateway", "Connecting To Server"),
+        ]):
+            self.assertTrue(gc._detect_login_stuck_connecting())
+
+    def test_ignores_unrelated_labels(self):
+        with patch.object(gc, "agent_labels", return_value=[
+            ("IB Gateway", "Username"),
+            ("IB Gateway", "Password"),
+            ("IB Gateway", "Log In"),
+        ]):
+            self.assertFalse(gc._detect_login_stuck_connecting())
+
+    def test_returns_false_on_empty_labels(self):
+        with patch.object(gc, "agent_labels", return_value=[]):
+            self.assertFalse(gc._detect_login_stuck_connecting())
+
+    def test_returns_false_on_agent_exception(self):
+        # If the agent socket is down we shouldn't raise; a false negative
+        # here is safer than crashing the timeout handler.
+        def boom():
+            raise RuntimeError("agent socket closed")
+        with patch.object(gc, "agent_labels", side_effect=boom):
+            self.assertFalse(gc._detect_login_stuck_connecting())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
