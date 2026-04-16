@@ -2001,6 +2001,94 @@ def _detect_login_stuck_connecting():
     return False
 
 
+# Hard cap on in-JVM relogin retries per controller lifetime. If the CCP
+# lockout persists past this many attempts, let the container exit so the
+# orchestrator's own backoff (docker restart policy) takes over.
+_INPLACE_RELOGIN_MAX_ATTEMPTS = 8
+
+
+def attempt_inplace_relogin(app):
+    """In-JVM relogin primitive — match IBC's
+    ``getLoginHandler().initiateLogin(getLoginFrame())`` semantics from
+    outside the JVM via the existing AT-SPI path.
+
+    Does NOT terminate GATEWAY_PROC, does NOT unlink AGENT_SOCKET, does
+    NOT call launch_gateway. CURRENT_APP / GATEWAY_PROC / JVM_PID stay
+    intact across the call.
+
+    Why: killing + relaunching the Gateway JVM creates a fresh TCP/TLS
+    session that IBKR's auth server treats as a new handshake, which
+    keeps the CCP rate limiter armed and the lockout cycle open. IBC
+    has worked in production for years by staying in one JVM and just
+    re-invoking ``initiateLogin`` on the existing login frame. See the
+    v0.4.0 CHANGELOG entry for the full rationale.
+
+    Strategy (AT-SPI side):
+      1. Scan open modal windows. Dismiss known login-failure error
+         modals via OK/Close. Never click on a 'Connecting to server'
+         progress dialog — clicking OK cancels the login.
+      2. Wait up to 30s for the login form to redisplay by polling for
+         the password text field (same signal handle_login uses).
+      3. Re-drive handle_login(app) on the same app reference. Return
+         its result.
+
+    Returns True if handle_login succeeded, False if the login frame
+    never reappeared or handle_login failed. Callers typically couple
+    this with _apply_ccp_backoff() BEFORE the call for spacing.
+    """
+    log.warning("In-JVM relogin attempt (no JVM restart — matches "
+                "IBC's LoginManager.initiateLogin semantics)")
+
+    # 1. Dismiss error modals only. Progress dialogs are off-limits.
+    try:
+        windows = agent_windows()
+    except Exception as e:
+        log.warning(f"In-JVM relogin: agent_windows failed ({type(e).__name__}: {e}); "
+                    "skipping modal dismissal and going straight to login-frame wait")
+        windows = []
+    for _wtype, title, modal in windows:
+        if not modal:
+            continue
+        tl = title.lower()
+        # Leave any in-flight progress dialog alone — OK cancels login.
+        if "connecting to server" in tl:
+            log.info(f"In-JVM relogin: leaving progress dialog intact: {title!r}")
+            continue
+        # Inspect body text to decide whether this is a dismissible error.
+        try:
+            body = agent_window(title)
+        except Exception:
+            body = ""
+        body_lower = body.lower()
+        error_markers = (
+            "login failed",
+            "login error",
+            "could not be performed",
+            "unable to connect",
+            "authentication failed",
+            "server cannot be reached",
+        )
+        if any(m in body_lower for m in error_markers):
+            log.info(f"In-JVM relogin: dismissing error modal: {title!r}")
+            for btn in ("OK", "Close"):
+                if agent_click_in_window(title, btn):
+                    break
+
+    # 2. Wait for the login frame to redisplay. wait_for polls the
+    # AT-SPI tree on the same app; if Gateway auto-returns to the login
+    # frame (common after stuck-connecting expires or after a dismissed
+    # error), the password field reappears.
+    log.info("In-JVM relogin: waiting up to 30s for login frame to reappear")
+    if wait_for(app, "password text", timeout=30) is None:
+        log.error("In-JVM relogin: login frame never reappeared within 30s")
+        return False
+
+    # 3. Same app, same JVM — just re-drive handle_login.
+    log.info("In-JVM relogin: login frame is up, re-driving handle_login "
+             "on the existing JVM")
+    return handle_login(app)
+
+
 def _diagnose_login_failure():
     """Parse Gateway's launcher.log to turn a generic 'API port never
     opened' failure into a specific, actionable error message.
@@ -2285,20 +2373,30 @@ def main():
     # 3a. Check for CCP lockout BEFORE entering the 2FA wait. Gateway's
     # auth timeout fires ~20s after the Log In click. If we detect it,
     # there's no point waiting 120s for a 2FA dialog — auth was rejected.
-    # Back off and retry instead of hammering IBKR.
-    if _detect_ccp_lockout(timeout=25):
+    #
+    # Recovery is via IN-JVM relogin, never by killing the JVM. Killing
+    # and relaunching creates a fresh auth handshake that IBKR treats
+    # as a new session and keeps the CCP lockout armed. IBC's
+    # ReloginAfterSecondFactorAuthenticationTimeout pattern stays
+    # entirely within one JVM (same rationale). See v0.4.0 CHANGELOG.
+    ccp_retry = 0
+    while _detect_ccp_lockout(timeout=25):
         _apply_ccp_backoff()
-        log.info("Retrying auth after CCP backoff via do_restart_in_place")
-        if do_restart_in_place():
-            _reset_ccp_backoff()
-            # do_restart_in_place re-drives the full login pipeline
-            # including 2FA, config, and signal_ready. Skip the rest
-            # of main()'s startup sequence — we're already in the
-            # monitor loop via the restart path.
-            return
-        else:
-            log.error("CCP backoff retry failed; exiting")
+        ccp_retry += 1
+        if ccp_retry > _INPLACE_RELOGIN_MAX_ATTEMPTS:
+            log.error(f"CCP lockout persists after {_INPLACE_RELOGIN_MAX_ATTEMPTS} "
+                      "in-JVM relogin attempts; exiting for container-level "
+                      "recovery (docker restart policy takes over)")
             sys.exit(1)
+        log.info(f"Retrying auth in-JVM after CCP backoff "
+                 f"(attempt {ccp_retry}/{_INPLACE_RELOGIN_MAX_ATTEMPTS})")
+        if not attempt_inplace_relogin(app):
+            log.error("In-JVM relogin failed (login frame never reappeared "
+                      "or handle_login failed); exiting")
+            sys.exit(1)
+        # Loop back: _detect_ccp_lockout polls the NEW Log In click's
+        # auth outcome. If no fresh Timeout! appears within 25s, the
+        # lockout has cleared and we fall through to post-login.
 
     _set_state(State.POST_LOGIN)
     # 3b. Dismiss any modal dialog Gateway shows immediately after the
@@ -2600,15 +2698,25 @@ def do_restart_in_place():
         log.error("RESTART: login dialog handling failed")
         return False
 
-    # Check for CCP lockout before entering post-login/2FA waits.
-    # Without this, the restart path feeds the lockout by immediately
-    # retrying auth every ~3 minutes with zero backoff.
-    if _detect_ccp_lockout(timeout=25):
+    # Check for CCP lockout on the freshly-relaunched JVM. If detected,
+    # recovery must be IN-JVM — do NOT recurse do_restart_in_place here.
+    # Killing this JVM and spawning another one is exactly what keeps
+    # IBKR's CCP limiter armed (each new JVM = new auth handshake).
+    # Stay in this JVM and re-click Log In instead. See v0.4.0 CHANGELOG.
+    ccp_retry = 0
+    while _detect_ccp_lockout(timeout=25):
         _apply_ccp_backoff()
-        log.info("RESTART: CCP lockout detected, will retry after backoff")
-        # Recurse — do_restart_in_place calls itself after the backoff.
-        # The exponential backoff prevents infinite tight recursion.
-        return do_restart_in_place()
+        ccp_retry += 1
+        if ccp_retry > _INPLACE_RELOGIN_MAX_ATTEMPTS:
+            log.error(f"RESTART: CCP lockout persists after "
+                      f"{_INPLACE_RELOGIN_MAX_ATTEMPTS} in-JVM relogin "
+                      "attempts on the relaunched JVM; giving up")
+            return False
+        log.info(f"RESTART: in-JVM relogin after CCP backoff "
+                 f"(attempt {ccp_retry}/{_INPLACE_RELOGIN_MAX_ATTEMPTS})")
+        if not attempt_inplace_relogin(new_app):
+            log.error("RESTART: in-JVM relogin failed on the relaunched JVM")
+            return False
 
     # Gate: same reasoning as the main() path — don't reset on the
     # stuck-connecting case, only on genuine CCP-gate progress.

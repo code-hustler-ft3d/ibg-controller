@@ -104,10 +104,13 @@ from the same account. Two visible patterns:
    seconds)`. The auth protocol never starts, so no `Timeout!` line is
    logged — the only signal is the dialog text.
 
-**As of v0.3.2 the controller handles both modes automatically** by
+**As of v0.4.0 the controller handles both modes automatically** by
 applying an exponential backoff (60s → 120s → 240s → 480s → 600s cap)
-before each retry, so it stops "feeding the rate limiter" and gives
-IBKR's server time to clear the lockout. Look for these log lines:
+between retries *and* recovering via in-JVM relogin on the existing
+Gateway process — the same pattern IBC uses. Previous versions
+(v0.2.2–v0.3.2) killed and relaunched the JVM on each retry, which
+IBKR's auth server saw as a fresh handshake and kept the lockout
+armed; the ramp never cleared. Look for these log lines:
 
 ```
 CCP LOCKOUT DETECTED ...

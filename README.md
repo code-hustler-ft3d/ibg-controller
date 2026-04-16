@@ -336,13 +336,22 @@ modes:
    appears in `launcher.log` at all — the only visible signal is the
    dialog text.
 
-**What the controller does automatically**: as of v0.3.2, the controller
-detects both modes and applies an exponential backoff before any
-retry — 60s → 120s → 240s → 480s → 600s cap. You'll see these lines:
+**What the controller does automatically**: as of v0.4.0, the controller
+detects both modes, applies an exponential backoff between retries
+(60s → 120s → 240s → 480s → 600s cap), and recovers by **re-driving
+Log In on the existing Gateway JVM** — never by killing and
+relaunching it. This matches
+[IBC's `LoginManager.initiateLogin`](https://github.com/IbcAlpha/IBC/blob/master/src/ibcalpha/ibc/LoginManager.java)
+pattern: IBKR's auth server treats each new JVM as a fresh handshake
+and keeps the CCP limiter armed, so the previous v0.2.2–v0.3.2
+"backoff + `do_restart_in_place`" design never let the lockout clear.
+You'll see these lines:
 
 ```
 CCP LOCKOUT DETECTED — IBKR's auth server silently dropped the auth request
 CCP backoff: waiting 60s before next auth attempt
+Retrying auth in-JVM after CCP backoff (attempt 1/8)
+In-JVM relogin attempt (no JVM restart — matches IBC's LoginManager.initiateLogin semantics)
 ```
 
 or
@@ -354,9 +363,11 @@ CCP backoff: waiting 120s before next auth attempt
 
 The backoff counter is per-trading-mode (live and paper run as
 separate processes in dual mode, so they don't share state), and
-resets on genuine 2FA-success. **Just let it run** — the controller
-will keep retrying with increasing delays until IBKR's rate limiter
-clears, often 5–60 minutes total.
+resets on genuine 2FA-success. Up to 8 in-JVM retries per controller
+lifetime; past that the controller exits and the container
+orchestrator's restart policy takes over. **Just let it run** — the
+controller will keep retrying with increasing delays until IBKR's
+rate limiter clears, often 5–60 minutes total.
 
 **If you're still stuck after an hour of patient backoff**, double-check:
 

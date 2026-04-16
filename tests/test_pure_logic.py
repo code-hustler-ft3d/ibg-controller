@@ -303,5 +303,102 @@ class TestDetectLoginStuckConnecting(unittest.TestCase):
             self.assertFalse(gc._detect_login_stuck_connecting())
 
 
+class TestAttemptInplaceRelogin(unittest.TestCase):
+    """attempt_inplace_relogin is the in-JVM relogin primitive. It must:
+      - Never call launch_gateway / terminate / unlink-agent-socket
+        (i.e. never touch process-lifecycle helpers).
+      - Skip 'Connecting to server' progress dialogs (clicking OK on
+        them cancels the login).
+      - Dismiss recognized error modals via OK/Close.
+      - Wait for the login frame (password text field) to reappear.
+      - Re-drive handle_login on the same app reference and return its
+        result.
+    """
+
+    def _fake_app(self):
+        # The real app is an Atspi object; we only need something
+        # identity-comparable for the assertion that handle_login was
+        # called with the same reference the caller passed in.
+        return object()
+
+    def test_returns_false_when_login_frame_never_reappears(self):
+        app = self._fake_app()
+        with patch.object(gc, "agent_windows", return_value=[]), \
+             patch.object(gc, "wait_for", return_value=None) as wf, \
+             patch.object(gc, "handle_login") as hl:
+            self.assertFalse(gc.attempt_inplace_relogin(app))
+            wf.assert_called_once()
+            hl.assert_not_called()
+
+    def test_calls_handle_login_on_same_app_when_frame_up(self):
+        app = self._fake_app()
+        dummy_pw_field = object()
+        with patch.object(gc, "agent_windows", return_value=[]), \
+             patch.object(gc, "wait_for", return_value=dummy_pw_field), \
+             patch.object(gc, "handle_login", return_value=True) as hl:
+            self.assertTrue(gc.attempt_inplace_relogin(app))
+            # Critical: same app reference, no new JVM
+            hl.assert_called_once_with(app)
+
+    def test_propagates_handle_login_false(self):
+        app = self._fake_app()
+        with patch.object(gc, "agent_windows", return_value=[]), \
+             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "handle_login", return_value=False):
+            self.assertFalse(gc.attempt_inplace_relogin(app))
+
+    def test_leaves_connecting_to_server_dialog_alone(self):
+        # Clicking OK on the "Connecting to server" progress dialog
+        # cancels the login. The helper MUST NOT click it.
+        app = self._fake_app()
+        with patch.object(gc, "agent_windows", return_value=[
+                ("frame", "Connecting to server", True),
+             ]), \
+             patch.object(gc, "agent_window", return_value="connecting to server (trying for another 30 seconds)"), \
+             patch.object(gc, "agent_click_in_window") as click, \
+             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "handle_login", return_value=True):
+            self.assertTrue(gc.attempt_inplace_relogin(app))
+            click.assert_not_called()
+
+    def test_dismisses_recognized_error_modal(self):
+        app = self._fake_app()
+        with patch.object(gc, "agent_windows", return_value=[
+                ("frame", "Login Error", True),
+             ]), \
+             patch.object(gc, "agent_window",
+                          return_value="Login failed: server cannot be reached"), \
+             patch.object(gc, "agent_click_in_window", return_value=True) as click, \
+             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "handle_login", return_value=True):
+            self.assertTrue(gc.attempt_inplace_relogin(app))
+            # Clicked OK (or Close) on the error modal
+            self.assertTrue(click.called)
+            first_call_title = click.call_args_list[0].args[0]
+            self.assertEqual(first_call_title, "Login Error")
+
+    def test_ignores_non_modal_windows(self):
+        app = self._fake_app()
+        with patch.object(gc, "agent_windows", return_value=[
+                ("frame", "IBKR Gateway", False),  # not modal
+             ]), \
+             patch.object(gc, "agent_click_in_window") as click, \
+             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "handle_login", return_value=True):
+            self.assertTrue(gc.attempt_inplace_relogin(app))
+            click.assert_not_called()
+
+    def test_swallows_agent_windows_exception(self):
+        # Agent socket may flap during recovery; a transient failure
+        # must not crash the retry loop. Fall through to the login-
+        # frame wait regardless.
+        app = self._fake_app()
+        with patch.object(gc, "agent_windows", side_effect=RuntimeError("boom")), \
+             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "handle_login", return_value=True) as hl:
+            self.assertTrue(gc.attempt_inplace_relogin(app))
+            hl.assert_called_once_with(app)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

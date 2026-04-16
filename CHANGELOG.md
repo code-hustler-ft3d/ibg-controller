@@ -4,6 +4,82 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-04-16
+
+### Fixed
+
+- **CCP lockout cycle never clears because every retry kills the
+  Gateway JVM**: v0.2.2–v0.3.2 added exponential backoff around a
+  recovery path that was itself the cause of the problem. Both
+  `main()` (cold-start CCP branch, gateway_controller.py:2289 in
+  v0.3.2) and `do_restart_in_place()` (CCP-after-relaunch branch,
+  line 2606 in v0.3.2) recovered from CCP lockout by calling
+  `do_restart_in_place()` — which terminates the Gateway JVM via
+  `GATEWAY_PROC.terminate()` and relaunches a fresh one. IBKR's auth
+  server treats each new JVM as a fresh TCP/TLS handshake and rearms
+  the CCP rate limiter on it, so the exponential backoff ramped
+  60→120→240→480→600s forever without ever letting the lockout
+  clear. The live instance stayed up once authenticated; paper kept
+  cycling.
+- Root cause confirmed against
+  [IBC's LoginManager.secondFactorAuthenticationDialogClosed](https://raw.githubusercontent.com/IbcAlpha/IBC/master/src/ibcalpha/ibc/LoginManager.java):
+  IBC recovers from a 2FA / auth timeout by calling
+  `getLoginHandler().initiateLogin(getLoginFrame())` on the **same
+  JVM** after a 5-second delay. No process restart. That's why IBC-
+  based deployments (gnzsnz/ib-gateway-docker) don't accumulate
+  CCP lockouts across retries — the retry reuses the existing auth
+  session.
+- Fix: added `attempt_inplace_relogin(app)`
+  (gateway_controller.py:2010). It does NOT call `launch_gateway`,
+  does NOT terminate `GATEWAY_PROC`, does NOT unlink the agent
+  socket. It dismisses known login-failure error modals (skipping
+  "Connecting to server" progress dialogs, which cancel login if
+  clicked), waits up to 30s for the login frame to redisplay, and
+  re-drives `handle_login(app)` on the same app reference. Both
+  CCP-lockout recovery sites now loop on this primitive with the
+  existing exponential backoff between attempts. `do_restart_in_place()`
+  is reserved for actual process-death recovery (monitor-loop wedge
+  escalation at :2894 and the command-server RESTART at :2763) and
+  for the opt-in nuclear `TWOFA_TIMEOUT_ACTION=restart` dispatch at
+  :1537. Auth-failure paths no longer touch it.
+- Hard cap of 8 in-JVM relogin attempts per controller lifetime
+  (`_INPLACE_RELOGIN_MAX_ATTEMPTS`). If the lockout persists that
+  long, the controller exits so the container orchestrator's own
+  restart policy takes over — better than spinning forever.
+- Exponential backoff (v0.2.2) is retained. It was always correct as
+  *spacing* between retries; the bug was the accompanying kill+relaunch.
+- The v0.3.2 premature-reset gate is retained as defense-in-depth.
+  With in-JVM relogin, the gate rarely matters on the cold-start path
+  (the loop only exits when CCP is clear), but it still protects
+  `attempt_reauth` and the reset points after `handle_post_login_dialogs`.
+
+### Added
+
+- 7 new unit tests for `attempt_inplace_relogin` covering: login
+  frame never reappears, handle_login re-drive on same app ref,
+  handle_login failure propagation, "Connecting to server" progress
+  dialog is never clicked, recognized error modal is dismissed via
+  OK/Close, non-modal windows are ignored, and `agent_windows`
+  exceptions don't crash the helper.
+
+### Downstream
+
+- `RELOGIN_AFTER_TWOFA_TIMEOUT=yes` is now the recommended setting
+  for deployments that can tolerate a single extra in-JVM retry
+  during stuck-connecting lockouts. It triggers the same in-JVM
+  relogin behavior inside `handle_2fa`'s timeout dispatch. No change
+  to `TWOFA_TIMEOUT_ACTION` defaults; leave it unset (default
+  "none") or set it to "exit" for explicit container-level recovery.
+
+### Validation
+
+- All 73 unit tests pass (66 from v0.3.2 + 7 new).
+- Success criterion in production: after a forced 2FA timeout or CCP
+  lockout, `launcher.log` shows recovery via re-click with the same
+  Gateway PID throughout, no fresh `AuthTimeoutMonitor-CCP: Timeout!`
+  cycles after the first retry, and the backoff ramp plateaus
+  instead of running to 600s indefinitely.
+
 ## [0.3.2] - 2026-04-16
 
 ### Fixed
