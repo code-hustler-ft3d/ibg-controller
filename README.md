@@ -284,8 +284,8 @@ make
 # Syntax-check the Python controller + validate the agent jar manifest
 make test
 
-# Create a release tarball (dist/ibg-controller-0.2.0.tar.gz)
-make release VERSION=0.2.0
+# Create a release tarball (dist/ibg-controller-0.3.2.tar.gz)
+make release VERSION=0.3.2
 
 # Install directly into a running ibgateway home (for dev on host, or
 # as called by the Docker image's setup stage)
@@ -297,7 +297,7 @@ Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 ### Installing from a release tarball (for consumers who don't build)
 
 ```bash
-VER=0.2.0
+VER=0.3.2
 curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
 tar -xzf ibg-controller-${VER}.tar.gz
 cd ibg-controller-${VER}
@@ -306,7 +306,7 @@ DESTDIR=/home/ibgateway ./install.sh
 
 The tarball layout is flat:
 ```
-ibg-controller-0.2.0/
+ibg-controller-0.3.2/
 ├── gateway-input-agent.jar    ← installed to $DESTDIR/gateway-input-agent.jar
 ├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
 ├── install.sh
@@ -319,34 +319,67 @@ ibg-controller-0.2.0/
 
 ## Troubleshooting
 
-### Silent 20-second `AuthTimeoutMonitor-CCP: Timeout!` on your first real-credential run
+### IBKR auth lockouts and the controller's automatic backoff (v0.3.2+)
 
 IBKR's auth server occasionally stops responding to fresh password
 logins for several minutes (and occasionally hours) after a burst of
-failed attempts from the same account. Gateway reports this as a
-silent 20-second `AuthTimeoutMonitor-CCP: Timeout!` in `launcher.log`
-with no dialog on-screen. Gateway 10.45.1c also hides the error
-dialog that 10.44.1g surfaces in the same state, making this worse.
+failed attempts from the same account. There are two visible failure
+modes:
 
-**If you see this**:
+1. **CCP silent timeout** — Gateway logs a 20-second silent
+   `AuthTimeoutMonitor-CCP: Timeout!` in `launcher.log` with no dialog
+   on-screen. Gateway 10.45.1c also hides the error dialog that
+   10.44.1g surfaces in the same state, making this worse.
+2. **Stuck-connecting retry loop** — Gateway's login dialog stays up
+   showing `Attempt N: connecting to server (trying for another XX
+   seconds)`. The auth protocol never starts, so no `Timeout!` line
+   appears in `launcher.log` at all — the only visible signal is the
+   dialog text.
 
-1. Wait 5–60 minutes — the cooldown clears on its own
-2. Double-check you're sending the right username for your trading
-   mode (the controller auto-swaps to `TWS_USERID_PAPER` when
+**What the controller does automatically**: as of v0.3.2, the controller
+detects both modes and applies an exponential backoff before any
+retry — 60s → 120s → 240s → 480s → 600s cap. You'll see these lines:
+
+```
+CCP LOCKOUT DETECTED — IBKR's auth server silently dropped the auth request
+CCP backoff: waiting 60s before next auth attempt
+```
+
+or
+
+```
+Login dialog stuck in 'connecting to server' retry loop — IBKR auth server isn't accepting sessions right now. Applying CCP backoff before retry.
+CCP backoff: waiting 120s before next auth attempt
+```
+
+The backoff counter is per-trading-mode (live and paper run as
+separate processes in dual mode, so they don't share state), and
+resets on genuine 2FA-success. **Just let it run** — the controller
+will keep retrying with increasing delays until IBKR's rate limiter
+clears, often 5–60 minutes total.
+
+**If you're still stuck after an hour of patient backoff**, double-check:
+
+1. You're sending the right username for the trading mode (the
+   controller auto-swaps to `TWS_USERID_PAPER` when
    `TRADING_MODE=paper`, but double-check your env file)
-3. Verify your `TWS_SERVER` / `TWS_SERVER_PAPER` matches the regional
+2. Your `TWS_SERVER` / `TWS_SERVER_PAPER` matches the regional
    server your account is actually hosted on — see
    [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md)
-4. If you have a *previously working* container's `/home/ibgateway/Jts`
+3. If you have a *previously working* container's `/home/ibgateway/Jts`
    state available, mount it via `GATEWAY_WARM_STATE` — autorestart
    token reauth goes through a different code path than fresh-password
    auth and bypasses the cooldown
 
-If retrying cleanly after a long wait still fails, the issue is
-almost certainly account-side (wrong server, wrong userid, account
-locked), not the controller. Gateway's `launcher.log` at
-`/home/ibgateway/Jts/launcher.log` will confirm — you'll see the
-`Authenticating` → `Timeout!` pattern with nothing in between.
+If a clean retry from a known-good config still fails after the
+backoff has run its course, the issue is almost certainly account-side
+(wrong server, wrong userid, account locked), not the controller.
+Gateway's `launcher.log` at `/home/ibgateway/Jts/launcher.log` will
+confirm the CCP-Timeout case — you'll see the
+`Authenticating` → `Timeout!` pattern with nothing in between. The
+stuck-connecting case won't show in `launcher.log`; check the
+controller's own logs for the "stuck in 'connecting to server'"
+warning instead.
 
 ### "IBKR Gateway never appeared in AT-SPI desktop tree within 120s"
 

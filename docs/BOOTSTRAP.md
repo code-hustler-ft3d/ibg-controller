@@ -88,30 +88,60 @@ They will tell you. Same-day response usually.
 All failure modes are visible in Gateway's own `launcher.log`, which
 lives at `/home/ibgateway/Jts/launcher.log` inside the running container.
 
-## If your first cold-start silent-times out, try again
+## If your first cold-start gets locked out by IBKR's rate limiter
 
-We've observed IBKR's auth server sometimes not respond to fresh
-password-based logins for several minutes after a burst of failed
-attempts from the same account. Gateway reports this as a 20-second
-silent `AuthTimeoutMonitor-CCP: Timeout!` in `launcher.log` with no
-dialog on-screen — no error, no "existing session detected", nothing.
-Gateway 10.45.1c swallows the corresponding IBKR error message; on
-10.44.1g the same state sometimes surfaces a dialog instead.
+We've observed IBKR's auth server sometimes refuse fresh password-based
+logins for several minutes (or longer) after a burst of failed attempts
+from the same account. Two visible patterns:
 
-If you see this pattern on your first real-credential run:
+1. **CCP silent timeout** — Gateway logs a 20-second silent
+   `AuthTimeoutMonitor-CCP: Timeout!` in `launcher.log` with no dialog
+   on-screen. Gateway 10.45.1c swallows the corresponding IBKR error
+   message; on 10.44.1g the same state sometimes surfaces a dialog
+   instead.
+2. **Stuck-connecting retry loop** — Gateway's login dialog stays up
+   showing `Attempt N: connecting to server (trying for another XX
+   seconds)`. The auth protocol never starts, so no `Timeout!` line is
+   logged — the only signal is the dialog text.
 
-1. Wait ~5 minutes — the cooldown clears on its own
-2. Check you're sending the right username for the trading mode (live
-   mode wants your live userid, paper mode wants `TWS_USERID_PAPER` — the
+**As of v0.3.2 the controller handles both modes automatically** by
+applying an exponential backoff (60s → 120s → 240s → 480s → 600s cap)
+before each retry, so it stops "feeding the rate limiter" and gives
+IBKR's server time to clear the lockout. Look for these log lines:
+
+```
+CCP LOCKOUT DETECTED ...
+CCP backoff: waiting 60s before next auth attempt
+```
+
+or
+
+```
+Login dialog stuck in 'connecting to server' retry loop ...
+CCP backoff: waiting 120s before next auth attempt
+```
+
+The right behavior on your end is **let it run** — the controller will
+back off increasingly between attempts until IBKR allows the session
+through. Total recovery often takes 5–60 minutes.
+
+If after a full hour of the backoff cycle paper or live still hasn't
+authenticated, check:
+
+1. You're sending the right username for the trading mode (live mode
+   wants your live userid, paper mode wants `TWS_USERID_PAPER` — the
    controller handles this swap automatically, but double-check your
    env)
-3. Check the server hostname in your `TWS_SERVER` / `TWS_SERVER_PAPER`
-   matches what your account actually uses (see "The hostnames" above)
+2. Your `TWS_SERVER` / `TWS_SERVER_PAPER` matches what your account
+   actually uses (see "The hostnames" above)
 
-If retrying cleanly after 5 minutes still fails, the issue is almost
-certainly account-side (wrong server, wrong userid, account locked),
-not the controller. Gateway's `launcher.log` will confirm — you'll see
-the `Authenticating` → `Timeout!` pattern with nothing in between.
+If a clean retry from a known-good config still fails, the issue is
+almost certainly account-side (wrong server, wrong userid, account
+locked), not the controller. Gateway's `launcher.log` will confirm
+the CCP-Timeout case — you'll see the `Authenticating` → `Timeout!`
+pattern with nothing in between. The stuck-connecting case won't show
+in `launcher.log`; check the controller's own logs for the "stuck in
+'connecting to server'" warning instead.
 
 ## Persisting the right state
 
