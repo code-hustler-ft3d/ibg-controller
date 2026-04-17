@@ -1958,6 +1958,17 @@ _CCP_BACKOFF_INITIAL = 60.0
 _CCP_BACKOFF_MAX = 600.0
 _CCP_BACKOFF_MULTIPLIER = 2.0
 
+# Consecutive-lockout streak for diagnosing concurrent-session lockouts.
+# On 2026-04-17 live was stuck in CCP lockout for ~3 hours because another
+# IBKR session (web/mobile) held the auth slot. The silent cool-downs
+# couldn't clear it — only the user logging out elsewhere did. v0.4.8 adds
+# streak-based messaging so future incidents are diagnosed in seconds, not
+# hours: streak 2 → warn about concurrent session; streak 3+ → emit a
+# structured ALERT_CCP_PERSISTENT token for external monitoring.
+_ccp_lockout_streak = 0
+_CCP_STREAK_WARN_CONCURRENT = 2
+_CCP_STREAK_ALERT_PERSISTENT = 3
+
 
 def _detect_ccp_lockout(timeout=25):
     """Poll launcher.log for CCP auth timeout within `timeout` seconds
@@ -2015,6 +2026,23 @@ def _detect_ccp_lockout(timeout=25):
             log.warning("CCP LOCKOUT DETECTED — IBKR's auth server "
                         "silently dropped the auth request (no "
                         "NS_AUTH_START before Timeout)")
+            global _ccp_lockout_streak
+            _ccp_lockout_streak += 1
+            if _ccp_lockout_streak == _CCP_STREAK_WARN_CONCURRENT:
+                log.warning(
+                    f"CCP lockout has hit {_ccp_lockout_streak} times in "
+                    "a row. The most common cause is a concurrent IBKR "
+                    "session (web portal or mobile app) holding the auth "
+                    f"slot on the {TRADING_MODE} account. If cool-downs "
+                    "aren't clearing, log out of IBKR web/mobile and let "
+                    "the next auto-retry grab the session. See "
+                    "docs/DISCONNECT_RECOVERY.md Scenario 7.")
+            elif _ccp_lockout_streak >= _CCP_STREAK_ALERT_PERSISTENT:
+                log.error(
+                    f"ALERT_CCP_PERSISTENT consecutive_lockouts="
+                    f"{_ccp_lockout_streak} mode={TRADING_MODE} "
+                    "suggested_action=\"log out of IBKR web/mobile to "
+                    "release the session slot\"")
             return True
         time.sleep(1)
     return False
@@ -2040,11 +2068,12 @@ def _apply_ccp_backoff():
 
 
 def _reset_ccp_backoff():
-    """Reset the backoff after a successful auth."""
-    global _ccp_backoff_seconds
+    """Reset the backoff + lockout streak after a successful auth."""
+    global _ccp_backoff_seconds, _ccp_lockout_streak
     if _ccp_backoff_seconds > 0:
         log.info("CCP backoff reset — auth succeeded")
         _ccp_backoff_seconds = 0.0
+    _ccp_lockout_streak = 0
 
 
 def _detect_login_stuck_connecting():

@@ -681,5 +681,100 @@ class TestRecoverJvmOrEscalate(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 1)
 
 
+class TestCcpLockoutStreak(unittest.TestCase):
+    """v0.4.8: _detect_ccp_lockout tracks consecutive CCP lockouts.
+    Streak >= 2 emits a concurrent-session warning naming that as the
+    likely cause; streak >= 3 emits a structured ALERT_CCP_PERSISTENT
+    ERROR token for external monitoring. _reset_ccp_backoff resets the
+    streak on auth success.
+
+    Cut future incident diagnosis time from hours (2026-04-17 incident:
+    live stuck for 3h) to seconds."""
+
+    def setUp(self):
+        gc._ccp_lockout_streak = 0
+        gc._ccp_backoff_seconds = 0.0
+
+    def _run_detect_with_ccp_timeout(self):
+        """Call _detect_ccp_lockout against a tempdir launcher.log
+        containing the AuthTimeoutMonitor-CCP: Timeout! signature
+        without a preceding NS_AUTH_START (= real CCP lockout)."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with open(os.path.join(tmpdir, "launcher.log"), "w") as f:
+                f.write("AuthTimeoutMonitor-CCP: activate\n")
+                f.write("Authenticating\n")
+                f.write("AuthTimeoutMonitor-CCP: Timeout!\n")
+            with patch.object(gc, "JTS_CONFIG_DIR", tmpdir):
+                return gc._detect_ccp_lockout(timeout=2)
+
+    def test_streak_increments_on_each_lockout(self):
+        self.assertEqual(gc._ccp_lockout_streak, 0)
+        self.assertTrue(self._run_detect_with_ccp_timeout())
+        self.assertEqual(gc._ccp_lockout_streak, 1)
+        self.assertTrue(self._run_detect_with_ccp_timeout())
+        self.assertEqual(gc._ccp_lockout_streak, 2)
+        self.assertTrue(self._run_detect_with_ccp_timeout())
+        self.assertEqual(gc._ccp_lockout_streak, 3)
+
+    def test_first_lockout_no_concurrent_session_warning(self):
+        with self.assertLogs("controller", level="WARNING") as ctx:
+            self._run_detect_with_ccp_timeout()
+        output = "\n".join(ctx.output)
+        self.assertIn("CCP LOCKOUT DETECTED", output)
+        self.assertNotIn("concurrent IBKR session", output)
+        self.assertNotIn("ALERT_CCP_PERSISTENT", output)
+
+    def test_second_lockout_emits_concurrent_session_warning(self):
+        self._run_detect_with_ccp_timeout()  # streak=1
+        with self.assertLogs("controller", level="WARNING") as ctx:
+            self._run_detect_with_ccp_timeout()  # streak=2
+        output = "\n".join(ctx.output)
+        self.assertIn("concurrent IBKR session", output)
+        self.assertIn("Scenario 7", output)
+        self.assertNotIn("ALERT_CCP_PERSISTENT", output)
+
+    def test_third_lockout_emits_alert_token(self):
+        self._run_detect_with_ccp_timeout()  # streak=1
+        self._run_detect_with_ccp_timeout()  # streak=2
+        with self.assertLogs("controller", level="ERROR") as ctx:
+            self._run_detect_with_ccp_timeout()  # streak=3
+        output = "\n".join(ctx.output)
+        self.assertIn("ALERT_CCP_PERSISTENT", output)
+        self.assertIn("consecutive_lockouts=3", output)
+        self.assertIn("mode=", output)
+        self.assertIn("suggested_action=", output)
+
+    def test_fourth_lockout_still_emits_alert_token(self):
+        for _ in range(3):
+            self._run_detect_with_ccp_timeout()
+        self.assertEqual(gc._ccp_lockout_streak, 3)
+        with self.assertLogs("controller", level="ERROR") as ctx:
+            self._run_detect_with_ccp_timeout()  # streak=4
+        output = "\n".join(ctx.output)
+        self.assertIn("ALERT_CCP_PERSISTENT", output)
+        self.assertIn("consecutive_lockouts=4", output)
+
+    def test_reset_ccp_backoff_resets_streak(self):
+        self._run_detect_with_ccp_timeout()
+        self._run_detect_with_ccp_timeout()
+        self.assertEqual(gc._ccp_lockout_streak, 2)
+        gc._reset_ccp_backoff()
+        self.assertEqual(gc._ccp_lockout_streak, 0)
+
+    def test_reset_streak_allows_fresh_diagnostic_cycle(self):
+        # After reset, the next incident starts at streak=1 and must
+        # NOT immediately emit the concurrent-session warning.
+        for _ in range(3):
+            self._run_detect_with_ccp_timeout()
+        gc._reset_ccp_backoff()
+        with self.assertLogs("controller", level="WARNING") as ctx:
+            self._run_detect_with_ccp_timeout()  # fresh streak=1
+        output = "\n".join(ctx.output)
+        self.assertIn("CCP LOCKOUT DETECTED", output)
+        self.assertNotIn("concurrent IBKR session", output)
+        self.assertNotIn("ALERT_CCP_PERSISTENT", output)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

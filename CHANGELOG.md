@@ -4,6 +4,42 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.8] - 2026-04-17
+
+### Added
+
+- **Consecutive-CCP-lockout streak counter** with diagnostic messaging.
+  2026-04-17 incident: live was stuck in CCP lockout for ~3 hours across
+  3 full v0.4.7 escalation attempts. Root cause turned out to be a
+  concurrent IBKR session on the web portal holding the auth slot —
+  IBKR's CCP silently drops the Gateway's handshake when another session
+  is already authenticated. v0.4.6/v0.4.7 silent cool-downs can't clear
+  a concurrent session, only user-side logout can. The software worked
+  as designed; the diagnosis took hours because the existing log line
+  ("IBKR's auth server silently dropped the auth request") didn't hint
+  at concurrent-session as a cause.
+- After the 2nd consecutive CCP lockout, ``_detect_ccp_lockout`` now
+  emits a specific WARNING naming the concurrent-session cause and
+  pointing at ``docs/DISCONNECT_RECOVERY.md`` Scenario 7 in the
+  ``futures-admin`` repo with the exact recovery steps.
+- After the 3rd+ consecutive lockout, ``_detect_ccp_lockout`` emits a
+  structured ``ALERT_CCP_PERSISTENT`` ERROR line that external
+  monitoring (``futures-admin`` health checker, push-notification
+  watchers) can grep on. Format:
+  ``ALERT_CCP_PERSISTENT consecutive_lockouts=N mode=<live|paper>
+  suggested_action="log out of IBKR web/mobile to release the session
+  slot"`` — stable prefix, key=value pairs.
+- ``_reset_ccp_backoff`` now also resets the streak counter on any
+  successful auth, so the next incident starts at streak=1 again.
+
+### Non-goals
+
+- No behavioral change to the recovery loop itself — the new warnings
+  are purely diagnostic. v0.4.7's ``_recover_jvm_or_escalate`` +
+  ``_escalate_to_jvm_restart`` still drive recovery the same way.
+  Concurrent-session lockouts fundamentally cannot be resolved by the
+  software; they require user-side logout.
+
 ## [0.4.7] - 2026-04-17
 
 ### Fixed
