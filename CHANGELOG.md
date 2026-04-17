@@ -4,6 +4,67 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.9] - 2026-04-17
+
+### Added
+
+- **HTTP `/health` endpoint** on the controller. Motivation: v0.4.8
+  made CCP lockouts visible as stable log tokens, but monitoring still
+  had to tail docker logs to read them. v0.4.9 adds a first-class
+  `GET /health` returning JSON with `status`, `mode`, `state`,
+  `jvm_pid`, `jvm_alive`, `api_port`, `api_port_open`,
+  `last_auth_success_ts`, `last_auth_success_age_seconds`,
+  `ccp_lockout_streak`, `ccp_backoff_seconds`, `uptime_seconds`, and
+  `version`. HTTP 200 if `state==MONITORING` AND `api_port_open` AND
+  JVM alive, HTTP 503 otherwise. Binds per `CONTROLLER_HEALTH_SERVER_PORT`
+  (default 8080 in the image) and `CONTROLLER_HEALTH_SERVER_HOST`
+  (default `0.0.0.0` in the image). Served by stdlib
+  `http.server.BaseHTTPRequestHandler` in a daemon thread — no new
+  Python dependencies. Shallow `GET /ready` also available (always
+  200 while the process is running) for Kubernetes-style readiness.
+- **`ALERT_JVM_RESTART_EXHAUSTED` log token** — emitted before the
+  terminal `sys.exit(1)` in `_escalate_to_jvm_restart` when all
+  `_JVM_RESTART_MAX_ATTEMPTS` silent cool-down cycles have failed.
+  Format: `ALERT_JVM_RESTART_EXHAUSTED mode=<live|paper> attempts=N reason="..."`.
+  Tier 1 notification event per `futures-admin`'s
+  `docs/NOTIFICATIONS_MANIFEST.md`.
+- **`ALERT_2FA_FAILED` log token** — emitted in two terminal 2FA
+  failure paths: (a) `agent_settext_in_window` or `agent_click_in_window`
+  failed while entering the TOTP, (b) `TWOFA_TIMEOUT_ACTION=exit` or
+  `TWOFA_TIMEOUT_ACTION=restart` after `do_restart_in_place` failed.
+  Format: `ALERT_2FA_FAILED mode=<live|paper> reason="..."`.
+- **`_last_auth_success_ts` module state** — set to `time.time()` from
+  `_reset_ccp_backoff` on every successful auth. Surfaced via
+  `/health` so external monitoring can alert on "logged in at some
+  point but hasn't re-authed in hours" (e.g. daily-restart-failed).
+- **`__version__ = "0.4.9"` module constant** — exposed in the
+  `/health` JSON so deployed versions can be verified without
+  shelling into the container.
+- **Dockerfile `HEALTHCHECK` directive** — curls
+  `scripts/healthcheck.sh` every 30s with a 180s start-period (long
+  enough for the initial login pipeline to finish). In `DUAL_MODE=yes`
+  the script probes both the live port (default 8080) and the paper
+  port (8081) — either failure marks the container unhealthy.
+- New apt packages in the image: `curl` for the healthcheck shim.
+
+### Changed
+
+- `docker/run.sh` now mirrors the existing `CONTROLLER_COMMAND_SERVER_PORT`
+  dual-mode offset for `CONTROLLER_HEALTH_SERVER_PORT`: paper bumps
+  the configured port by one so both controllers can bind inside the
+  same container with a single env var.
+
+### Non-goals
+
+- No change to recovery behavior. The /health endpoint is a read-only
+  observability surface; no `POST /restart` or similar. Operators
+  continue to use the TCP command server (or `docker compose restart`)
+  for side-effects.
+- Concurrent-session CCP lockouts still require user-side logout to
+  clear — the software cannot resolve them. v0.4.9 makes them easier
+  to detect (ALERT_CCP_PERSISTENT via /health's `ccp_lockout_streak`)
+  but not easier to recover from.
+
 ## [0.4.8] - 2026-04-17
 
 ### Added

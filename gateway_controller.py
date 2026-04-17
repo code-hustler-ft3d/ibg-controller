@@ -31,6 +31,7 @@ import base64
 import enum
 import hashlib
 import hmac
+import json
 import logging
 import os
 import signal
@@ -40,8 +41,17 @@ import subprocess
 import sys
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import gi
+
+
+__version__ = "0.4.9"
+
+# Wall-clock timestamp recorded when the controller module loads. Reported
+# by the /health endpoint as `uptime_seconds` so monitoring can spot a
+# container that just restarted vs. one that's been stable.
+_CONTROLLER_START_TS = time.time()
 
 
 # ── Controller state machine ──────────────────────────────────────────
@@ -1527,11 +1537,17 @@ def handle_2fa(app):
                 log.info(f"Typing TOTP code into the 2FA dialog")
                 if not agent_settext_in_window(TWOFA_WINDOW_SUBSTR, code):
                     log.error("SETTEXT_IN_WIN on 2FA dialog failed")
+                    log.error(
+                        f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+                        "reason=\"agent SETTEXT_IN_WIN on 2FA dialog failed\"")
                     return False
                 time.sleep(0.5)
                 log.info("Clicking OK in 2FA dialog")
                 if not agent_click_in_window(TWOFA_WINDOW_SUBSTR, "OK"):
                     log.error("CLICK_IN_WIN OK on 2FA dialog failed")
+                    log.error(
+                        f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+                        "reason=\"agent CLICK_IN_WIN OK on 2FA dialog failed\"")
                     return False
                 log.info("2FA handled successfully")
                 _reset_ccp_backoff()
@@ -1601,6 +1617,9 @@ def handle_2fa(app):
     # Dispatch the configured timeout action.
     if timeout_action == "exit":
         log.error("TWOFA_TIMEOUT_ACTION=exit — controller exiting")
+        log.error(
+            f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+            "reason=\"2FA dialog timeout; TWOFA_TIMEOUT_ACTION=exit\"")
         try:
             os.unlink(READY_FILE)
         except FileNotFoundError:
@@ -1611,6 +1630,9 @@ def handle_2fa(app):
         if do_restart_in_place():
             return True
         log.error("Restart after 2FA timeout failed — exiting")
+        log.error(
+            f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+            "reason=\"2FA dialog timeout and do_restart_in_place failed\"")
         sys.exit(4)
     else:
         # 'none' or unrecognized — fall through to wait_for_api_port so
@@ -1969,6 +1991,11 @@ _ccp_lockout_streak = 0
 _CCP_STREAK_WARN_CONCURRENT = 2
 _CCP_STREAK_ALERT_PERSISTENT = 3
 
+# Wall-clock timestamp of the most recent successful auth. Reported via
+# the /health endpoint so monitoring can alert on "logged in at some
+# point but hasn't re-authed in too long". None until the first success.
+_last_auth_success_ts = None
+
 
 def _detect_ccp_lockout(timeout=25):
     """Poll launcher.log for CCP auth timeout within `timeout` seconds
@@ -2068,12 +2095,14 @@ def _apply_ccp_backoff():
 
 
 def _reset_ccp_backoff():
-    """Reset the backoff + lockout streak after a successful auth."""
-    global _ccp_backoff_seconds, _ccp_lockout_streak
+    """Reset the backoff + lockout streak after a successful auth. Also
+    records the auth success timestamp for /health reporting."""
+    global _ccp_backoff_seconds, _ccp_lockout_streak, _last_auth_success_ts
     if _ccp_backoff_seconds > 0:
         log.info("CCP backoff reset — auth succeeded")
         _ccp_backoff_seconds = 0.0
     _ccp_lockout_streak = 0
+    _last_auth_success_ts = time.time()
 
 
 def _detect_login_stuck_connecting():
@@ -2227,6 +2256,13 @@ def _escalate_to_jvm_restart(reason):
         log.error(f"JVM restart attempt {attempt} failed")
     log.error(f"JVM restart limit ({_JVM_RESTART_MAX_ATTEMPTS}) exhausted "
               "after silent cool-downs; exiting")
+    # Stable grep token for external monitoring. Emitted exactly once per
+    # terminal escalation. See docs/NOTIFICATIONS_MANIFEST.md in
+    # futures-admin for the Tier 1 contract.
+    log.error(
+        f"ALERT_JVM_RESTART_EXHAUSTED mode={TRADING_MODE} "
+        f"attempts={_JVM_RESTART_MAX_ATTEMPTS} "
+        f"reason=\"{reason}\"")
     sys.exit(1)
 
 
@@ -2681,6 +2717,12 @@ def main():
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
 
+    # Start the /health endpoint as the very first thing so monitoring
+    # can see "controller alive but not yet in MONITORING state" during
+    # a long login, and "no process bound" vs. "bound but 503" are
+    # distinguishable from the outside.
+    start_health_server()
+
     _set_state(State.LAUNCHING)
     # 1. Launch Gateway JVM
     global GATEWAY_PROC, CURRENT_APP, JVM_PID
@@ -3002,6 +3044,153 @@ def _command_server_main(host, port):
                 conn.close()
             except Exception:
                 pass
+
+
+# ── HTTP health endpoint (v0.4.9) ──────────────────────────────────────
+#
+# Separate from the TCP command server on purpose: monitoring tools
+# (futures-admin, Docker HEALTHCHECK, uptime checkers) want to curl a
+# URL, not speak the IBC text protocol. Keeping them separate also means
+# the command server can stay auth-gated without forcing monitoring to
+# carry a token.
+#
+# Protocol: GET /health → 200 with JSON if state==MONITORING and the
+# API port is open and the JVM process is alive, 503 with the same JSON
+# otherwise. Any other path or method → 404. The body is always JSON so
+# clients can parse it either way.
+#
+# Port selection mirrors the command server's dual-mode offset: paper
+# gets base+1 in docker/run.sh so both controllers can bind on the same
+# container with a single env var.
+
+_health_server_thread = None
+_health_server_httpd = None
+
+
+def _build_health_snapshot():
+    """Return a dict describing the controller's current health. Pure
+    read of module globals — safe to call from any thread. Does NOT
+    take locks; individual values may be racy but the overall shape is
+    consistent enough for monitoring purposes."""
+    api_port = api_port_for_mode()
+    api_open = False
+    try:
+        api_open = is_api_port_open(api_port)
+    except Exception:
+        api_open = False
+
+    jvm_pid = JVM_PID
+    jvm_alive = False
+    if GATEWAY_PROC is not None:
+        try:
+            jvm_alive = GATEWAY_PROC.poll() is None
+        except Exception:
+            jvm_alive = False
+
+    now = time.time()
+    last_auth_ts = _last_auth_success_ts
+    last_auth_age = None
+    if last_auth_ts is not None:
+        last_auth_age = max(0.0, now - last_auth_ts)
+
+    state_name = _current_state.value if _current_state is not None else "UNKNOWN"
+    healthy = (
+        state_name == State.MONITORING.value
+        and api_open
+        and jvm_alive
+    )
+
+    return {
+        "status": "healthy" if healthy else "unhealthy",
+        "version": __version__,
+        "mode": TRADING_MODE,
+        "state": state_name,
+        "jvm_pid": jvm_pid,
+        "jvm_alive": jvm_alive,
+        "api_port": api_port,
+        "api_port_open": api_open,
+        "last_auth_success_ts": last_auth_ts,
+        "last_auth_success_age_seconds": last_auth_age,
+        "ccp_lockout_streak": _ccp_lockout_streak,
+        "ccp_backoff_seconds": _ccp_backoff_seconds,
+        "uptime_seconds": max(0.0, now - _CONTROLLER_START_TS),
+    }
+
+
+class _HealthHandler(BaseHTTPRequestHandler):
+    """Minimal GET /health handler. Also serves /ready as a shallower
+    probe (always 200 as long as the process is running — useful for
+    Kubernetes-style readiness where "process up" is the signal).
+    """
+
+    def log_message(self, format, *args):
+        # Silence the default stderr access log. The controller's own
+        # logger stays the single source of truth, and Docker
+        # HEALTHCHECK would otherwise spam stderr every 30s.
+        return
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0].rstrip("/") or "/"
+        if path == "/health":
+            snapshot = _build_health_snapshot()
+            body = json.dumps(snapshot).encode("utf-8")
+            status = 200 if snapshot["status"] == "healthy" else 503
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if path == "/ready":
+            body = b'{"status":"up"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_response(404)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error":"not_found"}')
+
+
+def start_health_server():
+    """Start the /health HTTP server in a daemon thread if
+    CONTROLLER_HEALTH_SERVER_PORT is set. No-op otherwise. Safe to call
+    more than once — idempotent on the module thread global."""
+    global _health_server_thread, _health_server_httpd
+    if _health_server_thread is not None and _health_server_thread.is_alive():
+        return
+    port_str = os.environ.get("CONTROLLER_HEALTH_SERVER_PORT", "").strip()
+    if not port_str:
+        log.info("Health server: CONTROLLER_HEALTH_SERVER_PORT not set, skipping")
+        return
+    try:
+        port = int(port_str)
+    except ValueError:
+        log.warning(f"Health server: invalid port {port_str!r}, skipping")
+        return
+    host = os.environ.get("CONTROLLER_HEALTH_SERVER_HOST", "0.0.0.0").strip()
+
+    try:
+        httpd = HTTPServer((host, port), _HealthHandler)
+    except Exception as e:
+        log.error(f"Health server: bind/listen failed: {type(e).__name__}: {e}")
+        return
+    _health_server_httpd = httpd
+
+    def _serve():
+        try:
+            httpd.serve_forever(poll_interval=0.5)
+        except Exception as e:
+            log.warning(f"Health server: serve_forever error: {type(e).__name__}: {e}")
+
+    _health_server_thread = threading.Thread(
+        target=_serve, daemon=True, name="health-server")
+    _health_server_thread.start()
+    log.info(f"Health server: listening on {host}:{port} (GET /health, /ready)")
 
 
 def _teardown_jvm_for_restart():

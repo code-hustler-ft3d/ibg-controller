@@ -32,6 +32,7 @@ What's NOT covered by this file (tracked separately):
 
 import os
 import sys
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -774,6 +775,173 @@ class TestCcpLockoutStreak(unittest.TestCase):
         self.assertIn("CCP LOCKOUT DETECTED", output)
         self.assertNotIn("concurrent IBKR session", output)
         self.assertNotIn("ALERT_CCP_PERSISTENT", output)
+
+
+class TestAlertJvmRestartExhausted(unittest.TestCase):
+    """v0.4.9: after _JVM_RESTART_MAX_ATTEMPTS failed silent cool-down
+    cycles, _escalate_to_jvm_restart emits the stable grep token
+    ALERT_JVM_RESTART_EXHAUSTED before sys.exit(1). External monitoring
+    greps this token to fire a Tier 1 push notification.
+
+    Contract (for futures-admin NOTIFICATIONS_MANIFEST.md):
+      ALERT_JVM_RESTART_EXHAUSTED mode=<live|paper> attempts=N reason="..."
+    Stable prefix, key=value pairs, one line per terminal escalation."""
+
+    def test_emits_alert_token_before_exit(self):
+        with patch.object(gc, "_teardown_jvm_for_restart"), \
+             patch.object(gc, "_apply_ccp_long_cooldown"), \
+             patch.object(gc, "_relaunch_and_login_in_place", return_value=False), \
+             patch.object(gc, "_reset_ccp_backoff"):
+            with self.assertLogs("controller", level="ERROR") as ctx:
+                with self.assertRaises(SystemExit):
+                    gc._escalate_to_jvm_restart("unit test exhaustion")
+        output = "\n".join(ctx.output)
+        self.assertIn("ALERT_JVM_RESTART_EXHAUSTED", output)
+        self.assertIn("mode=", output)
+        self.assertIn(f"attempts={gc._JVM_RESTART_MAX_ATTEMPTS}", output)
+        self.assertIn("reason=\"unit test exhaustion", output)
+
+    def test_no_alert_token_on_success_path(self):
+        # Successful recovery must NOT emit the terminal alert token.
+        with patch.object(gc, "_teardown_jvm_for_restart"), \
+             patch.object(gc, "_apply_ccp_long_cooldown"), \
+             patch.object(gc, "_relaunch_and_login_in_place", return_value=True), \
+             patch.object(gc, "_reset_ccp_backoff"):
+            with self.assertLogs("controller", level="INFO") as ctx:
+                gc._escalate_to_jvm_restart("should succeed")
+        output = "\n".join(ctx.output)
+        self.assertNotIn("ALERT_JVM_RESTART_EXHAUSTED", output)
+
+
+class TestLastAuthSuccessTs(unittest.TestCase):
+    """v0.4.9: _reset_ccp_backoff records a wall-clock timestamp so the
+    /health endpoint can report `last_auth_success_age_seconds`. Used
+    by external monitoring to alert on 'logged in earlier but hasn't
+    re-authed in too long'."""
+
+    def setUp(self):
+        gc._ccp_backoff_seconds = 0.0
+        gc._ccp_lockout_streak = 0
+        gc._last_auth_success_ts = None
+
+    def test_starts_as_none(self):
+        self.assertIsNone(gc._last_auth_success_ts)
+
+    def test_reset_records_timestamp(self):
+        before = time.time()
+        gc._reset_ccp_backoff()
+        after = time.time()
+        self.assertIsNotNone(gc._last_auth_success_ts)
+        self.assertGreaterEqual(gc._last_auth_success_ts, before)
+        self.assertLessEqual(gc._last_auth_success_ts, after)
+
+    def test_reset_updates_timestamp_each_call(self):
+        gc._reset_ccp_backoff()
+        first = gc._last_auth_success_ts
+        time.sleep(0.01)
+        gc._reset_ccp_backoff()
+        self.assertGreater(gc._last_auth_success_ts, first)
+
+
+class TestHealthSnapshot(unittest.TestCase):
+    """v0.4.9: /health returns a JSON snapshot of the controller's
+    current state. Healthy = state==MONITORING AND api_port_open AND
+    JVM process still alive. Anything else = unhealthy (HTTP 503)."""
+
+    def setUp(self):
+        gc._current_state = gc.State.MONITORING
+        gc.JVM_PID = 12345
+        gc.GATEWAY_PROC = MagicMock()
+        gc.GATEWAY_PROC.poll.return_value = None  # alive
+        gc._ccp_lockout_streak = 0
+        gc._ccp_backoff_seconds = 0.0
+        gc._last_auth_success_ts = None
+
+    def tearDown(self):
+        gc.GATEWAY_PROC = None
+        gc.JVM_PID = None
+
+    def test_shape_contains_required_keys(self):
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        for key in ("status", "version", "mode", "state", "jvm_pid",
+                    "jvm_alive", "api_port", "api_port_open",
+                    "last_auth_success_ts", "last_auth_success_age_seconds",
+                    "ccp_lockout_streak", "ccp_backoff_seconds",
+                    "uptime_seconds"):
+            self.assertIn(key, snap, f"missing key: {key}")
+
+    def test_healthy_when_monitoring_and_port_open(self):
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["status"], "healthy")
+        self.assertTrue(snap["api_port_open"])
+        self.assertTrue(snap["jvm_alive"])
+
+    def test_unhealthy_when_not_in_monitoring_state(self):
+        gc._current_state = gc.State.LOGIN
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["status"], "unhealthy")
+        self.assertEqual(snap["state"], "LOGIN")
+
+    def test_unhealthy_when_api_port_closed(self):
+        with patch.object(gc, "is_api_port_open", return_value=False):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["status"], "unhealthy")
+        self.assertFalse(snap["api_port_open"])
+
+    def test_unhealthy_when_jvm_dead(self):
+        gc.GATEWAY_PROC.poll.return_value = 1  # exited with code 1
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["status"], "unhealthy")
+        self.assertFalse(snap["jvm_alive"])
+
+    def test_api_port_matches_trading_mode(self):
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["api_port"], gc.api_port_for_mode())
+
+    def test_last_auth_age_none_when_never_set(self):
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertIsNone(snap["last_auth_success_ts"])
+        self.assertIsNone(snap["last_auth_success_age_seconds"])
+
+    def test_last_auth_age_computed_from_timestamp(self):
+        gc._last_auth_success_ts = time.time() - 42.0
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertGreaterEqual(snap["last_auth_success_age_seconds"], 42.0)
+        self.assertLess(snap["last_auth_success_age_seconds"], 45.0)
+
+    def test_ccp_streak_and_backoff_surfaced(self):
+        gc._ccp_lockout_streak = 3
+        gc._ccp_backoff_seconds = 120.0
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["ccp_lockout_streak"], 3)
+        self.assertEqual(snap["ccp_backoff_seconds"], 120.0)
+
+    def test_serializes_cleanly_to_json(self):
+        import json
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        # json.dumps raises if any value isn't serializable — critical
+        # for the /health endpoint since it json.dumps the snapshot.
+        body = json.dumps(snap)
+        self.assertIsInstance(body, str)
+
+    def test_version_field_is_module_version(self):
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["version"], gc.__version__)
+
+    def test_uptime_is_nonnegative(self):
+        with patch.object(gc, "is_api_port_open", return_value=True):
+            snap = gc._build_health_snapshot()
+        self.assertGreaterEqual(snap["uptime_seconds"], 0)
 
 
 if __name__ == "__main__":

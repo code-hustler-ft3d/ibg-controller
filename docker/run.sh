@@ -197,6 +197,24 @@ start_controller() {
 		echo ".>		command-server-port: ${CONTROLLER_COMMAND_SERVER_PORT}"
 	fi
 
+	# Dual-mode health server port offset (v0.4.9). Same pattern as the
+	# command server: paper bumps by one so both controllers can bind on
+	# the same container with a single env var. Dockerfile sets the
+	# default to 8080; paper gets 8081 in dual-mode. scripts/healthcheck.sh
+	# knows about the offset.
+	if [ -n "${CONTROLLER_HEALTH_SERVER_PORT:-}" ] && [ "${DUAL_MODE:-}" = "yes" ]; then
+		if [ "$TRADING_MODE" = "paper" ]; then
+			_hsp_base="${CONTROLLER_HEALTH_SERVER_PORT}"
+			CONTROLLER_HEALTH_SERVER_PORT=$((_hsp_base + 1))
+			export CONTROLLER_HEALTH_SERVER_PORT
+			echo ".>		health-server-port: ${CONTROLLER_HEALTH_SERVER_PORT} (dual-mode paper offset from ${_hsp_base})"
+		else
+			echo ".>		health-server-port: ${CONTROLLER_HEALTH_SERVER_PORT} (dual-mode live)"
+		fi
+	elif [ -n "${CONTROLLER_HEALTH_SERVER_PORT:-}" ]; then
+		echo ".>		health-server-port: ${CONTROLLER_HEALTH_SERVER_PORT}"
+	fi
+
 	echo ".>		agent-socket: ${GATEWAY_INPUT_AGENT_SOCKET}"
 	echo ".>		ready-file:   ${CONTROLLER_READY_FILE}"
 	echo ".>		jts-config:   ${TWS_SETTINGS_PATH:-$TWS_PATH}"
