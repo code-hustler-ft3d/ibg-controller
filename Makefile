@@ -13,7 +13,7 @@
 # Version is overridable on the command line:
 #   make release VERSION=0.2.0
 
-VERSION          ?= 0.4.9
+VERSION          ?= 0.5.1
 NAME             := ibg-controller
 DIST             := dist
 AGENT_SRC        := agent/GatewayInputAgent.java
@@ -54,7 +54,10 @@ release: all
 	cp README.md LICENSE CHANGELOG.md $(DIST)/$(NAME)-$(VERSION)/
 	cp docs/*.md $(DIST)/$(NAME)-$(VERSION)/docs/
 	cp scripts/install.sh $(DIST)/$(NAME)-$(VERSION)/install.sh
-	chmod +x $(DIST)/$(NAME)-$(VERSION)/install.sh
+	cp scripts/ibc_config_to_env.py \
+	  $(DIST)/$(NAME)-$(VERSION)/ibc_config_to_env.py
+	chmod +x $(DIST)/$(NAME)-$(VERSION)/install.sh \
+	         $(DIST)/$(NAME)-$(VERSION)/ibc_config_to_env.py
 	tar -czf $(DIST)/$(NAME)-$(VERSION).tar.gz -C $(DIST) $(NAME)-$(VERSION)
 	rm -rf $(DIST)/$(NAME)-$(VERSION)
 	@echo "Release tarball: $(DIST)/$(NAME)-$(VERSION).tar.gz"

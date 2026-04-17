@@ -125,3 +125,79 @@ jobs:
           print(f"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}")
           print(f"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries")
           PY
+
+  gateway-version-matrix:
+    runs-on: ubuntu-24.04
+    needs: build-and-test
+    # Build the shipped Dockerfile against multiple gnzsnz/ib-gateway
+    # upstream tags so we catch breakage from an upstream layout change
+    # (JRE path, apt package rename, userid shift) before users do.
+    #
+    # The matrix covers the two Gateway versions we actively verify
+    # against — the prior stable (10.44.1g) and the current stable
+    # (10.45.1c). Add a new entry here when bumping verified versions
+    # in README.md / docs/FROM_IBC.md.
+    strategy:
+      fail-fast: false
+      matrix:
+        upstream:
+          - ghcr.io/gnzsnz/ib-gateway:10.44.1g
+          - ghcr.io/gnzsnz/ib-gateway:10.45.1c
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install host tools used by the Makefile
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends make unzip
+
+      - name: make (populate dist/ for COPY)
+        run: make
+
+      - name: Build image against ${{ matrix.upstream }}
+        run: |
+          docker build \
+            --build-arg UPSTREAM_IMAGE=${{ matrix.upstream }} \
+            -t ibg-controller:matrix-test .
+
+      - name: Container-level module-load smoke test
+        # Verify gateway_controller.py imports cleanly against the JRE +
+        # AT-SPI + ATK-bridge wiring inside the built image. Catches
+        # upstream base-image drift (missing libs, changed paths) at CI
+        # time rather than at runtime on a user's host.
+        env:
+          TWS_USERID: x
+          TWS_PASSWORD: x
+          TRADING_MODE: paper
+        run: |
+          docker run --rm \
+            -e TWS_USERID -e TWS_PASSWORD -e TRADING_MODE \
+            --entrypoint python3 \
+            ibg-controller:matrix-test \
+            -c 'import sys; sys.path.insert(0, "/home/ibgateway/scripts"); import gateway_controller as gc; print(f"OK upstream={gc.__version__} TRADING_MODE={gc.TRADING_MODE}")'
+
+      - name: Verify ATK bridge wiring inside image
+        # accessibility.properties must be present in the Gateway JRE
+        # conf dir, and libatk-wrapper.so must live in the JRE lib dir.
+        # Checks both without starting Gateway itself.
+        run: |
+          docker run --rm --entrypoint bash ibg-controller:matrix-test -c '
+            set -e
+            GW_JAVA=$(find /usr/local/i4j_jres -name java -type f 2>/dev/null | head -1)
+            if [ -z "$GW_JAVA" ]; then
+              GW_JAVA=$(find /usr/local -path "*/zulu*/bin/java" -type f 2>/dev/null | head -1)
+            fi
+            JAVA_HOME=$(dirname $(dirname "$GW_JAVA"))
+            echo "JAVA_HOME=$JAVA_HOME"
+            test -f "$JAVA_HOME/conf/accessibility.properties" \
+              && echo "OK accessibility.properties present"
+            ls "$JAVA_HOME/lib/" | grep -q libatk-wrapper \
+              && echo "OK libatk-wrapper.so in JRE lib dir"
+          '

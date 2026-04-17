@@ -34,6 +34,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import struct
@@ -46,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import gi
 
 
-__version__ = "0.4.9"
+__version__ = "0.5.1"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -1237,6 +1238,54 @@ def handle_login(app):
     return True
 
 
+# Password-expiry dialog detection. Gateway/TWS surfaces these after a
+# successful login when the account's password is within IBKR's
+# rotation window. Two known variants:
+#   "Your password will expire in N days. Please change it ..."
+#   "Your password has expired. You must change it ..."
+# The first is informational (login still proceeded); the second is
+# blocking (login can't complete until rotation, which has to happen
+# in IBKR's web portal — we can't automate that side). Either way the
+# right thing is to emit a stable grep-contract alert that distinguishes
+# the two so external monitoring can notify the operator *before* the
+# account locks out, and escalate differently once it has.
+# The outer caller (handle_post_login_dialogs) gates on the dump already
+# containing "password" plus "expire"/"expired"; these regexes only have
+# to classify the wording.
+_PASSWORD_EXPIRED_MATCH = re.compile(r"has\s+expired", re.IGNORECASE)
+_PASSWORD_WARNING_MATCH = re.compile(
+    r"(?:will\s+expire|expires\s+in\s+\d+\s+day)",
+    re.IGNORECASE,
+)
+_PASSWORD_EXPIRY_DAYS = re.compile(
+    r"expire(?:s)?\s+in\s+(\d+)\s+day",
+    re.IGNORECASE,
+)
+
+
+def _detect_password_expiry(dump):
+    """Parse a window dump for password-expiry wording.
+
+    Returns ``(matched, status, days_remaining)``:
+      - ``matched`` is True iff the dump contains expiry wording.
+      - ``status`` is ``"expired"`` (already-rotated-past, login blocked)
+        or ``"warning"`` (advance notice, login still proceeds). ``None``
+        when ``matched`` is False.
+      - ``days_remaining`` is the integer extracted from "expire(s) in N
+        day(s)" if present, else ``None``. Always ``None`` for
+        ``"expired"`` status — the "has expired" variant doesn't carry a
+        day count.
+    """
+    if not dump:
+        return False, None, None
+    if _PASSWORD_EXPIRED_MATCH.search(dump):
+        return True, "expired", None
+    if _PASSWORD_WARNING_MATCH.search(dump):
+        m = _PASSWORD_EXPIRY_DAYS.search(dump)
+        return True, "warning", int(m.group(1)) if m else None
+    return False, None, None
+
+
 def handle_post_login_dialogs(app):
     """Inspect any modal dialog that appears right after the Log In click,
     handle the ones we recognize, and leave the rest alone.
@@ -1291,6 +1340,50 @@ def handle_post_login_dialogs(app):
             if not handle_existing_session_dialog():
                 log.error("Existing-session dialog handling failed")
                 return False
+        elif "password" in body_lower and (
+                "expire" in body_lower or "expired" in body_lower):
+            matched, status, days = _detect_password_expiry(dump)
+            if matched:
+                if status == "expired":
+                    log.error(
+                        f"ALERT_PASSWORD_EXPIRED status=expired "
+                        f"mode={TRADING_MODE} "
+                        f"suggested_action=\"password has expired; "
+                        f"rotate in IBKR Account Settings before login "
+                        f"will succeed again, then update TWS_PASSWORD\"")
+                elif days is not None:
+                    log.error(
+                        f"ALERT_PASSWORD_EXPIRED status=warning "
+                        f"mode={TRADING_MODE} "
+                        f"days_remaining={days} "
+                        f"suggested_action=\"rotate IBKR password in "
+                        f"Account Settings within {days} days to avoid "
+                        f"lockout; update TWS_PASSWORD after rotation\"")
+                else:
+                    log.error(
+                        f"ALERT_PASSWORD_EXPIRED status=warning "
+                        f"mode={TRADING_MODE} "
+                        f"suggested_action=\"rotate IBKR password soon; "
+                        f"dialog didn't report remaining days — check "
+                        f"IBKR Account Settings for the exact date, then "
+                        f"update TWS_PASSWORD after rotation\"")
+                # IBC-compat: dismiss so the warning variant doesn't
+                # block the rest of the post-login flow. The blocking
+                # "already expired" variant will re-appear or the login
+                # will fail downstream; either way we've emitted the
+                # alert.
+                dismissed = False
+                for btn in ("OK", "Continue", "Acknowledge", "Close"):
+                    if btn in dump and agent_click_in_window(title, btn):
+                        log.info(f"Dismissed password-expiry dialog via '{btn}'")
+                        dismissed = True
+                        break
+                if not dismissed:
+                    log.warning(
+                        "Password-expiry dialog detected but no known "
+                        "dismiss button present; leaving dialog in place")
+            else:
+                log.info("Unrecognized 'password' dialog — leaving in place")
         else:
             log.info(f"Unrecognized modal — leaving in place to let Gateway flow proceed")
 
@@ -1650,25 +1743,26 @@ def dismiss_post_login_disclaimers(timeout=30):
     risk disclaimer, terms-of-service updates, etc.) that IBC normally
     auto-clicks via its BypassWarning-style settings.
 
+    Iterates SAFE_DISMISS_BUTTONS in preferred order (built-in defaults
+    first, then any BYPASS_WARNING extensions). This is the same
+    allowlist the opportunistic sweep in wait_for_api_port uses — keeps
+    BYPASS_WARNING semantics consistent across every dismissal path the
+    controller runs.
+
     We're conservative about which buttons we'll click — only ones that are
     UNAMBIGUOUSLY safe-to-dismiss disclaimer buttons. We deliberately do
     NOT click bare 'OK' because earlier testing showed that clicking OK on
     the 'Gateway' connection-progress dialog actually CANCELS the login.
+    _resolve_safe_dismiss_buttons refuses bare 'OK' even if BYPASS_WARNING
+    names it.
     """
-    SAFE_BUTTONS = [
-        "I understand and accept",
-        "I Understand And Accept",
-        "I Accept",
-        "Acknowledge",
-        "Accept and Continue",
-    ]
     log.info("Looking for post-login disclaimer dialogs to dismiss")
     deadline = time.monotonic() + timeout
     dismissed = 0
     while time.monotonic() < deadline:
         _, buttons = agent_list()
         target = None
-        for btn in SAFE_BUTTONS:
+        for btn in SAFE_DISMISS_BUTTONS:
             if btn in buttons:
                 target = btn
                 break
@@ -1684,23 +1778,31 @@ def dismiss_post_login_disclaimers(timeout=30):
         time.sleep(1.5)  # let the dialog dismiss; another may appear
 
 
-_DEFAULT_SAFE_DISMISS_BUTTONS = {
+_DEFAULT_SAFE_DISMISS_BUTTONS = (
     "I understand and accept",
     "I Understand And Accept",
     "I Accept",
     "Acknowledge",
     "Accept and Continue",
-}
+)
 
 
 def _resolve_safe_dismiss_buttons():
     """IBC-compat: let users extend the disclaimer allowlist via env.
 
-    BYPASS_WARNING (comma-separated button labels) adds entries to the
-    allowlist that dismiss_post_login_disclaimers() will click. Users
-    migrating from IBC who relied on IBC's BYPASS_WARNING /
-    BYPASS_NO_SECURITY_DIALOG behavior can reproduce it by setting
-    BYPASS_WARNING to the exact button text they want auto-dismissed.
+    BYPASS_WARNING (comma-separated button labels) appends entries to
+    the allowlist after the built-in defaults, in user-specified order.
+    Consumed by both dismiss_post_login_disclaimers() and the
+    opportunistic sweep inside wait_for_api_port() — so BYPASS_WARNING
+    takes effect everywhere the controller dismisses disclaimers, not
+    just one of those paths. Users migrating from IBC who relied on
+    IBC's BypassWarning / BypassNoSecurityDialog behaviour can
+    reproduce it by setting BYPASS_WARNING to the exact button text
+    they want auto-dismissed.
+
+    Returns an ordered tuple so click-preference is deterministic: the
+    built-in set first (most common disclaimer labels), then
+    user-added entries in the order they appear in the env var.
 
     Safety: we still refuse to dismiss bare "OK" even if the user
     names it — clicking OK on Gateway's "Connecting to server..."
@@ -1708,7 +1810,8 @@ def _resolve_safe_dismiss_buttons():
     dialog is unrecognizable from an informational popup, so "OK" is
     permanently on the deny list.
     """
-    allowlist = set(_DEFAULT_SAFE_DISMISS_BUTTONS)
+    ordered = list(_DEFAULT_SAFE_DISMISS_BUTTONS)
+    seen = set(ordered)
     extra_raw = os.environ.get("BYPASS_WARNING", "").strip()
     if extra_raw:
         # Allow comma-separated OR semicolon-separated for convenience
@@ -1717,18 +1820,21 @@ def _resolve_safe_dismiss_buttons():
         for p in parts:
             if not p:
                 continue
-            if p.strip().lower() == "ok":
+            if p.lower() == "ok":
                 log.warning("BYPASS_WARNING: refusing to add bare 'OK' to "
                             "the dismiss allowlist — clicking OK on "
                             "Gateway's 'Connecting to server...' modal "
                             "cancels the login. Use the exact dialog "
                             "button text instead.")
                 continue
-            allowlist.add(p)
+            if p in seen:
+                continue
+            ordered.append(p)
+            seen.add(p)
             added.append(p)
         if added:
             log.info(f"BYPASS_WARNING: extended dismiss allowlist with {added}")
-    return allowlist
+    return tuple(ordered)
 
 
 SAFE_DISMISS_BUTTONS = _resolve_safe_dismiss_buttons()
@@ -2348,15 +2454,36 @@ def attempt_inplace_relogin(app):
         except Exception:
             body = ""
         body_lower = body.lower()
-        error_markers = (
+        # Split error markers into credential-rejection vs connection
+        # failures. Credential rejection warrants the stable
+        # ALERT_LOGIN_FAILED grep-contract token so monitors can tell a
+        # wrong-password account lockout apart from an IBKR silent
+        # cooldown (ALERT_CCP_PERSISTENT). Connection failures stay
+        # un-alerted here because they're covered by the CCP backoff
+        # path upstream.
+        credential_error_markers = (
             "login failed",
             "login error",
+            "authentication failed",
+        )
+        network_error_markers = (
             "could not be performed",
             "unable to connect",
-            "authentication failed",
             "server cannot be reached",
         )
-        if any(m in body_lower for m in error_markers):
+        is_credential_error = any(
+            m in body_lower for m in credential_error_markers)
+        is_network_error = any(
+            m in body_lower for m in network_error_markers)
+        if is_credential_error or is_network_error:
+            if is_credential_error:
+                log.error(
+                    f"ALERT_LOGIN_FAILED mode={TRADING_MODE} "
+                    f"reason=\"bad-credentials\" "
+                    f"suggested_action=\"Gateway surfaced a credential-"
+                    f"rejection modal; verify TWS_USERID / TWS_PASSWORD "
+                    f"(or _PAPER variants) and update env if password "
+                    f"was rotated in IBKR Account Settings\"")
             log.info(f"In-JVM relogin: dismissing error modal: {title!r}")
             for btn in ("OK", "Close"):
                 if agent_click_in_window(title, btn):
@@ -2580,6 +2707,13 @@ def _diagnose_login_failure():
         return
 
     if has_ns_auth_start and not has_timeout:
+        log.error(
+            f"ALERT_LOGIN_FAILED mode={TRADING_MODE} "
+            f"reason=\"post-auth-no-progress\" "
+            f"suggested_action=\"server accepted the auth handshake but "
+            f"login never completed; verify TWS_USERID / TWS_PASSWORD "
+            f"(or _PAPER variants) and scan logs for an unrecognized "
+            f"post-auth dialog\"")
         log.error("Diagnosis: auth request sent, server responded with "
                   "NS_AUTH_START, but we never reached PostAuthenticate.")
         log.error("  Most likely causes:")
@@ -2590,6 +2724,14 @@ def _diagnose_login_failure():
         return
 
     if has_ns_auth_start and has_timeout:
+        log.error(
+            f"ALERT_LOGIN_FAILED mode={TRADING_MODE} "
+            f"reason=\"bad-credentials\" "
+            f"suggested_action=\"IBKR rejected the credentials after "
+            f"the handshake (NS_AUTH_START present, then timeout); "
+            f"verify TWS_USERID / TWS_PASSWORD (or _PAPER variants) "
+            f"and update env if password was rotated in IBKR Account "
+            f"Settings\"")
         log.error("Diagnosis: auth request sent, server responded with "
                   "NS_AUTH_START, then auth timed out. Credentials were "
                   "probably rejected — verify TWS_USERID / TWS_PASSWORD.")
@@ -2622,12 +2764,16 @@ def wait_for_api_port(timeout=180):
             log.info(f"API port {api_port} accepting connections after {elapsed}s")
             return True
 
-        # Opportunistically dismiss disclaimer dialogs each iteration
+        # Opportunistically dismiss disclaimer dialogs each iteration.
+        # Iterate SAFE_DISMISS_BUTTONS in order so BYPASS_WARNING-added
+        # entries click deterministically, matching the order used by
+        # dismiss_post_login_disclaimers().
         _, buttons = agent_list()
-        for btn in SAFE_DISMISS_BUTTONS & buttons:
-            log.info(f"  dismissing disclaimer {btn!r}")
-            agent_click(btn)
-            time.sleep(0.5)
+        for btn in SAFE_DISMISS_BUTTONS:
+            if btn in buttons:
+                log.info(f"  dismissing disclaimer {btn!r}")
+                agent_click(btn)
+                time.sleep(0.5)
 
         # Log progress every 10s with a snapshot of current windows
         now = time.monotonic()

@@ -12,8 +12,11 @@ image. If you're running vanilla IBC today, the swap requires:
 
 Existing env vars (`TWS_USERID`, `TWS_PASSWORD`, `TRADING_MODE`,
 `TWOFACTOR_CODE`, `EXISTING_SESSION_DETECTED_ACTION`, etc.) work
-unchanged. Your IBC config is not needed — the controller reads env
-vars directly.
+unchanged. The controller reads env vars directly — it doesn't parse
+`config.ini`. If you already have an IBC `config.ini` that isn't
+already mirrored into env vars, [`FROM_IBC.md`](FROM_IBC.md) documents
+the IBC-key → env-var mapping and ships a one-shot
+`ibc_config_to_env.py` that does the conversion for you.
 
 ## What changes in your Dockerfile
 

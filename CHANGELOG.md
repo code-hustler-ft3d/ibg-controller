@@ -4,6 +4,93 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-04-17
+
+### Added
+
+- New **`ALERT_LOGIN_FAILED`** grep-contract log token. Emitted when
+  Gateway surfaces a credential-rejection modal during in-JVM relogin
+  (`reason="bad-credentials"`) or when the terminal-failure path in
+  `_diagnose_login_failure` matches a bad-password `launcher.log`
+  fingerprint (`reason="bad-credentials"` or
+  `reason="post-auth-no-progress"`). Closes an observability gap:
+  previously a stale `TWS_PASSWORD` (password rotated in the IBKR
+  portal but not yet mirrored into the container env) would surface
+  only as `ALERT_CCP_PERSISTENT` after the CCP streak hit its
+  threshold — by which time the account could already be locked out.
+  `ALERT_LOGIN_FAILED` fires on the first rejected attempt so
+  monitoring can page before the streak escalates. Format:
+  `ALERT_LOGIN_FAILED mode=<live|paper> reason="<bad-credentials|post-auth-no-progress>" suggested_action="..."`.
+  Full grep-contract + dedupe guidance:
+  [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md#alert_login_failed).
+
+### Fixed
+
+- **`BYPASS_WARNING` is now honored everywhere the controller
+  dismisses disclaimers**, not just opportunistically inside
+  `wait_for_api_port`. Previously `dismiss_post_login_disclaimers`
+  (called on initial login, after RESTART, and after re-auth)
+  hardcoded a local `SAFE_BUTTONS` list and ignored the env var,
+  contradicting README and `FROM_IBC.md` claims. The module-level
+  `SAFE_DISMISS_BUTTONS` is now an ordered tuple built once at import
+  (built-in defaults first, then `BYPASS_WARNING` additions in
+  user-specified order) and consumed by both dismissal paths. Users
+  who had `BYPASS_WARNING` set were only getting partial coverage
+  before; no behaviour change for users on defaults.
+
+### Non-goals
+
+- `ALERT_LOGIN_FAILED` is a detection signal, not a corrective
+  action. The controller still retries login in the usual CCP-backoff
+  pattern after emitting the alert; stopping retries automatically
+  risks false positives on transient IBKR auth glitches. If the
+  alert fires repeatedly and the credentials are genuinely wrong,
+  the operator should stop the container to avoid account lockout.
+
+## [0.5.0] - 2026-04-17
+
+### Added
+
+- **Password-expiry dialog handler + `ALERT_PASSWORD_EXPIRED` log token**.
+  Closes a real IBC-parity gap: Gateway/TWS surface a "Your password will
+  expire in N days" modal after login inside IBKR's rotation window, and
+  a "Your password has expired" blocker once the window closes. Without
+  a handler, the warning variant could silently pass through (no alert
+  to the operator before lockout) and the blocker variant would chew
+  through CCP retries on an auth that can't succeed.
+  `handle_post_login_dialogs` now recognizes the wording, classifies
+  it as `status=warning` (parses `days_remaining` when the dialog
+  reports it) or `status=expired` (login-blocking), emits the stable
+  grep-contract line
+  `ALERT_PASSWORD_EXPIRED status=<warning|expired> mode=<live|paper> [days_remaining=N] suggested_action="..."`,
+  and clicks OK/Continue/Acknowledge/Close to dismiss. External
+  monitoring (the same `ALERT_*` pipeline as v0.4.8/v0.4.9) can now
+  notify the operator to rotate the IBKR password *before* the account
+  locks out — a gap IBC's own PasswordExpiryWarningDialogHandler doesn't
+  close in the same structured way.
+- New `scripts/ibc_config_to_env.py` one-shot migration tool: parses an
+  existing IBC `config.ini`, maps each honored key to the equivalent
+  ibg-controller env var, and emits `env`, `docker`, or `compose` output.
+  Warns on unsupported IBC keys (FIX, CustomConfig, MinimizeMainWindow,
+  etc.). Lowers the "rewrite 50 lines of config" barrier for IBC users
+  evaluating a switch.
+- New `docs/FROM_IBC.md` migration guide: IBC-key → controller env-var
+  mapping table, step-by-step cutover recipe, rollback path,
+  behaviour-difference notes (command-server auth, per-mode usernames,
+  CCP backoff semantics, observability endpoints).
+- New CI job `gateway-version-matrix` that builds the shipped
+  `Dockerfile` against multiple `UPSTREAM_IMAGE` tags and runs a
+  container-level module-load smoke test inside each. Catches breakage
+  in the AT-SPI / JRE-bridge wiring when the base image moves across
+  Gateway versions, without needing live IBKR creds.
+
+### Non-goals
+
+- The blocking "password has expired" variant still can't be
+  auto-recovered by the software — rotation has to happen in IBKR's
+  web portal. v0.5.0 makes detection observable; it does not try to
+  drive the change-password dialog headless.
+
 ## [0.4.9] - 2026-04-17
 
 ### Added

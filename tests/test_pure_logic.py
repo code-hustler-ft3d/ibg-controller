@@ -944,5 +944,174 @@ class TestHealthSnapshot(unittest.TestCase):
         self.assertGreaterEqual(snap["uptime_seconds"], 0)
 
 
+class TestDetectPasswordExpiry(unittest.TestCase):
+    """v0.5.0: _detect_password_expiry() parses a dialog window-dump for
+    Gateway/TWS password-expiry wording and returns ``(matched, status,
+    days_remaining)``. ``status`` is ``"expired"`` (login blocked) or
+    ``"warning"`` (advance notice). Downstream handler emits
+    ``ALERT_PASSWORD_EXPIRED status=...`` based on the three-state return.
+
+    Grep-contract for external monitors (see docs/OBSERVABILITY.md):
+      ALERT_PASSWORD_EXPIRED status=<warning|expired> mode=<live|paper> [days_remaining=N] suggested_action="..."
+    """
+
+    def test_warning_variant_with_days(self):
+        dump = "Password Notice\nYour password will expire in 14 days."
+        matched, status, days = gc._detect_password_expiry(dump)
+        self.assertTrue(matched)
+        self.assertEqual(status, "warning")
+        self.assertEqual(days, 14)
+
+    def test_warning_variant_days_singular(self):
+        dump = "Your password will expire in 1 day. Please change it."
+        matched, status, days = gc._detect_password_expiry(dump)
+        self.assertTrue(matched)
+        self.assertEqual(status, "warning")
+        self.assertEqual(days, 1)
+
+    def test_expired_variant_no_days(self):
+        dump = "Your password has expired. You must change it now."
+        matched, status, days = gc._detect_password_expiry(dump)
+        self.assertTrue(matched)
+        self.assertEqual(status, "expired")
+        self.assertIsNone(days)
+
+    def test_case_insensitive(self):
+        dump = "YOUR PASSWORD WILL EXPIRE IN 7 DAYS"
+        matched, status, days = gc._detect_password_expiry(dump)
+        self.assertTrue(matched)
+        self.assertEqual(status, "warning")
+        self.assertEqual(days, 7)
+
+    def test_no_match_on_unrelated_dialog(self):
+        matched, status, days = gc._detect_password_expiry(
+            "Existing session detected. Click Continue Login to proceed.")
+        self.assertFalse(matched)
+        self.assertIsNone(status)
+        self.assertIsNone(days)
+
+    def test_no_match_on_empty_input(self):
+        matched, status, days = gc._detect_password_expiry("")
+        self.assertFalse(matched)
+        self.assertIsNone(status)
+        self.assertIsNone(days)
+
+    def test_no_match_on_none_input(self):
+        matched, status, days = gc._detect_password_expiry(None)
+        self.assertFalse(matched)
+        self.assertIsNone(status)
+        self.assertIsNone(days)
+
+    def test_matches_expires_in_variant(self):
+        # Some TWS builds use "expires in N days" instead of "will expire"
+        dump = "Password notice: expires in 30 days."
+        matched, status, days = gc._detect_password_expiry(dump)
+        self.assertTrue(matched)
+        self.assertEqual(status, "warning")
+        self.assertEqual(days, 30)
+
+    def test_warning_without_days_falls_back_to_warning_status(self):
+        # "will expire" with no day count — operator still gets a warning,
+        # but days_remaining is None (not zero, to avoid confusion with
+        # the expired variant).
+        dump = "Your password will expire soon. Please change it."
+        matched, status, days = gc._detect_password_expiry(dump)
+        self.assertTrue(matched)
+        self.assertEqual(status, "warning")
+        self.assertIsNone(days)
+
+    def test_expired_takes_precedence_over_warning(self):
+        # Defensive: a dialog that includes both phrases should resolve
+        # to 'expired' since that's the blocking state.
+        dump = ("Your password has expired; it will expire in 0 days "
+                "if not changed.")
+        matched, status, days = gc._detect_password_expiry(dump)
+        self.assertTrue(matched)
+        self.assertEqual(status, "expired")
+        self.assertIsNone(days)
+
+
+class TestResolveSafeDismissButtons(unittest.TestCase):
+    """v0.5.1: _resolve_safe_dismiss_buttons() builds the ordered
+    dismiss allowlist from BYPASS_WARNING. Returns a tuple so
+    click-preference is deterministic and the same order is consumed
+    by both dismiss_post_login_disclaimers() and wait_for_api_port()'s
+    opportunistic sweep — closing the v0.5.0 gap where BYPASS_WARNING
+    only took effect in one of the two paths.
+    """
+
+    def _call_with_env(self, value):
+        env = dict(os.environ)
+        if value is None:
+            env.pop("BYPASS_WARNING", None)
+        else:
+            env["BYPASS_WARNING"] = value
+        with patch.dict(os.environ, env, clear=True):
+            return gc._resolve_safe_dismiss_buttons()
+
+    def test_returns_tuple_not_set(self):
+        result = self._call_with_env(None)
+        self.assertIsInstance(result, tuple)
+
+    def test_defaults_present_and_ordered(self):
+        result = self._call_with_env(None)
+        self.assertEqual(result, gc._DEFAULT_SAFE_DISMISS_BUTTONS)
+
+    def test_bypass_warning_empty_returns_defaults(self):
+        result = self._call_with_env("")
+        self.assertEqual(result, gc._DEFAULT_SAFE_DISMISS_BUTTONS)
+
+    def test_bypass_warning_single_value_appended_after_defaults(self):
+        result = self._call_with_env("Continue")
+        self.assertEqual(result[: len(gc._DEFAULT_SAFE_DISMISS_BUTTONS)],
+                         gc._DEFAULT_SAFE_DISMISS_BUTTONS)
+        self.assertEqual(result[-1], "Continue")
+
+    def test_bypass_warning_comma_separated_preserves_order(self):
+        result = self._call_with_env("Continue,Acknowledge Acknowledge,Foo")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue", "Acknowledge Acknowledge", "Foo"))
+
+    def test_bypass_warning_semicolon_also_parsed(self):
+        result = self._call_with_env("Continue;Foo;Bar")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue", "Foo", "Bar"))
+
+    def test_bypass_warning_refuses_bare_ok(self):
+        result = self._call_with_env("Continue,OK,Foo")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue", "Foo"))
+
+    def test_bypass_warning_refuses_ok_case_insensitive(self):
+        result = self._call_with_env("ok,Ok,OK,oK,Continue")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue",))
+
+    def test_bypass_warning_dedupes_against_defaults(self):
+        # "I Accept" is already in the defaults; repeating it should
+        # not produce a duplicate entry.
+        result = self._call_with_env("I Accept,Continue")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue",))
+        self.assertEqual(
+            result.count("I Accept"), 1,
+            "defaults should not be duplicated when BYPASS_WARNING repeats them")
+
+    def test_bypass_warning_dedupes_user_repeats(self):
+        result = self._call_with_env("Continue,Continue,Continue")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue",))
+
+    def test_bypass_warning_strips_whitespace(self):
+        result = self._call_with_env("  Continue  ,  Foo  ")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue", "Foo"))
+
+    def test_bypass_warning_ignores_empty_tokens(self):
+        result = self._call_with_env("Continue,,,Foo,")
+        extras = result[len(gc._DEFAULT_SAFE_DISMISS_BUTTONS):]
+        self.assertEqual(extras, ("Continue", "Foo"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

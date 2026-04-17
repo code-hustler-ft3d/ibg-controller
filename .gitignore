@@ -26,3 +26,6 @@ __pycache__/
 .env
 *.env
 *_password.txt
+
+# Local drafts (posts, notes — not shipped)
+drafts/

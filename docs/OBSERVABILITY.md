@@ -36,12 +36,12 @@ There's also a shallow `GET /ready` that returns `200` with
 `{"status":"up"}` as long as the controller process is running. Useful
 for Kubernetes-style readiness where "process up" is the signal.
 
-### JSON shape (v0.4.9)
+### JSON shape (v0.5.0)
 
 ```json
 {
   "status": "healthy",
-  "version": "0.4.9",
+  "version": "0.5.1",
   "mode": "live",
   "state": "MONITORING",
   "jvm_pid": 12345,
@@ -143,6 +143,88 @@ to confirm credentials still work, check for account-side restrictions),
 then `docker compose restart` the Gateway container.
 
 **Recommended debounce**: 1 hour.
+
+### `ALERT_PASSWORD_EXPIRED`
+
+```
+ALERT_PASSWORD_EXPIRED status=warning mode=live days_remaining=7 suggested_action="rotate IBKR password in Account Settings within 7 days to avoid lockout; update TWS_PASSWORD after rotation"
+ALERT_PASSWORD_EXPIRED status=warning mode=live suggested_action="rotate IBKR password soon; dialog didn't report remaining days — check IBKR Account Settings for the exact date, then update TWS_PASSWORD after rotation"
+ALERT_PASSWORD_EXPIRED status=expired mode=live suggested_action="password has expired; rotate in IBKR Account Settings before login will succeed again, then update TWS_PASSWORD"
+```
+
+**When fired**: Gateway/TWS surfaces a password-expiry modal during
+`handle_post_login_dialogs`. Three variants:
+
+- `status=warning days_remaining=N` — "will expire in N days" wording,
+  login proceeded, operator has time to rotate.
+- `status=warning` (no `days_remaining`) — "will expire" wording
+  without a day count; unusual, but the controller emits this rather
+  than guess a number.
+- `status=expired` (no `days_remaining`) — "has expired" wording,
+  login is blocked until the password is rotated in IBKR's web portal.
+
+**What it means**: IBKR's password rotation window is open or has
+already closed. Gateway shows the dialog on every login once you're
+inside the window. The warning variants still let the login proceed;
+the expired variant blocks Gateway from completing login until the
+password is rotated.
+
+**What the operator should do**: log in to IBKR Account Management,
+rotate the password, then update `TWS_PASSWORD` (or the secret file
+referenced by `TWS_PASSWORD_FILE`) and restart the container. The
+controller cannot drive the change-password dialog itself — that has
+to happen in IBKR's web portal.
+
+**Recommended debounce**: 24 hours (fired on every login inside the
+rotation window; one alert per day is enough).
+
+### `ALERT_LOGIN_FAILED`
+
+```
+ALERT_LOGIN_FAILED mode=live reason="bad-credentials" suggested_action="Gateway surfaced a credential-rejection modal; verify TWS_USERID / TWS_PASSWORD (or _PAPER variants) and update env if password was rotated in IBKR Account Settings"
+ALERT_LOGIN_FAILED mode=live reason="bad-credentials" suggested_action="IBKR rejected the credentials after the handshake (NS_AUTH_START present, then timeout); verify TWS_USERID / TWS_PASSWORD (or _PAPER variants) and update env if password was rotated in IBKR Account Settings"
+ALERT_LOGIN_FAILED mode=live reason="post-auth-no-progress" suggested_action="server accepted the auth handshake but login never completed; verify TWS_USERID / TWS_PASSWORD (or _PAPER variants) and scan logs for an unrecognized post-auth dialog"
+```
+
+**When fired**: two distinct code paths, both emitting the same
+grep-contract token with different `reason=` values:
+
+- `reason="bad-credentials"` from `attempt_inplace_relogin` — Gateway
+  popped a visible "Login failed" / "Authentication failed" modal
+  during re-auth; the controller dismisses it and retries.
+- `reason="bad-credentials"` from `_diagnose_login_failure` — terminal
+  initial-login path, `launcher.log` shows `NS_AUTH_START` *and* a
+  `CCP: Timeout!` (handshake completed, credentials rejected at
+  postauth).
+- `reason="post-auth-no-progress"` from `_diagnose_login_failure` —
+  terminal initial-login path, `NS_AUTH_START` appeared but neither
+  success nor an auth timeout followed. Usually also bad credentials,
+  but can indicate an unrecognized post-auth dialog we failed to
+  dismiss.
+
+**What it means**: IBKR rejected the username/password. The usual
+trigger is a password rotation in the IBKR web portal that wasn't
+mirrored into the container's env file.
+
+**Why this matters separately from `ALERT_CCP_PERSISTENT`**: with
+only the CCP alert, an operator would watch the streak counter climb
+and eventually assume an IBKR silent cooldown. But CCP backoff
+against bad credentials never recovers — it just waits, retries with
+the same bad password, and waits longer. `ALERT_LOGIN_FAILED` fires
+*before* the CCP streak escalates, so monitoring can page a human
+earlier.
+
+**What the operator should do**: verify the credentials in the
+container env (`TWS_USERID` / `TWS_PASSWORD`, or `_PAPER` variants)
+against IBKR Account Management. If the password was recently
+rotated, update the env (or the secret file referenced by
+`TWS_PASSWORD_FILE`) and restart the container. Repeating the
+rejected attempt risks IBKR account lockout.
+
+**Recommended debounce**: 15 minutes (first alert should page
+immediately; re-auth retries repeat the alert every ~3 minutes, and
+the `_diagnose_login_failure` terminal path emits once per process
+lifetime before the controller exits).
 
 ### `ALERT_2FA_FAILED`
 
@@ -246,7 +328,7 @@ Alert on `probe_success == 0` for 5m.
 
 ```bash
 # Tier 1: wake somebody up
-docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|JVM_RESTART_EXHAUSTED|2FA_FAILED)'
+docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|JVM_RESTART_EXHAUSTED|2FA_FAILED|PASSWORD_EXPIRED)'
 
 # Just the latest occurrence of each
 docker logs ibkr 2>&1 | grep -E '^[0-9]+:[0-9]+ \[ERROR\] ALERT_' | tail
@@ -264,6 +346,8 @@ curl -sf http://ibkr:8080/health | \
 
 The field names and semantics of `/health` JSON and the prefix + key
 names of `ALERT_*` tokens are part of the public API as of v0.4.9.
+`ALERT_PASSWORD_EXPIRED` was added in v0.5.0 and `ALERT_LOGIN_FAILED`
+in v0.5.1, both under the same stability contract.
 Breaking changes will be called out in the CHANGELOG and accompany a
 minor version bump. Adding new fields to `/health` or new
 `ALERT_*` tokens is not a breaking change.

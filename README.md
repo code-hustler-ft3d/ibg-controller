@@ -47,7 +47,9 @@ docker run -d --name ibkr \
   your-ib-gateway-image
 ```
 
-Full migration instructions in [`docs/MIGRATION.md`](docs/MIGRATION.md).
+Full Dockerfile migration instructions: [`docs/MIGRATION.md`](docs/MIGRATION.md).
+Already running IBC? Converting your `config.ini` to ibg-controller
+env vars: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
 Finding your regional server (`TWS_SERVER`): [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md).
 Why each piece is necessary: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -258,8 +260,17 @@ process is running (for Kubernetes-style readiness).
 
 The controller also emits stable grep-contract log tokens
 (`ALERT_CCP_PERSISTENT`, `ALERT_JVM_RESTART_EXHAUSTED`,
-`ALERT_2FA_FAILED`) that external monitors can pattern-match on
-regardless of log level.
+`ALERT_2FA_FAILED`, `ALERT_PASSWORD_EXPIRED`, `ALERT_LOGIN_FAILED`)
+that external monitors can pattern-match on regardless of log level.
+`ALERT_PASSWORD_EXPIRED` fires in two flavors — `status=warning` (with
+`days_remaining=N` when the dialog reports it, actionable before
+lockout) and `status=expired` (login is already blocked, rotate the
+password in IBKR's web portal). `ALERT_LOGIN_FAILED` fires when
+Gateway surfaces a credential-rejection modal or when the
+`launcher.log` fingerprint matches a bad-credentials auth flow
+(`reason=bad-credentials`), so monitors can tell a stale-password
+account lockout apart from IBKR's silent cooldown
+(`ALERT_CCP_PERSISTENT`) without waiting for the CCP-retry ceiling.
 
 The shipped `Dockerfile` includes a `HEALTHCHECK` that curls `/health`
 every 30s with a 180s start-period. In `DUAL_MODE=yes` it probes both
@@ -304,6 +315,18 @@ the Makefile target (`make install DESTDIR=...`) that drops
 See [`docs/MIGRATION.md`](docs/MIGRATION.md) for swapping out IBC in a
 `gnzsnz/ib-gateway-docker`-style Dockerfile.
 
+If you already have an IBC `config.ini`, the
+[`ibc_config_to_env.py`](scripts/ibc_config_to_env.py) one-shot tool
+converts it to the equivalent ibg-controller env vars (`.env`,
+`docker run -e`, or `docker-compose` format), warning on unsupported
+keys instead of silently dropping them. Full mapping table and cutover
+recipe: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
+
+```bash
+./ibc_config_to_env.py /path/to/your/IBC/config.ini > .env
+# or: ./ibc_config_to_env.py --format compose config.ini
+```
+
 ## Building
 
 ```bash
@@ -313,8 +336,8 @@ make
 # Syntax-check the Python controller + validate the agent jar manifest
 make test
 
-# Create a release tarball (dist/ibg-controller-0.3.2.tar.gz)
-make release VERSION=0.3.2
+# Create a release tarball (dist/ibg-controller-0.5.1.tar.gz)
+make release VERSION=0.5.1
 
 # Install directly into a running ibgateway home (for dev on host, or
 # as called by the Docker image's setup stage)
@@ -326,7 +349,7 @@ Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 ### Installing from a release tarball (for consumers who don't build)
 
 ```bash
-VER=0.3.2
+VER=0.5.1
 curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
 tar -xzf ibg-controller-${VER}.tar.gz
 cd ibg-controller-${VER}
@@ -335,15 +358,18 @@ DESTDIR=/home/ibgateway ./install.sh
 
 The tarball layout is flat:
 ```
-ibg-controller-0.3.2/
+ibg-controller-0.5.1/
 ├── gateway-input-agent.jar    ← installed to $DESTDIR/gateway-input-agent.jar
 ├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
+├── ibc_config_to_env.py       ← one-shot IBC config.ini → env migration tool
 ├── install.sh
 ├── README.md, CHANGELOG.md, LICENSE
 └── docs/
+    ├── ADR-001-in-jvm-dialog-dispatcher.md
     ├── ARCHITECTURE.md
     ├── BOOTSTRAP.md
     ├── DISCONNECT_RECOVERY.md
+    ├── FROM_IBC.md
     ├── MIGRATION.md
     └── OBSERVABILITY.md
 ```
