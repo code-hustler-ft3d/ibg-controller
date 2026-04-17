@@ -322,12 +322,43 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
         return object()
 
     def test_returns_false_when_login_frame_never_reappears(self):
+        # v0.4.4: attempt_inplace_relogin probes with a short 2s timeout
+        # first, then falls through to the full 120s wait if the probe
+        # fails and the disposed-shell signature isn't matched. Both
+        # calls return False here (frame genuinely gone), so the
+        # function returns False without calling handle_login.
         app = self._fake_app()
         with patch.object(gc, "agent_windows", return_value=[]), \
              patch.object(gc, "agent_wait_login_frame", return_value=False) as awlf, \
              patch.object(gc, "handle_login") as hl:
             self.assertFalse(gc.attempt_inplace_relogin(app))
-            awlf.assert_called_once()
+            # Two calls: 2s probe, then 120s full wait (empty windows
+            # list doesn't match the disposed-shell signature, so we
+            # must not bail early).
+            self.assertEqual(awlf.call_count, 2)
+            hl.assert_not_called()
+
+    def test_bails_on_disposed_shell_without_full_wait(self):
+        # v0.4.4: after CCP lockout Gateway can dispose the login frame
+        # entirely and transition into its post-auth "disconnected"
+        # shell (single non-modal window titled "IBKR Gateway", no
+        # JPasswordField anywhere). LoginManager.initiateLogin on the
+        # captured reference is a silent no-op in that state, so in-JVM
+        # relogin cannot recover. attempt_inplace_relogin must detect
+        # the shell signature after a short probe and bail with False
+        # so wait_for_api_port_with_retry escalates to container-level
+        # kill+relaunch instead of burning 120s × 8 attempts.
+        app = self._fake_app()
+        with patch.object(gc, "agent_windows", return_value=[
+                ("ay", "IBKR Gateway", False),
+             ]), \
+             patch.object(gc, "agent_wait_login_frame", return_value=False) as awlf, \
+             patch.object(gc, "handle_login") as hl:
+            self.assertFalse(gc.attempt_inplace_relogin(app))
+            # Only the 2s probe should run — NOT the full 120s wait.
+            # That's the whole point: fast-fail so the outer loop
+            # escalates instead of dead-waiting.
+            self.assertEqual(awlf.call_count, 1)
             hl.assert_not_called()
 
     def test_calls_handle_login_on_same_app_when_frame_up(self):

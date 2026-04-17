@@ -4,6 +4,42 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.4] - 2026-04-16
+
+### Fixed
+
+- **`attempt_inplace_relogin` dead-waited 120s after CCP lockout
+  disposed the login frame.** Live + paper validation of v0.4.3 (report
+  from futures-admin agent) showed `WAIT_LOGIN_FRAME` correctly timing
+  out but on a failure mode v0.4.3's premise didn't cover: the login
+  frame isn't occluded by a modal, it's been *disposed*. Gateway's
+  main application shell comes up with the File/Configure/Help menu
+  bar and "API Server: disconnected" status labels. The captured
+  `loginFrame` reference that v0.4.2/v0.4.3's `findLoginFrame` returns
+  no longer points at a live Window, and `LoginManager.initiateLogin`
+  on a disposed reference is a silent no-op. With the 120s timeout,
+  eight retry attempts burn 16 minutes of the CCP backoff budget
+  before `wait_for_api_port_with_retry` gives up and escalates.
+- Fix: `attempt_inplace_relogin` now probes with a short 2s
+  `agent_wait_login_frame` first. If that probe fails and
+  `agent_windows()` returns exactly one non-modal window with
+  "IBKR Gateway" in its title (the disposed-shell signature), the
+  function returns False immediately instead of doing the full 120s
+  wait. `wait_for_api_port_with_retry` treats the False return as an
+  in-JVM-relogin failure and `sys.exit(1)`'s for container-level
+  kill+relaunch — which is the only path that can recover from a
+  disposed-frame JVM. The short-circuit only triggers on the specific
+  disposed-shell shape; stuck-connecting (login frame present, modal
+  progress dialog on top) still falls through to the full 120s wait
+  so Gateway's internal ~60s retry cycle can self-clear.
+- Consistent with the v0.4.0 "no kill-and-relaunch on auth failure"
+  invariant: that rule was premised on the login frame being
+  re-enterable via `initiateLogin(capturedLoginFrame)`. When the
+  frame is disposed, there is no UI to re-drive; the JVM has lost
+  its handle on the login workflow and kill+relaunch is the only
+  remaining option. This narrow class escapes the invariant only
+  because in-JVM recovery is impossible, not because it's cheaper.
+
 ## [0.4.3] - 2026-04-16
 
 ### Fixed

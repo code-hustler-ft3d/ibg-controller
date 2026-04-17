@@ -2081,6 +2081,35 @@ def _detect_login_stuck_connecting():
 _INPLACE_RELOGIN_MAX_ATTEMPTS = 8
 
 
+def _looks_like_disposed_shell(windows):
+    """True when the visible window set matches Gateway's post-CCP
+    disposed-login-frame state.
+
+    Observed shape (v0.4.3 live validation, futures-admin agent report):
+    a single non-modal top-level Window titled ``IBKR Gateway`` with no
+    JPasswordField anywhere in its tree. Gateway's main application
+    shell has rendered with its File/Configure/Help menu bar and the
+    "API Server: disconnected" status labels — the login frame has
+    been disposed, not occluded.
+
+    In this state ``LoginManager.initiateLogin(capturedLoginFrame)`` is
+    a silent no-op because the captured reference points at a disposed
+    Window. In-JVM relogin cannot recover; the only path forward is a
+    full JVM restart via container-level kill+relaunch.
+
+    The caller should only trust this signature AFTER a short
+    ``agent_wait_login_frame`` probe has already failed — that probe
+    confirms there is no JPasswordField-bearing Window currently up,
+    which distinguishes this case from the stuck-connecting retry
+    (where the login frame IS present but a modal progress dialog is
+    on top).
+    """
+    if len(windows) != 1:
+        return False
+    _wtype, title, modal = windows[0]
+    return not modal and "IBKR Gateway" in title
+
+
 def attempt_inplace_relogin(app):
     """In-JVM relogin primitive — match IBC's
     ``getLoginHandler().initiateLogin(getLoginFrame())`` semantics from
@@ -2148,24 +2177,56 @@ def attempt_inplace_relogin(app):
                 if agent_click_in_window(title, btn):
                     break
 
-    # 2. Wait for the login frame to redisplay. v0.4.3: use the Java
-    # agent's Swing-type-based lookup (findLoginFrame → showing Window
-    # containing JPasswordField, plus no-modal-blocking check) instead
-    # of pyatspi `wait_for(app, "password text")`. AT-SPI filters the
-    # login frame's role while Gateway's "Attempt N: connecting to
-    # server" modal is up, causing the old 30s wait to time out before
+    # 2. Wait for the login frame to redisplay, but short-circuit the
+    # wait when we can tell in-JVM relogin is impossible.
+    #
+    # v0.4.3: use the Java agent's Swing-type-based lookup
+    # (findLoginFrame → showing Window containing JPasswordField, plus
+    # no-modal-blocking check) instead of pyatspi
+    # ``wait_for(app, "password text")``. AT-SPI filters the login
+    # frame's role while Gateway's "Attempt N: connecting to server"
+    # modal is up, causing the old 30s wait to time out before
     # Gateway's internal retry self-cleared (typical ~60s). 120s
-    # covers one full retry cycle with margin. On timeout we dump
-    # visible windows so the next failure mode is diagnosable.
-    log.info("In-JVM relogin: waiting up to 120s for login frame to be interactable")
-    if not agent_wait_login_frame(timeout_ms=120_000):
-        log.error("In-JVM relogin: login frame never became interactable within 120s")
+    # covers one full retry cycle with margin.
+    #
+    # v0.4.4: probe first with a short 2s timeout. If that fails AND
+    # the visible windows match the disposed-shell signature (single
+    # non-modal "IBKR Gateway" frame, no JPasswordField), bail
+    # immediately and return False. `wait_for_api_port_with_retry`
+    # treats that as an in-JVM-relogin failure and escalates to
+    # container-level kill+relaunch, which is the only recovery path
+    # once Gateway has disposed the login frame. Without this
+    # short-circuit we burn 120s per attempt × 8 attempts = 16min
+    # waiting for a frame that will never come back.
+    log.info("In-JVM relogin: probing for login frame (2s) before full wait")
+    if agent_wait_login_frame(timeout_ms=2_000):
+        pass  # login frame already interactable, skip to step 3
+    else:
         try:
-            windows = agent_windows()
-            log.error(f"  windows at timeout: {windows}")
+            probe_windows = agent_windows()
         except Exception as e:
-            log.error(f"  windows dump failed: {type(e).__name__}: {e}")
-        return False
+            log.warning(f"In-JVM relogin: agent_windows probe failed "
+                        f"({type(e).__name__}: {e}); proceeding with full 120s wait")
+            probe_windows = None
+        if probe_windows is not None and _looks_like_disposed_shell(probe_windows):
+            log.error("In-JVM relogin unavailable: login frame disposed "
+                      "(post-CCP disconnected shell detected).")
+            log.error(f"  windows: {probe_windows}")
+            log.error("  Escalating to container-level recovery "
+                      "(kill+relaunch JVM — the captured login frame "
+                      "reference is a disposed Window, initiateLogin() "
+                      "on it is a no-op).")
+            return False
+        log.info("In-JVM relogin: short probe failed but no disposed-shell "
+                 "signature; waiting up to 120s for login frame")
+        if not agent_wait_login_frame(timeout_ms=120_000):
+            log.error("In-JVM relogin: login frame never became interactable within 120s")
+            try:
+                windows = agent_windows()
+                log.error(f"  windows at timeout: {windows}")
+            except Exception as e:
+                log.error(f"  windows dump failed: {type(e).__name__}: {e}")
+            return False
 
     # 3. Same app, same JVM — just re-drive handle_login.
     log.info("In-JVM relogin: login frame is up, re-driving handle_login "
