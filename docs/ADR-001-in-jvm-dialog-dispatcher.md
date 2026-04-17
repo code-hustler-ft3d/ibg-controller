@@ -131,8 +131,8 @@ first, then live) and revert instantly by unsetting the flag.
 
 1. Land dispatcher + LoginDialogHandler + SecondFactorDialogHandler,
    flag default OFF. Version bump to 0.5.0-preview.
-2. Enable flag in paper-side `futures-admin/docker-compose.yml` only.
-   Observe for 72 hours.
+2. Enable flag on the paper-side container only (via env var in
+   docker-compose.yml). Observe for 72 hours.
 3. Port ExistingSessionDialogHandler + AutoRestartDialogHandler.
 4. Enable flag in live-side.
 5. Once both sides stable for 1 week, delete the superseded

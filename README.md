@@ -243,6 +243,35 @@ The token is checked with `hmac.compare_digest` to resist timing
 side-channels. Without the token set, the command server runs in
 IBC-compat no-auth mode and logs a loud WARNING at startup.
 
+### Observability (v0.4.9)
+| Var | Notes |
+|---|---|
+| `CONTROLLER_HEALTH_SERVER_PORT` | TCP port for the HTTP `/health` endpoint. Default `8080` in the shipped image, unset on source checkout. In dual mode, paper auto-offsets to `port+1`. Set to empty to disable the health server entirely. |
+| `CONTROLLER_HEALTH_SERVER_HOST` | Bind address. Default `0.0.0.0` so Docker port forwarding works. Restrict external exposure with Docker's `-p 127.0.0.1:8080:8080` on the host side. |
+
+`GET /health` returns JSON with the controller's state, Gateway JVM
+liveness, API port status, CCP lockout streak, and the timestamp of
+the most recent successful auth. HTTP 200 if the controller is logged
+in and serving (`state==MONITORING` AND `api_port_open` AND
+`jvm_alive`); 503 otherwise. `GET /ready` returns 200 while the
+process is running (for Kubernetes-style readiness).
+
+The controller also emits stable grep-contract log tokens
+(`ALERT_CCP_PERSISTENT`, `ALERT_JVM_RESTART_EXHAUSTED`,
+`ALERT_2FA_FAILED`) that external monitors can pattern-match on
+regardless of log level.
+
+The shipped `Dockerfile` includes a `HEALTHCHECK` that curls `/health`
+every 30s with a 180s start-period. In `DUAL_MODE=yes` it probes both
+the live and paper ports; either side being unhealthy marks the
+container unhealthy.
+
+Full protocol, field semantics, and integration examples (cron,
+Prometheus blackbox_exporter, jq): [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+
+Playbook for operator-action scenarios (CCP lockout, 2FA failure,
+JVM restart exhaustion, Gateway JVM crash): [`docs/DISCONNECT_RECOVERY.md`](docs/DISCONNECT_RECOVERY.md).
+
 ### Product selector (v0.2)
 | Var | Notes |
 |---|---|
@@ -314,7 +343,9 @@ ibg-controller-0.3.2/
 └── docs/
     ├── ARCHITECTURE.md
     ├── BOOTSTRAP.md
-    └── MIGRATION.md
+    ├── DISCONNECT_RECOVERY.md
+    ├── MIGRATION.md
+    └── OBSERVABILITY.md
 ```
 
 ## Troubleshooting

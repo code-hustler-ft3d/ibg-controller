@@ -26,8 +26,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
   terminal `sys.exit(1)` in `_escalate_to_jvm_restart` when all
   `_JVM_RESTART_MAX_ATTEMPTS` silent cool-down cycles have failed.
   Format: `ALERT_JVM_RESTART_EXHAUSTED mode=<live|paper> attempts=N reason="..."`.
-  Tier 1 notification event per `futures-admin`'s
-  `docs/NOTIFICATIONS_MANIFEST.md`.
+  See [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md) for the
+  grep-contract and recommended external-monitor wiring.
 - **`ALERT_2FA_FAILED` log token** — emitted in two terminal 2FA
   failure paths: (a) `agent_settext_in_window` or `agent_click_in_window`
   failed while entering the TOTP, (b) `TWOFA_TIMEOUT_ACTION=exit` or

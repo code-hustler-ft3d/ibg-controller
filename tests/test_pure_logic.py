@@ -732,7 +732,7 @@ class TestCcpLockoutStreak(unittest.TestCase):
             self._run_detect_with_ccp_timeout()  # streak=2
         output = "\n".join(ctx.output)
         self.assertIn("concurrent IBKR session", output)
-        self.assertIn("Scenario 7", output)
+        self.assertIn("docs/DISCONNECT_RECOVERY.md", output)
         self.assertNotIn("ALERT_CCP_PERSISTENT", output)
 
     def test_third_lockout_emits_alert_token(self):
@@ -783,7 +783,7 @@ class TestAlertJvmRestartExhausted(unittest.TestCase):
     ALERT_JVM_RESTART_EXHAUSTED before sys.exit(1). External monitoring
     greps this token to fire a Tier 1 push notification.
 
-    Contract (for futures-admin NOTIFICATIONS_MANIFEST.md):
+    Grep-contract for external monitors (see docs/OBSERVABILITY.md):
       ALERT_JVM_RESTART_EXHAUSTED mode=<live|paper> attempts=N reason="..."
     Stable prefix, key=value pairs, one line per terminal escalation."""
 

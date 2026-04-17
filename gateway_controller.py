@@ -2063,7 +2063,8 @@ def _detect_ccp_lockout(timeout=25):
                     f"slot on the {TRADING_MODE} account. If cool-downs "
                     "aren't clearing, log out of IBKR web/mobile and let "
                     "the next auto-retry grab the session. See "
-                    "docs/DISCONNECT_RECOVERY.md Scenario 7.")
+                    "docs/DISCONNECT_RECOVERY.md — scenario 'CCP lockout "
+                    "(concurrent IBKR session)'.")
             elif _ccp_lockout_streak >= _CCP_STREAK_ALERT_PERSISTENT:
                 log.error(
                     f"ALERT_CCP_PERSISTENT consecutive_lockouts="
@@ -2218,8 +2219,8 @@ def _escalate_to_jvm_restart(reason):
     sys.exit because ``run.sh`` waits on both live+paper controller
     PIDs and only the exiting mode's process dies — the container
     stays up on the other mode's PID and this mode's JVM stays dead
-    forever. That leaves futures-admin connecting to a dangling socat
-    that ECONNREFUSEs every request.
+    forever. That leaves any external API client connecting to a
+    dangling socat that ECONNREFUSEs every request.
 
     v0.4.6 sequencing (kill first, THEN cool-down, THEN relaunch):
     kill this mode's Gateway JVM, sleep the long CCP cool-down
@@ -2257,8 +2258,7 @@ def _escalate_to_jvm_restart(reason):
     log.error(f"JVM restart limit ({_JVM_RESTART_MAX_ATTEMPTS}) exhausted "
               "after silent cool-downs; exiting")
     # Stable grep token for external monitoring. Emitted exactly once per
-    # terminal escalation. See docs/NOTIFICATIONS_MANIFEST.md in
-    # futures-admin for the Tier 1 contract.
+    # terminal escalation. See docs/OBSERVABILITY.md for the grep-contract.
     log.error(
         f"ALERT_JVM_RESTART_EXHAUSTED mode={TRADING_MODE} "
         f"attempts={_JVM_RESTART_MAX_ATTEMPTS} "
@@ -2270,7 +2270,7 @@ def _looks_like_disposed_shell(windows):
     """True when the visible window set matches Gateway's post-CCP
     disposed-login-frame state.
 
-    Observed shape (v0.4.3 live validation, futures-admin agent report):
+    Observed shape (v0.4.3 live validation from production logs):
     a single non-modal top-level Window titled ``IBKR Gateway`` with no
     JPasswordField anywhere in its tree. Gateway's main application
     shell has rendered with its File/Configure/Help menu bar and the
@@ -3049,10 +3049,10 @@ def _command_server_main(host, port):
 # ── HTTP health endpoint (v0.4.9) ──────────────────────────────────────
 #
 # Separate from the TCP command server on purpose: monitoring tools
-# (futures-admin, Docker HEALTHCHECK, uptime checkers) want to curl a
-# URL, not speak the IBC text protocol. Keeping them separate also means
-# the command server can stay auth-gated without forcing monitoring to
-# carry a token.
+# (Docker HEALTHCHECK, uptime checkers, Prometheus blackbox_exporter)
+# want to curl a URL, not speak the IBC text protocol. Keeping them
+# separate also means the command server can stay auth-gated without
+# forcing monitoring to carry a token.
 #
 # Protocol: GET /health → 200 with JSON if state==MONITORING and the
 # API port is open and the JVM process is alive, 503 with the same JSON
