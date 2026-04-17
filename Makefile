@@ -13,7 +13,7 @@
 # Version is overridable on the command line:
 #   make release VERSION=0.2.0
 
-VERSION          ?= 0.4.2
+VERSION          ?= 0.4.3
 NAME             := ibg-controller
 DIST             := dist
 AGENT_SRC        := agent/GatewayInputAgent.java

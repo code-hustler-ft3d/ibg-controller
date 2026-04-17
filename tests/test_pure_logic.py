@@ -324,17 +324,16 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
     def test_returns_false_when_login_frame_never_reappears(self):
         app = self._fake_app()
         with patch.object(gc, "agent_windows", return_value=[]), \
-             patch.object(gc, "wait_for", return_value=None) as wf, \
+             patch.object(gc, "agent_wait_login_frame", return_value=False) as awlf, \
              patch.object(gc, "handle_login") as hl:
             self.assertFalse(gc.attempt_inplace_relogin(app))
-            wf.assert_called_once()
+            awlf.assert_called_once()
             hl.assert_not_called()
 
     def test_calls_handle_login_on_same_app_when_frame_up(self):
         app = self._fake_app()
-        dummy_pw_field = object()
         with patch.object(gc, "agent_windows", return_value=[]), \
-             patch.object(gc, "wait_for", return_value=dummy_pw_field), \
+             patch.object(gc, "agent_wait_login_frame", return_value=True), \
              patch.object(gc, "handle_login", return_value=True) as hl:
             self.assertTrue(gc.attempt_inplace_relogin(app))
             # Critical: same app reference, no new JVM
@@ -343,7 +342,7 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
     def test_propagates_handle_login_false(self):
         app = self._fake_app()
         with patch.object(gc, "agent_windows", return_value=[]), \
-             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "agent_wait_login_frame", return_value=True), \
              patch.object(gc, "handle_login", return_value=False):
             self.assertFalse(gc.attempt_inplace_relogin(app))
 
@@ -356,7 +355,7 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
              ]), \
              patch.object(gc, "agent_window", return_value="connecting to server (trying for another 30 seconds)"), \
              patch.object(gc, "agent_click_in_window") as click, \
-             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "agent_wait_login_frame", return_value=True), \
              patch.object(gc, "handle_login", return_value=True):
             self.assertTrue(gc.attempt_inplace_relogin(app))
             click.assert_not_called()
@@ -369,7 +368,7 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
              patch.object(gc, "agent_window",
                           return_value="Login failed: server cannot be reached"), \
              patch.object(gc, "agent_click_in_window", return_value=True) as click, \
-             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "agent_wait_login_frame", return_value=True), \
              patch.object(gc, "handle_login", return_value=True):
             self.assertTrue(gc.attempt_inplace_relogin(app))
             # Clicked OK (or Close) on the error modal
@@ -383,7 +382,7 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
                 ("frame", "IBKR Gateway", False),  # not modal
              ]), \
              patch.object(gc, "agent_click_in_window") as click, \
-             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "agent_wait_login_frame", return_value=True), \
              patch.object(gc, "handle_login", return_value=True):
             self.assertTrue(gc.attempt_inplace_relogin(app))
             click.assert_not_called()
@@ -394,7 +393,7 @@ class TestAttemptInplaceRelogin(unittest.TestCase):
         # frame wait regardless.
         app = self._fake_app()
         with patch.object(gc, "agent_windows", side_effect=RuntimeError("boom")), \
-             patch.object(gc, "wait_for", return_value=object()), \
+             patch.object(gc, "agent_wait_login_frame", return_value=True), \
              patch.object(gc, "handle_login", return_value=True) as hl:
             self.assertTrue(gc.attempt_inplace_relogin(app))
             hl.assert_called_once_with(app)

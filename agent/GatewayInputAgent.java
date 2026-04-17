@@ -57,6 +57,7 @@ import javax.swing.tree.TreePath;
  *   SETTEXT_BY_LABEL <title>|<label>|<v>  → OK set label=<label> value=<v> | ERR ...
  *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
  *   SETTEXT_LOGIN_PASSWORD <text>         → OK | ERR ...
+ *   WAIT_LOGIN_FRAME <timeout_ms>         → OK | ERR timeout | ERR invalid_timeout=...
  *
  * Component lookup is by AccessibleContext.getAccessibleName() or by
  * setText()/AbstractButton.getText(), matching what AT-SPI exposes.
@@ -252,6 +253,17 @@ public class GatewayInputAgent {
                 // name is currently stable, but role-based lookup future-
                 // proofs against drift in newer Gateway versions.
                 return doSetLoginPassword(rest);
+            }
+            case "WAIT_LOGIN_FRAME": {
+                // v0.4.3: block until the Gateway login frame is showing
+                // AND no modal dialog is overlaying it. Replaces
+                // attempt_inplace_relogin's pyatspi
+                // `wait_for(app, "password text")` wait, which times out
+                // while Gateway's "Attempt N: connecting to server" modal
+                // is up because AT-SPI filters the role. Swing's
+                // isShowing() is truthful regardless of modal overlay, so
+                // the JVM-side lookup sees the frame correctly.
+                return doWaitLoginFrame(rest);
             }
             default:
                 return "ERR unknown_command:" + cmd;
@@ -689,6 +701,41 @@ public class GatewayInputAgent {
             }
         }
         return null;
+    }
+
+    private static String doWaitLoginFrame(String timeoutMsStr) throws Exception {
+        long timeoutMs;
+        try {
+            timeoutMs = Long.parseLong(timeoutMsStr.trim());
+        } catch (NumberFormatException e) {
+            return "ERR invalid_timeout=" + timeoutMsStr;
+        }
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            Window loginFrame = findLoginFrame();
+            if (loginFrame != null && !modalDialogBlocking(loginFrame)) {
+                return "OK";
+            }
+            Thread.sleep(200);
+        }
+        return "ERR timeout";
+    }
+
+    /**
+     * True if any showing modal Dialog other than the login frame itself
+     * is up — Gateway's "Attempt N: connecting to server" progress dialog
+     * is one such modal, and clicking credentials into the login frame
+     * while it's up is a no-op (input is routed to the modal).
+     */
+    private static boolean modalDialogBlocking(Window loginFrame) {
+        for (Window w : Window.getWindows()) {
+            if (w == loginFrame) continue;
+            if (!w.isShowing()) continue;
+            if (w instanceof Dialog && ((Dialog) w).isModal()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static JTextComponent firstEditableTextIn(Component root) {

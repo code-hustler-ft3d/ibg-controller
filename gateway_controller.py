@@ -542,6 +542,35 @@ def agent_settext_login_password(text):
     return False
 
 
+def agent_wait_login_frame(timeout_ms=120_000):
+    """Block until a showing Window containing a JPasswordField exists
+    AND no other modal dialog is blocking it. Returns True on success,
+    False on timeout.
+
+    v0.4.3: replaces pyatspi ``wait_for(app, "password text")`` in
+    attempt_inplace_relogin. The AT-SPI tree filters the login frame's
+    password-text role while Gateway's "Attempt N: connecting to
+    server" modal is up, so the old 30s wait would time out before
+    Gateway's internal retry self-cleared (typical ~60s). Swing's
+    ``isShowing()`` remains truthful regardless of modal overlay, and
+    the Java agent additionally checks that no modal dialog is
+    blocking — only returns OK when the login frame is actually
+    interactable.
+    """
+    try:
+        resp = _agent_request(
+            f"WAIT_LOGIN_FRAME {int(timeout_ms)}",
+            timeout=int(timeout_ms / 1000) + 10,
+        )
+    except Exception as e:
+        log.error(f"agent WAIT_LOGIN_FRAME: {type(e).__name__}: {e}")
+        return False
+    if resp.startswith("OK"):
+        return True
+    log.error(f"agent WAIT_LOGIN_FRAME: {resp}")
+    return False
+
+
 def agent_settext_in_window(title_substring, text):
     """Type text into the first editable JTextComponent of the first visible
     window whose title contains the substring. Used for fields that have
@@ -2119,13 +2148,23 @@ def attempt_inplace_relogin(app):
                 if agent_click_in_window(title, btn):
                     break
 
-    # 2. Wait for the login frame to redisplay. wait_for polls the
-    # AT-SPI tree on the same app; if Gateway auto-returns to the login
-    # frame (common after stuck-connecting expires or after a dismissed
-    # error), the password field reappears.
-    log.info("In-JVM relogin: waiting up to 30s for login frame to reappear")
-    if wait_for(app, "password text", timeout=30) is None:
-        log.error("In-JVM relogin: login frame never reappeared within 30s")
+    # 2. Wait for the login frame to redisplay. v0.4.3: use the Java
+    # agent's Swing-type-based lookup (findLoginFrame → showing Window
+    # containing JPasswordField, plus no-modal-blocking check) instead
+    # of pyatspi `wait_for(app, "password text")`. AT-SPI filters the
+    # login frame's role while Gateway's "Attempt N: connecting to
+    # server" modal is up, causing the old 30s wait to time out before
+    # Gateway's internal retry self-cleared (typical ~60s). 120s
+    # covers one full retry cycle with margin. On timeout we dump
+    # visible windows so the next failure mode is diagnosable.
+    log.info("In-JVM relogin: waiting up to 120s for login frame to be interactable")
+    if not agent_wait_login_frame(timeout_ms=120_000):
+        log.error("In-JVM relogin: login frame never became interactable within 120s")
+        try:
+            windows = agent_windows()
+            log.error(f"  windows at timeout: {windows}")
+        except Exception as e:
+            log.error(f"  windows dump failed: {type(e).__name__}: {e}")
         return False
 
     # 3. Same app, same JVM — just re-drive handle_login.

@@ -4,6 +4,41 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.3] - 2026-04-16
+
+### Fixed
+
+- **`attempt_inplace_relogin` timed out before exercising the v0.4.2
+  credential-typing fix.** Step 2 of the relogin primitive used
+  `wait_for(app, "password text", timeout=30)` to wait for the login
+  frame to redisplay. AT-SPI filters the login frame's password-text
+  role while Gateway's "Attempt N: connecting to server" modal is up,
+  and the modal self-clears after ~60s — so the 30s wait returned
+  None and the function exited before `handle_login` (and the v0.4.2
+  SETTEXT_LOGIN_USER / SETTEXT_LOGIN_PASSWORD commands) could run.
+  Reported by the futures-admin agent after the v0.4.2 deploy cycle:
+  live authed cleanly on first attempt so the relogin path wasn't
+  exercised, but paper was stuck until this fix.
+- Fix: new agent command `WAIT_LOGIN_FRAME <timeout_ms>` in
+  `agent/GatewayInputAgent.java` that uses v0.4.2's `findLoginFrame`
+  infrastructure (showing Window containing a JPasswordField — stable
+  Swing-type invariant) plus a `modalDialogBlocking` check that
+  confirms no modal Dialog is overlaying the login frame. Polls every
+  200ms until the deadline. Returns OK only when the frame is
+  interactable.
+- `attempt_inplace_relogin` in `gateway_controller.py` now calls
+  `agent_wait_login_frame(timeout_ms=120_000)` instead of
+  `wait_for(app, "password text", timeout=30)`. 120s covers one full
+  "Attempt N: connecting" retry cycle (~60s) with margin. On timeout,
+  logs the output of `agent_windows()` so the next failure mode is
+  diagnosable.
+- Why Swing's view differs from AT-SPI's: a modal dialog on top of
+  the login frame doesn't change `loginFrame.isShowing()` (Window
+  visibility is self-rooted — it has no ancestors), but AT-SPI's
+  assistive-tech tree prunes the obscured subtree. The Java agent
+  runs inside the JVM and sees the Swing state directly; the Python
+  controller's pyatspi path doesn't.
+
 ## [0.4.2] - 2026-04-16
 
 ### Fixed
