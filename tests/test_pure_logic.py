@@ -508,50 +508,100 @@ class TestWaitForApiPortWithRetry(unittest.TestCase):
             self.assertEqual(ctx.exception.code, 1)
             relogin.assert_not_called()
 
-    def test_exits_when_max_attempts_exceeded(self):
-        # Port never opens, CCP always detected, relogin always
-        # succeeds (frame reappears, handle_login succeeds). Loop must
-        # cap at _INPLACE_RELOGIN_MAX_ATTEMPTS and exit — not spin
-        # forever.
+    def test_escalates_to_jvm_restart_on_max_attempts_exceeded(self):
+        # v0.4.5: port never opens, CCP always detected, relogin
+        # always succeeds. Loop caps at _INPLACE_RELOGIN_MAX_ATTEMPTS
+        # and escalates to JVM restart via _escalate_to_jvm_restart
+        # (no more sys.exit — dual-mode run.sh doesn't restart the
+        # container on single-mode exit).
         app = self._fake_app()
         with patch.object(gc, "wait_for_api_port", return_value=False), \
              patch.object(gc, "_detect_ccp_lockout", return_value=True), \
              patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
              patch.object(gc, "_apply_ccp_backoff"), \
              patch.object(gc, "_reset_ccp_backoff"), \
-             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin:
-            with self.assertRaises(SystemExit) as ctx:
-                gc.wait_for_api_port_with_retry(app)
-            self.assertEqual(ctx.exception.code, 1)
+             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin, \
+             patch.object(gc, "_escalate_to_jvm_restart", return_value=True) as escalate:
+            self.assertTrue(gc.wait_for_api_port_with_retry(app))
             self.assertEqual(relogin.call_count,
                              gc._INPLACE_RELOGIN_MAX_ATTEMPTS)
+            escalate.assert_called_once()
 
-    def test_exits_when_relogin_returns_false(self):
-        # attempt_inplace_relogin returns False (login frame never
-        # reappeared or handle_login failed). Must exit cleanly, not
-        # loop forever.
+    def test_escalates_to_jvm_restart_on_relogin_false(self):
+        # v0.4.5: attempt_inplace_relogin returned False (disposed
+        # login frame per v0.4.4, or handle_login failed). Must NOT
+        # sys.exit — escalate to long-cool-down JVM restart.
         app = self._fake_app()
         with patch.object(gc, "wait_for_api_port", return_value=False), \
              patch.object(gc, "_detect_ccp_lockout", return_value=True), \
              patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
              patch.object(gc, "_apply_ccp_backoff"), \
-             patch.object(gc, "attempt_inplace_relogin", return_value=False) as relogin:
-            with self.assertRaises(SystemExit) as ctx:
-                gc.wait_for_api_port_with_retry(app)
-            self.assertEqual(ctx.exception.code, 1)
+             patch.object(gc, "attempt_inplace_relogin", return_value=False) as relogin, \
+             patch.object(gc, "_escalate_to_jvm_restart", return_value=True) as escalate:
+            self.assertTrue(gc.wait_for_api_port_with_retry(app))
             relogin.assert_called_once()
+            escalate.assert_called_once()
 
     def test_respects_custom_max_attempts(self):
         # Caller can override the cap (useful for tests / debugging).
+        # v0.4.5: escalation fires after the custom cap.
         app = self._fake_app()
         with patch.object(gc, "wait_for_api_port", return_value=False), \
              patch.object(gc, "_detect_ccp_lockout", return_value=True), \
              patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
              patch.object(gc, "_apply_ccp_backoff"), \
-             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin:
-            with self.assertRaises(SystemExit):
-                gc.wait_for_api_port_with_retry(app, max_attempts=3)
+             patch.object(gc, "attempt_inplace_relogin", return_value=True) as relogin, \
+             patch.object(gc, "_escalate_to_jvm_restart", return_value=True) as escalate:
+            self.assertTrue(gc.wait_for_api_port_with_retry(app, max_attempts=3))
             self.assertEqual(relogin.call_count, 3)
+            escalate.assert_called_once()
+
+
+class TestEscalateToJvmRestart(unittest.TestCase):
+    """_escalate_to_jvm_restart is v0.4.5's dual-mode-aware recovery
+    escape hatch. It replaces sys.exit(1) on CCP-exhaustion paths
+    because run.sh's final ``wait "${pid[@]}"`` does not bring the
+    container down when a single mode's controller exits — the
+    container stays up on the other mode's PID. Behavior contract:
+      - Calls _apply_ccp_long_cooldown then do_restart_in_place.
+      - Returns True as soon as do_restart_in_place returns True.
+      - Retries up to _JVM_RESTART_MAX_ATTEMPTS (default 5) with a
+        fresh long cool-down on each attempt.
+      - sys.exit(1) after cap exhaustion.
+      - Resets CCP backoff on success.
+    """
+
+    def test_returns_true_on_first_restart_success(self):
+        with patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
+             patch.object(gc, "do_restart_in_place", return_value=True) as restart, \
+             patch.object(gc, "_reset_ccp_backoff") as reset:
+            self.assertTrue(gc._escalate_to_jvm_restart("test reason"))
+            cooldown.assert_called_once()
+            restart.assert_called_once()
+            reset.assert_called_once()
+
+    def test_retries_after_restart_failure(self):
+        # Third restart attempt succeeds — first two returned False.
+        # Verifies cool-down fires before each, not just the first.
+        with patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
+             patch.object(gc, "do_restart_in_place",
+                          side_effect=[False, False, True]) as restart, \
+             patch.object(gc, "_reset_ccp_backoff"):
+            self.assertTrue(gc._escalate_to_jvm_restart("test reason"))
+            self.assertEqual(cooldown.call_count, 3)
+            self.assertEqual(restart.call_count, 3)
+
+    def test_exits_after_restart_cap(self):
+        # Every restart fails. Must sys.exit(1) after the cap and not
+        # loop forever.
+        with patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
+             patch.object(gc, "do_restart_in_place", return_value=False) as restart, \
+             patch.object(gc, "_reset_ccp_backoff"):
+            with self.assertRaises(SystemExit) as ctx:
+                gc._escalate_to_jvm_restart("test reason")
+            self.assertEqual(ctx.exception.code, 1)
+            self.assertEqual(restart.call_count, gc._JVM_RESTART_MAX_ATTEMPTS)
+            self.assertEqual(cooldown.call_count, gc._JVM_RESTART_MAX_ATTEMPTS)
 
 
 if __name__ == "__main__":

@@ -2075,10 +2075,84 @@ def _detect_login_stuck_connecting():
     return False
 
 
-# Hard cap on in-JVM relogin retries per controller lifetime. If the CCP
-# lockout persists past this many attempts, let the container exit so the
-# orchestrator's own backoff (docker restart policy) takes over.
+# Hard cap on in-JVM relogin retries before escalating to JVM restart.
+# Reached in two situations: (a) CCP lockout keeps rearming across
+# attempts, or (b) ``attempt_inplace_relogin`` returns False (disposed
+# login frame — see v0.4.4). Escalation then calls
+# ``_escalate_to_jvm_restart`` (v0.4.5), which long-cools-down and soft-
+# restarts this mode's JVM via ``do_restart_in_place``.
 _INPLACE_RELOGIN_MAX_ATTEMPTS = 8
+
+# v0.4.5: cap on JVM-restart attempts. Each attempt does a long CCP
+# cool-down + ``do_restart_in_place``. 5 × CCP_COOLDOWN_SECONDS (default
+# 1200s = 20min) = 100 min of wall clock at the cap, which is more than
+# enough for IBKR's CCP rate limiter to clear if it's going to clear.
+# Past this cap the controller exits (``sys.exit(1)``).
+_JVM_RESTART_MAX_ATTEMPTS = int(os.environ.get("JVM_RESTART_MAX_ATTEMPTS", "5"))
+
+# v0.4.5: long CCP cool-down before a JVM restart. Much longer than the
+# exponential attempt-spacing backoff (``_apply_ccp_backoff``) — CCP
+# needs silence to reset, not just spacing. Empirical observation:
+# short waits (< 5 min) keep the limiter armed; 20+ min usually clears.
+# Env var ``CCP_COOLDOWN_SECONDS`` (default 1200 = 20min).
+_CCP_COOLDOWN_SECONDS_DEFAULT = 1200
+
+
+def _apply_ccp_long_cooldown(reason):
+    """Sleep a long duration (default 20min) to let IBKR's CCP rate
+    limiter fully clear before a JVM restart. Required because
+    killing and relaunching the JVM without the cool-down feeds the
+    limiter a fresh handshake and keeps the lockout armed (exactly
+    the failure mode the v0.4.0 changelog described).
+
+    Env var: ``CCP_COOLDOWN_SECONDS`` (int seconds, default 1200).
+    """
+    cool_down_s = int(os.environ.get(
+        "CCP_COOLDOWN_SECONDS", str(_CCP_COOLDOWN_SECONDS_DEFAULT)))
+    log.warning(f"CCP long cool-down ({reason}): sleeping {cool_down_s}s "
+                "before JVM restart. Short waits keep IBKR's rate "
+                "limiter armed; this silence lets it reset.")
+    time.sleep(cool_down_s)
+
+
+def _escalate_to_jvm_restart(reason):
+    """v0.4.5: Dual-mode-aware escape hatch for CCP lockout.
+
+    Replaces the old ``sys.exit(1)`` terminus on paths where in-JVM
+    relogin is exhausted (max attempts) or impossible (disposed login
+    frame, v0.4.4). In dual-mode the container won't restart on
+    sys.exit because ``run.sh`` waits on both live+paper controller
+    PIDs and only the exiting mode's process dies — the container
+    stays up on the other mode's PID and this mode's JVM stays dead
+    forever. That leaves futures-admin connecting to a dangling socat
+    that ECONNREFUSEs every request.
+
+    Instead: do a long CCP cool-down (default 20min) to let IBKR's
+    rate limiter clear, then soft-restart THIS mode's Gateway JVM
+    via ``do_restart_in_place``. ``do_restart_in_place`` handles the
+    full re-login pipeline — kill old JVM, launch new, wait for
+    agent, find app, handle_login, post-login dialogs, 2FA,
+    disclaimers, wait for API port, apply config, signal ready. If
+    it returns True, the API port is open and recovery is complete.
+
+    Returns True on successful JVM restart. Calls ``sys.exit(1)``
+    if restart keeps failing past ``_JVM_RESTART_MAX_ATTEMPTS`` (the
+    fresh JVM keeps hitting CCP lockout even after each cool-down).
+    """
+    for attempt in range(1, _JVM_RESTART_MAX_ATTEMPTS + 1):
+        _apply_ccp_long_cooldown(
+            f"{reason}; JVM restart {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}"
+        )
+        log.warning(f"JVM restart attempt {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}: "
+                    "calling do_restart_in_place")
+        if do_restart_in_place():
+            log.info("JVM restart succeeded; API port is open")
+            _reset_ccp_backoff()
+            return True
+        log.error(f"JVM restart attempt {attempt} failed")
+    log.error(f"JVM restart limit ({_JVM_RESTART_MAX_ATTEMPTS}) exhausted "
+              "after long cool-downs; exiting")
+    sys.exit(1)
 
 
 def _looks_like_disposed_shell(windows):
@@ -2289,17 +2363,17 @@ def wait_for_api_port_with_retry(app, port_timeout=180,
         _apply_ccp_backoff()
         if not attempt_inplace_relogin(app):
             log.error("In-JVM relogin failed during API-port retry "
-                      "(login frame never reappeared or handle_login "
-                      "failed); exiting")
-            sys.exit(1)
+                      "(login frame disposed or handle_login failed); "
+                      "escalating to long-cool-down JVM restart (v0.4.5)")
+            return _escalate_to_jvm_restart("in-JVM relogin returned False")
         if wait_for_api_port(timeout=port_timeout):
             _reset_ccp_backoff()
             return True
     log.error(f"CCP lockout persists after {max_attempts} in-JVM "
-              "relogin attempts at API-port wait; exiting for "
-              "container-level recovery (docker restart policy "
-              "takes over)")
-    sys.exit(1)
+              "relogin attempts at API-port wait; escalating to "
+              "long-cool-down JVM restart (v0.4.5 — dual-mode container's "
+              "run.sh does NOT restart on sys.exit, so we self-heal)")
+    return _escalate_to_jvm_restart(f"{max_attempts} in-JVM relogin attempts exhausted")
 
 
 def _diagnose_login_failure():
@@ -2598,15 +2672,27 @@ def main():
         ccp_retry += 1
         if ccp_retry > _INPLACE_RELOGIN_MAX_ATTEMPTS:
             log.error(f"CCP lockout persists after {_INPLACE_RELOGIN_MAX_ATTEMPTS} "
-                      "in-JVM relogin attempts; exiting for container-level "
-                      "recovery (docker restart policy takes over)")
-            sys.exit(1)
+                      "in-JVM relogin attempts; escalating to long-cool-down "
+                      "JVM restart (v0.4.5)")
+            _escalate_to_jvm_restart(
+                f"{_INPLACE_RELOGIN_MAX_ATTEMPTS} in-JVM relogins exhausted in main CCP pre-loop")
+            # Escalation returned True — fresh JVM is up, login completed,
+            # API port open (do_restart_in_place handled it all). Rebind
+            # app to the new JVM's AT-SPI reference and exit the CCP loop
+            # — the post-login steps below are now redundant but
+            # idempotent, so letting them run is harmless.
+            app = CURRENT_APP
+            break
         log.info(f"Retrying auth in-JVM after CCP backoff "
                  f"(attempt {ccp_retry}/{_INPLACE_RELOGIN_MAX_ATTEMPTS})")
         if not attempt_inplace_relogin(app):
-            log.error("In-JVM relogin failed (login frame never reappeared "
-                      "or handle_login failed); exiting")
-            sys.exit(1)
+            log.error("In-JVM relogin failed (login frame disposed or "
+                      "handle_login failed); escalating to long-cool-down "
+                      "JVM restart (v0.4.5)")
+            _escalate_to_jvm_restart(
+                "in-JVM relogin returned False in main CCP pre-loop")
+            app = CURRENT_APP
+            break
         # Loop back: _detect_ccp_lockout polls the NEW Log In click's
         # auth outcome. If no fresh Timeout! appears within 25s, the
         # lockout has cleared and we fall through to post-login.

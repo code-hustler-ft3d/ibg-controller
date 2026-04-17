@@ -4,6 +4,52 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.5] - 2026-04-16
+
+### Fixed
+
+- **v0.4.4's "escalate to container-level recovery" was a no-op in
+  dual-mode containers.** Validation (futures-admin agent, live+paper
+  combined container): paper correctly detected the disposed-shell
+  state and called `sys.exit(1)`, but the container did NOT restart.
+  Root cause is in `docker/run.sh`: dual-mode spawns both live and
+  paper controllers as children and ends with
+  `wait "${pid[@]}"`. When one child exits, `wait` keeps polling the
+  other — the container stays up, docker's restart policy never
+  fires, and that mode's Gateway JVM is orphaned. Paper was left
+  with a dead JVM on port 4002 and a socat on 4004 respawning with
+  `ECONNREFUSED` against it. Live was untouched, so the user could
+  trade live but not paper — exactly what happened in the validation
+  run.
+- Fix: replaced the four `sys.exit(1)` calls on CCP-exhaustion paths
+  (two in `main()`'s CCP pre-loop, two in
+  `wait_for_api_port_with_retry`) with
+  `_escalate_to_jvm_restart(reason)`. The helper does a long CCP
+  cool-down (default 1200s = 20min, env `CCP_COOLDOWN_SECONDS`) to
+  let IBKR's rate limiter clear, then calls `do_restart_in_place`
+  to tear down THIS mode's JVM and relaunch it. The other mode's
+  JVM is untouched. Retries up to `_JVM_RESTART_MAX_ATTEMPTS`
+  (default 5, env `JVM_RESTART_MAX_ATTEMPTS`) with a fresh cool-down
+  on each attempt before finally `sys.exit(1)`'ing — 5 × 20min =
+  100min of wall clock at the cap, more than enough for CCP to
+  clear if it's going to.
+- Why the long cool-down is mandatory before the JVM restart:
+  killing+relaunching the JVM without a cool-down is exactly what
+  v0.4.0 retired because it feeds IBKR's rate limiter a fresh TCP/
+  TLS handshake each cycle and keeps the lockout armed. v0.4.5
+  brings JVM restart back ONLY behind the long cool-down and ONLY
+  on paths where in-JVM recovery is demonstrably impossible
+  (disposed login frame) or has exhausted its cap. The v0.4.0
+  "stay in one JVM on auth failure" invariant still holds for the
+  common case; v0.4.5 just adds a realistic escape hatch for the
+  narrow class where it can't.
+- Consistent with `do_restart_in_place`'s existing semantics:
+  step 6 of that function includes its own in-JVM CCP retry loop,
+  so if the fresh JVM ALSO hits CCP lockout (the limiter hasn't
+  fully cleared), it returns False and `_escalate_to_jvm_restart`
+  cools down again and tries one more time. Hard-capped so we
+  can't spin forever.
+
 ## [0.4.4] - 2026-04-16
 
 ### Fixed
