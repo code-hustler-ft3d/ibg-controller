@@ -4,6 +4,45 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.2] - 2026-04-16
+
+### Fixed
+
+- **In-JVM relogin iteration 2+ failed at `SETTEXT Username`** on paper-
+  side production (observed 17:56:48 UTC-04 on 2026-04-16). v0.4.1's
+  outer retry loop correctly routed the stuck-connecting pattern into
+  `wait_for_api_port_with_retry` and engaged the 120s CCP backoff, but
+  the follow-up `attempt_inplace_relogin` iteration exited with
+  `agent SETTEXT 'Username': ERR not_found type=text name=Username`.
+  Password field was found (stable `JPasswordField` Swing type);
+  Username was not (accessible name mutates after a failed attempt —
+  the field can become a JComboBox autocomplete editor whose inner
+  JTextField has null AccessibleName).
+- Fix: new agent commands `SETTEXT_LOGIN_USER <text>` and
+  `SETTEXT_LOGIN_PASSWORD <text>` in `agent/GatewayInputAgent.java`
+  that identify the login frame by "contains a JPasswordField" and
+  locate fields by Swing type rather than accessible name. The
+  commands poll up to 10s for the field to become editable — the
+  username field is temporarily disabled during Gateway's "Attempt N:
+  connecting to server" retry animation, which the old immediate
+  lookup would have missed as well.
+- `handle_login` in `gateway_controller.py` now calls
+  `agent_settext_login_user` / `agent_settext_login_password` instead
+  of `find_descendant` + `set_text` for the credential-typing step.
+  The trading-mode selection and "Log In" button click still use the
+  AT-SPI path — both of those selectors remain stable across
+  attempts.
+- Matches IBC's `LoginManager.getUsernameField()` approach (component-
+  tree traversal, not accessibility name). See ADR-001 for the broader
+  direction this surgical fix sits within.
+
+### Known — not v0.4.2 scope
+
+- Controller readiness 300s timeout starts socat regardless of paper
+  auth state, which orphans socat alongside the JVM on `sys.exit(1)`.
+  Pre-existing; not a v0.4.1 or v0.4.2 regression. Tracked for a
+  future release.
+
 ## [0.4.1] - 2026-04-16
 
 ### Fixed

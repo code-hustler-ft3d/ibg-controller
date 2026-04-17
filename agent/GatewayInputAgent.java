@@ -55,6 +55,8 @@ import javax.swing.tree.TreePath;
  *   JTREE_SELECT_PATH <title>|<p1>/<p2>/..→ OK selected=<path> | ERR ...
  *   JCHECK <title>|<name>|<true|false>    → OK unchanged=<v> | OK changed=<v> | ERR ...
  *   SETTEXT_BY_LABEL <title>|<label>|<v>  → OK set label=<label> value=<v> | ERR ...
+ *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
+ *   SETTEXT_LOGIN_PASSWORD <text>         → OK | ERR ...
  *
  * Component lookup is by AccessibleContext.getAccessibleName() or by
  * setText()/AbstractButton.getText(), matching what AT-SPI exposes.
@@ -231,6 +233,25 @@ public class GatewayInputAgent {
                 // own but sit next to a descriptive JLabel.
                 // Protocol: SETTEXT_BY_LABEL <title_substr>|<label>|<value>
                 return doSetTextByLabel(rest);
+            }
+            case "SETTEXT_LOGIN_USER": {
+                // v0.4.2: role-based lookup for the Gateway login frame's
+                // username field. Bypasses SETTEXT's name-based lookup
+                // because the username field's accessible name mutates
+                // across login attempts (after a failed attempt it can
+                // become a JComboBox autocomplete editor whose JTextField
+                // child has null AccessibleName). Uses Swing type info,
+                // which is stable. Waits up to 10s for the field to
+                // become editable (the field is temporarily disabled
+                // during Gateway's "Attempt N: connecting to server"
+                // retry animation).
+                return doSetLoginUser(rest);
+            }
+            case "SETTEXT_LOGIN_PASSWORD": {
+                // Symmetric to SETTEXT_LOGIN_USER. Password's accessible
+                // name is currently stable, but role-based lookup future-
+                // proofs against drift in newer Gateway versions.
+                return doSetLoginPassword(rest);
             }
             default:
                 return "ERR unknown_command:" + cmd;
@@ -592,6 +613,82 @@ public class GatewayInputAgent {
             }
         });
         return "OK set label=" + labelText + " value=" + value;
+    }
+
+    private static String doSetLoginUser(String text) throws Exception {
+        JTextComponent field = waitForLoginTextField(false, 10_000L);
+        if (field == null) {
+            return "ERR not_found editable_non_password_text in login_frame after 10s";
+        }
+        final JTextComponent f = field;
+        SwingUtilities.invokeAndWait(() -> {
+            f.requestFocusInWindow();
+            f.selectAll();
+            f.setText(text);
+        });
+        return "OK";
+    }
+
+    private static String doSetLoginPassword(String text) throws Exception {
+        JTextComponent field = waitForLoginTextField(true, 10_000L);
+        if (field == null) {
+            return "ERR not_found editable_password in login_frame after 10s";
+        }
+        final JTextComponent f = field;
+        SwingUtilities.invokeAndWait(() -> {
+            f.requestFocusInWindow();
+            f.selectAll();
+            f.setText(text);
+        });
+        return "OK";
+    }
+
+    /**
+     * Find the first showing, editable text component on the Gateway
+     * login frame, polling until the deadline. The "login frame" is
+     * identified by containing a JPasswordField — a stable invariant
+     * of the Gateway login dialog across accessibility-name drift.
+     *
+     * @param wantPassword true → return the editable JPasswordField;
+     *                     false → return the first editable
+     *                     JTextComponent that is NOT a JPasswordField.
+     */
+    private static JTextComponent waitForLoginTextField(boolean wantPassword, long timeoutMs)
+            throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            Window loginFrame = findLoginFrame();
+            if (loginFrame != null) {
+                List<JTextComponent> matches = new ArrayList<>();
+                for (JTextComponent f : collect(loginFrame, JTextComponent.class)) {
+                    boolean isPw = f instanceof javax.swing.JPasswordField;
+                    if (isPw != wantPassword) continue;
+                    if (!f.isShowing() || !f.isEnabled() || !f.isEditable()) continue;
+                    matches.add(f);
+                }
+                if (!matches.isEmpty()) {
+                    if (matches.size() > 1) {
+                        System.err.println("[gateway-input-agent] warning: "
+                                + matches.size() + " editable "
+                                + (wantPassword ? "password" : "non-password")
+                                + " text components on login frame; using first");
+                    }
+                    return matches.get(0);
+                }
+            }
+            Thread.sleep(100);
+        }
+        return null;
+    }
+
+    private static Window findLoginFrame() {
+        for (Window w : Window.getWindows()) {
+            if (!w.isShowing()) continue;
+            if (!collect(w, javax.swing.JPasswordField.class).isEmpty()) {
+                return w;
+            }
+        }
+        return null;
     }
 
     private static JTextComponent firstEditableTextIn(Component root) {

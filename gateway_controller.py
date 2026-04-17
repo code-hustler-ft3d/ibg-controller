@@ -500,6 +500,48 @@ def agent_click(name):
     return False
 
 
+def agent_settext_login_user(text):
+    """Set the Gateway login frame's username via in-JVM role-based lookup.
+
+    v0.4.2: bypasses the name-based SETTEXT path. After a failed login
+    attempt, the username field can become a JComboBox autocomplete
+    editor whose JTextField child has null AccessibleName, so SETTEXT
+    by name ("Username") returns not_found on re-drive from
+    attempt_inplace_relogin. The agent-side command finds the field by
+    Swing type (first editable non-password JTextComponent on the
+    window containing a JPasswordField). Waits up to 10s for the field
+    to become editable (disabled during Gateway's "Attempt N:
+    connecting to server" retry animation).
+    """
+    try:
+        resp = _agent_request(f"SETTEXT_LOGIN_USER {text}")
+    except Exception as e:
+        log.error(f"agent SETTEXT_LOGIN_USER: {type(e).__name__}: {e}")
+        return False
+    if resp.startswith("OK"):
+        return True
+    log.error(f"agent SETTEXT_LOGIN_USER: {resp}")
+    return False
+
+
+def agent_settext_login_password(text):
+    """Set the Gateway login frame's password via in-JVM role-based lookup.
+
+    Symmetric to agent_settext_login_user. Password's accessible name
+    is currently stable, but role-based lookup (match on JPasswordField
+    Swing type) future-proofs against name drift.
+    """
+    try:
+        resp = _agent_request(f"SETTEXT_LOGIN_PASSWORD {text}")
+    except Exception as e:
+        log.error(f"agent SETTEXT_LOGIN_PASSWORD: {type(e).__name__}: {e}")
+        return False
+    if resp.startswith("OK"):
+        return True
+    log.error(f"agent SETTEXT_LOGIN_PASSWORD: {resp}")
+    return False
+
+
 def agent_settext_in_window(title_substring, text):
     """Type text into the first editable JTextComponent of the first visible
     window whose title contains the substring. Used for fields that have
@@ -1118,21 +1160,21 @@ def handle_login(app):
         else:
             log.info(f"Trading mode already {target}")
 
-    # Username
-    user_field = find_descendant(app, role="text", name="Username")
-    if user_field is None:
-        log.error("Username field not found")
-        return False
-    user_ok = set_text(user_field, USERNAME)
+    # Username — v0.4.2: route through in-JVM role-based lookup instead
+    # of AT-SPI name-based find_descendant + set_text. The username
+    # field's accessible name mutates between login attempts (can
+    # become a JComboBox autocomplete editor with null AccessibleName),
+    # breaking the old name-based SETTEXT path on attempt_inplace_relogin
+    # re-drive. The new agent command matches on Swing type (first
+    # editable non-password JTextComponent on the login frame).
+    user_ok = agent_settext_login_user(USERNAME)
     if not user_ok and not TEST_MODE:
         return False
 
-    # Password (re-find — the tree may have updated)
-    pw_field = find_descendant(app, role="password text", name="Password")
-    if pw_field is None:
-        log.error("Password field disappeared")
-        return False
-    pw_ok = set_text(pw_field, PASSWORD)
+    # Password — symmetric role-based lookup. JPasswordField Swing type
+    # is stable across Gateway versions, so this is equivalent to the
+    # old name-based path but future-proof against accessible-name drift.
+    pw_ok = agent_settext_login_password(PASSWORD)
     if not pw_ok and not TEST_MODE:
         return False
 
