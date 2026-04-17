@@ -633,5 +633,53 @@ class TestEscalateToJvmRestart(unittest.TestCase):
             self.assertEqual(relaunch.call_count, gc._JVM_RESTART_MAX_ATTEMPTS)
 
 
+class TestRecoverJvmOrEscalate(unittest.TestCase):
+    """_recover_jvm_or_escalate is v0.4.7's dual-mode-safe recovery
+    helper for monitor_loop paths that previously sys.exit'd. Fast
+    path via do_restart_in_place first (no cool-down); on failure
+    fall through to _escalate_to_jvm_restart (silent cool-down).
+    Contract: never returns False — returns True on recovery, or
+    sys.exit(1) propagates from _escalate_to_jvm_restart's cap."""
+
+    def test_returns_true_on_fast_restart_success(self):
+        # Fast path succeeds — no escalation needed, no cool-down.
+        with patch.object(gc, "do_restart_in_place", return_value=True) as restart, \
+             patch.object(gc, "_escalate_to_jvm_restart") as escalate:
+            self.assertTrue(gc._recover_jvm_or_escalate("test reason"))
+            restart.assert_called_once()
+            escalate.assert_not_called()
+
+    def test_escalates_on_fast_restart_false(self):
+        # do_restart_in_place returns False => escalate.
+        with patch.object(gc, "do_restart_in_place", return_value=False) as restart, \
+             patch.object(gc, "_escalate_to_jvm_restart",
+                          return_value=True) as escalate:
+            self.assertTrue(gc._recover_jvm_or_escalate("test reason"))
+            restart.assert_called_once()
+            escalate.assert_called_once_with("test reason")
+
+    def test_escalates_on_fast_restart_exception(self):
+        # Exception during do_restart_in_place must not propagate —
+        # must be caught and routed to escalation.
+        with patch.object(gc, "do_restart_in_place",
+                          side_effect=RuntimeError("boom")) as restart, \
+             patch.object(gc, "_escalate_to_jvm_restart",
+                          return_value=True) as escalate:
+            self.assertTrue(gc._recover_jvm_or_escalate("test reason"))
+            restart.assert_called_once()
+            escalate.assert_called_once_with("test reason")
+
+    def test_propagates_systemexit_from_escalate_cap(self):
+        # When escalate exhausts its cap and calls sys.exit(1), the
+        # SystemExit must propagate up through _recover_jvm_or_escalate
+        # (never swallowed).
+        with patch.object(gc, "do_restart_in_place", return_value=False), \
+             patch.object(gc, "_escalate_to_jvm_restart",
+                          side_effect=SystemExit(1)):
+            with self.assertRaises(SystemExit) as ctx:
+                gc._recover_jvm_or_escalate("test reason")
+            self.assertEqual(ctx.exception.code, 1)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

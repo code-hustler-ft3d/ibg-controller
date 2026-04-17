@@ -2115,6 +2115,42 @@ def _apply_ccp_long_cooldown(reason):
     time.sleep(cool_down_s)
 
 
+def _recover_jvm_or_escalate(reason):
+    """v0.4.7: Attempt a fast in-place JVM restart; on failure fall
+    through to ``_escalate_to_jvm_restart`` (long CCP cool-down).
+
+    Used by ``monitor_loop`` on paths where the old code called
+    ``sys.exit(rc)``. In dual-mode those exits were silent no-ops —
+    the container stayed up on the *other* mode's PID and this mode's
+    JVM stayed dead forever (same trap v0.4.5/v0.4.6 fixed for the
+    CCP-lockout paths). 2026-04-17 validation: live JVM exited
+    cleanly (code 0) 18min after container start, ``monitor_loop``
+    ``sys.exit``'d, live port 4001 was refused from outside the
+    container while the container itself kept serving paper.
+
+    Fast path first because an unexpected clean JVM exit (IBKR session
+    kick, auto-logoff) usually isn't CCP-related — ``do_restart_in_place``
+    will relaunch and log in immediately, no 20min wait. If it does
+    fail (CCP lockout on the relaunched JVM, for instance), we fall
+    through to the silent-cool-down escalation.
+
+    Never returns False. Returns True on recovery; if everything fails,
+    ``_escalate_to_jvm_restart`` calls ``sys.exit(1)`` after exhausting
+    ``_JVM_RESTART_MAX_ATTEMPTS``.
+    """
+    log.warning(f"Recovery: {reason}. Trying fast in-place restart first.")
+    try:
+        if do_restart_in_place():
+            log.info("Recovery: fast restart succeeded")
+            return True
+    except Exception as e:
+        log.error(f"Recovery: do_restart_in_place raised "
+                  f"{type(e).__name__}: {e}")
+    log.warning("Recovery: fast restart failed; escalating to "
+                "long-cool-down JVM restart")
+    return _escalate_to_jvm_restart(reason)
+
+
 def _escalate_to_jvm_restart(reason):
     """v0.4.5: Dual-mode-aware escape hatch for CCP lockout.
 
@@ -3189,7 +3225,17 @@ def monitor_loop(app):
                 os.unlink(READY_FILE)
             except FileNotFoundError:
                 pass
-            sys.exit(rc)
+            # v0.4.7: dual-mode-safe recovery. sys.exit(rc) here would
+            # leave this mode's JVM dead while the container stays up
+            # on the other mode's PID — same trap v0.4.5/v0.4.6 fixed
+            # for the CCP paths. _recover_jvm_or_escalate tries a fast
+            # restart first (cheap if IBKR just kicked the session) and
+            # falls through to long cool-down if CCP is actually locked.
+            _recover_jvm_or_escalate(f"JVM exited with code {rc}")
+            consecutive_failures = 0
+            wedged_failures = 0
+            last_heartbeat = time.monotonic()
+            continue
 
         now = time.monotonic()
         if now - last_heartbeat >= HEARTBEAT_INTERVAL:
@@ -3230,22 +3276,40 @@ def monitor_loop(app):
                                         consecutive_failures = 0
                                         wedged_failures = 0
                                     else:
-                                        log.error("In-place restart failed; controller exiting")
-                                        try:
-                                            os.unlink(READY_FILE)
-                                        except FileNotFoundError:
-                                            pass
-                                        sys.exit(1)
+                                        # v0.4.7: don't sys.exit here —
+                                        # in dual-mode the container stays
+                                        # up on the other PID and this
+                                        # mode's JVM is orphaned.
+                                        log.error("In-place restart "
+                                                  "returned False; "
+                                                  "escalating to long "
+                                                  "cool-down")
+                                        _escalate_to_jvm_restart(
+                                            "wedge do_restart_in_place failed")
+                                        consecutive_failures = 0
+                                        wedged_failures = 0
                                 except Exception as e:
-                                    log.error(f"In-place restart raised: {type(e).__name__}: {e}")
-                                    sys.exit(1)
+                                    log.error(f"In-place restart raised: "
+                                              f"{type(e).__name__}: {e}")
+                                    # v0.4.7: same reason — escalate
+                                    # instead of sys.exit.
+                                    _escalate_to_jvm_restart(
+                                        f"wedge do_restart_in_place raised "
+                                        f"{type(e).__name__}")
+                                    consecutive_failures = 0
+                                    wedged_failures = 0
                     else:
-                        log.error("Re-auth failed; controller exiting")
+                        # v0.4.7: reauth failed => dual-mode-safe recovery
+                        # (was sys.exit(1), which is a no-op in dual-mode).
+                        log.error("Re-auth failed; attempting dual-mode-"
+                                  "safe recovery")
                         try:
                             os.unlink(READY_FILE)
                         except FileNotFoundError:
                             pass
-                        sys.exit(1)
+                        _recover_jvm_or_escalate("monitor_loop re-auth failed")
+                        consecutive_failures = 0
+                        wedged_failures = 0
 
         time.sleep(5)
 

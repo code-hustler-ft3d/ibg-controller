@@ -4,6 +4,39 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.7] - 2026-04-17
+
+### Fixed
+
+- **`monitor_loop` was silently dropping this mode's JVM on four
+  recoverable failure paths.** After v0.4.5/v0.4.6 fixed the CCP
+  paths, ``monitor_loop`` still had four ``sys.exit`` calls
+  (Gateway JVM exited / wedge do_restart returned False / wedge
+  do_restart raised / re-auth failed) that hit the same dual-mode
+  trap: the container stays up on the other mode's PID while this
+  mode's JVM stays dead, so ``futures-admin`` sees ECONNREFUSED on
+  the dangling socat forever.
+- Validation 2026-04-17: v0.4.6 paper recovery worked perfectly
+  (silent cool-down → port 4002 came up clean), but live JVM
+  exited cleanly (code 0) 18min after container start — likely
+  IBKR-side session kick or auto-logoff behavior — and
+  ``monitor_loop`` ``sys.exit(0)``'d. Container stayed up on paper
+  controller's PID, live port 4001 refused from outside.
+- Fix: new ``_recover_jvm_or_escalate(reason)`` helper that tries a
+  fast in-place JVM restart (``do_restart_in_place``) first — no
+  20min wait if the failure isn't CCP-related — and falls through
+  to ``_escalate_to_jvm_restart`` (v0.4.6 silent cool-down) only
+  when the fast restart can't recover. Never returns False; on the
+  exhausted path ``_escalate_to_jvm_restart`` calls ``sys.exit(1)``.
+- All four ``monitor_loop`` ``sys.exit`` sites now route through
+  either ``_recover_jvm_or_escalate`` (JVM-exited, re-auth-failed:
+  fast path worth trying) or ``_escalate_to_jvm_restart`` directly
+  (wedge path that already tried ``do_restart_in_place`` once, so
+  skip the retry and go straight to cool-down).
+- New tests ``TestRecoverJvmOrEscalate`` cover the fast-success,
+  escalate-on-False, escalate-on-exception, and propagate-SystemExit
+  contracts.
+
 ## [0.4.6] - 2026-04-16
 
 ### Fixed
