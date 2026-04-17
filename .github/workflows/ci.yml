@@ -94,37 +94,34 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: make
+      - name: Install build + runtime deps on the runner
+        # The runner is ubuntu-24.04 — the same distro we previously
+        # docker-run'd into for this smoke test. Running the smoke
+        # directly on the runner drops an unreliable hop (docker's
+        # NAT network couldn't reach archive.ubuntu.com on 2026-04-17,
+        # failing the original docker-apt-install flow even though
+        # the runner's own apt was fine).
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends make unzip
-          make
+          sudo apt-get install -y --no-install-recommends \
+            make unzip \
+            python3 python3-gi gir1.2-atspi-2.0 at-spi2-core
+
+      - name: make
+        run: make
 
       - name: Real-pyatspi2 module-load smoke test
+        env:
+          TWS_USERID: x
+          TWS_PASSWORD: x
+          TRADING_MODE: paper
         run: |
-          cat > /tmp/smoke_test.py << 'PYEOF'
+          python3 - <<'PY'
           import sys
-          sys.path.insert(0, "/src")
+          sys.path.insert(0, ".")
           import gateway_controller as gc
           print("module loaded, version check OK")
           print(f"  TRADING_MODE={gc.TRADING_MODE}")
           print(f"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}")
           print(f"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries")
-          PYEOF
-          sed -i 's/^          //' /tmp/smoke_test.py
-          docker run --rm \
-            -v $PWD:/src \
-            -v /tmp/smoke_test.py:/tmp/smoke_test.py \
-            -w /src \
-            -e TWS_USERID=x \
-            -e TWS_PASSWORD=x \
-            -e TRADING_MODE=paper \
-            ubuntu:24.04 \
-            bash -c '
-              set -e
-              apt-get update -qq
-              apt-get install -y --no-install-recommends \
-                python3 python3-gi gir1.2-atspi-2.0 at-spi2-core \
-                2>/dev/null
-              python3 /tmp/smoke_test.py
-            '
+          PY
