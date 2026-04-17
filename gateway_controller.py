@@ -2127,31 +2127,41 @@ def _escalate_to_jvm_restart(reason):
     forever. That leaves futures-admin connecting to a dangling socat
     that ECONNREFUSEs every request.
 
-    Instead: do a long CCP cool-down (default 20min) to let IBKR's
-    rate limiter clear, then soft-restart THIS mode's Gateway JVM
-    via ``do_restart_in_place``. ``do_restart_in_place`` handles the
-    full re-login pipeline — kill old JVM, launch new, wait for
-    agent, find app, handle_login, post-login dialogs, 2FA,
-    disclaimers, wait for API port, apply config, signal ready. If
-    it returns True, the API port is open and recovery is complete.
+    v0.4.6 sequencing (kill first, THEN cool-down, THEN relaunch):
+    kill this mode's Gateway JVM, sleep the long CCP cool-down
+    (default 20min) with NO JVM running on these credentials, then
+    launch a fresh JVM and re-drive login. If the JVM is kept alive
+    during the cool-down its internal "Attempt N: connecting to
+    server" retry loop keeps hitting IBKR's auth server and keeps
+    the CCP rate limiter armed — observed 2026-04-16 with v0.4.5,
+    where a 20min cool-down with the JVM alive failed to clear CCP
+    on the relaunch. v0.4.6 makes the cool-down genuinely silent.
 
-    Returns True on successful JVM restart. Calls ``sys.exit(1)``
-    if restart keeps failing past ``_JVM_RESTART_MAX_ATTEMPTS`` (the
-    fresh JVM keeps hitting CCP lockout even after each cool-down).
+    Not the v0.4.0 bug: v0.4.0 was kill+relaunch+retry with 60-600s
+    gaps, too short for CCP to clear and each fresh handshake rearmed
+    the limiter. v0.4.6 keeps the 20min duration but positions it so
+    the JVM is dead for the full wait.
+
+    Returns True on successful JVM restart. Calls ``sys.exit(1)`` if
+    restart keeps failing past ``_JVM_RESTART_MAX_ATTEMPTS`` (the fresh
+    JVM keeps hitting CCP lockout even after each silent cool-down).
     """
     for attempt in range(1, _JVM_RESTART_MAX_ATTEMPTS + 1):
+        log.warning(f"JVM restart attempt {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}: "
+                    "tearing down JVM before long cool-down (v0.4.6 silent cool-down)")
+        _teardown_jvm_for_restart()
         _apply_ccp_long_cooldown(
             f"{reason}; JVM restart {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}"
         )
         log.warning(f"JVM restart attempt {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}: "
-                    "calling do_restart_in_place")
-        if do_restart_in_place():
+                    "cool-down complete, launching fresh JVM")
+        if _relaunch_and_login_in_place():
             log.info("JVM restart succeeded; API port is open")
             _reset_ccp_backoff()
             return True
         log.error(f"JVM restart attempt {attempt} failed")
     log.error(f"JVM restart limit ({_JVM_RESTART_MAX_ATTEMPTS}) exhausted "
-              "after long cool-downs; exiting")
+              "after silent cool-downs; exiting")
     sys.exit(1)
 
 
@@ -2929,19 +2939,21 @@ def _command_server_main(host, port):
                 pass
 
 
-def do_restart_in_place():
-    """Tear down the current Gateway JVM, clear per-instance state
-    files, and re-run the full login sequence. Updates the module
-    globals GATEWAY_PROC / CURRENT_APP / JVM_PID so the monitor loop
-    picks up the new references on its next iteration.
+def _teardown_jvm_for_restart():
+    """v0.4.6: Terminate the current Gateway JVM and clear per-instance
+    state files (agent socket, ready file) so a subsequent launch starts
+    from a clean slate.
 
-    Used by the IBC-compat RESTART command. Returns True on full
-    success (re-login completed, API port open, readiness re-signalled),
-    False on any failure during the re-launch sequence.
+    Split out of ``do_restart_in_place`` so ``_escalate_to_jvm_restart``
+    can kill the JVM *before* the long CCP cool-down. When the JVM is
+    kept alive during the cool-down its internal "Attempt N: connecting
+    to server" retry loop keeps banging on IBKR's auth server, which
+    keeps the CCP rate limiter armed — observed 2026-04-16 with v0.4.5
+    (20min cool-down with JVM alive → CCP still locked on restart).
+    Killing the JVM first makes the cool-down genuinely silent from
+    IBKR's perspective, which is the whole point.
     """
-    global GATEWAY_PROC, CURRENT_APP, JVM_PID, _command_server_app
-
-    # 1. Terminate the current Gateway JVM cleanly.
+    global GATEWAY_PROC
     if GATEWAY_PROC is not None and GATEWAY_PROC.poll() is None:
         log.info(f"RESTART: terminating Gateway PID {GATEWAY_PROC.pid}")
         try:
@@ -2956,8 +2968,6 @@ def do_restart_in_place():
             log.warning(f"RESTART: Gateway termination error: {e}")
     GATEWAY_PROC = None
 
-    # 2. Remove the old agent socket and readiness file so the next
-    #    round starts from a clean slate.
     for p in (AGENT_SOCKET, READY_FILE):
         try:
             os.unlink(p)
@@ -2966,7 +2976,19 @@ def do_restart_in_place():
         except Exception as e:
             log.warning(f"RESTART: couldn't remove {p}: {e}")
 
-    # 3. Relaunch Gateway.
+
+def _relaunch_and_login_in_place():
+    """v0.4.6: Launch a fresh Gateway JVM and re-run the full login
+    pipeline. Assumes ``_teardown_jvm_for_restart`` has already run —
+    i.e., GATEWAY_PROC is None, agent socket is cleared.
+
+    Returns True on full success (re-login completed, API port open,
+    readiness re-signalled), False on any failure. Updates the module
+    globals GATEWAY_PROC / CURRENT_APP / JVM_PID so the monitor loop
+    picks up the new references on its next iteration.
+    """
+    global GATEWAY_PROC, CURRENT_APP, JVM_PID, _command_server_app
+
     GATEWAY_PROC = launch_gateway()
 
     # 4. Re-discover the agent (new JVM = new socket).
@@ -3034,6 +3056,27 @@ def do_restart_in_place():
 
     log.info("RESTART: Gateway re-launched successfully")
     return True
+
+
+def do_restart_in_place():
+    """Tear down the current Gateway JVM, clear per-instance state
+    files, and re-run the full login sequence. Updates the module
+    globals GATEWAY_PROC / CURRENT_APP / JVM_PID so the monitor loop
+    picks up the new references on its next iteration.
+
+    Used by the IBC-compat RESTART command and the monitor-loop wedge
+    escalation. Returns True on full success (re-login completed, API
+    port open, readiness re-signalled), False on any failure during
+    the re-launch sequence.
+
+    v0.4.6: Thin wrapper over ``_teardown_jvm_for_restart`` +
+    ``_relaunch_and_login_in_place`` so ``_escalate_to_jvm_restart`` can
+    interleave a long CCP cool-down *between* the teardown and the
+    relaunch (JVM dead during the cool-down = genuinely silent from
+    IBKR's perspective = CCP limiter actually clears).
+    """
+    _teardown_jvm_for_restart()
+    return _relaunch_and_login_in_place()
 
 
 def _handle_command(cmd):

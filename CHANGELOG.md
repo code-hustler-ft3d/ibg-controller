@@ -4,6 +4,46 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.4.6] - 2026-04-16
+
+### Fixed
+
+- **v0.4.5's long cool-down was not silent from IBKR's perspective.**
+  Validation in production (futures-admin dual-mode container,
+  2026-04-16): paper escalated to `_escalate_to_jvm_restart` on
+  schedule, sat through the full 1200s (20min) cool-down, then called
+  `do_restart_in_place`. The relaunched JVM immediately hit CCP
+  lockout again — the "Attempt 3: connecting to server" stuck-
+  connecting state came back within seconds of the new login. The
+  20min cool-down didn't actually clear the CCP limiter.
+- Root cause: `_escalate_to_jvm_restart` ran `_apply_ccp_long_cooldown`
+  BEFORE `do_restart_in_place`, which meant the old JVM stayed alive
+  throughout the cool-down. That JVM's internal "Attempt N: connecting
+  to server" retry loop kept making auth attempts against IBKR's
+  server during the whole 20min — silence from the controller, loud
+  from IBKR's perspective, so the CCP limiter stayed armed the whole
+  time. The memory's claim that "this silence lets the limiter reset"
+  was false: the controller was silent, the JVM wasn't.
+- Fix: split `do_restart_in_place` into `_teardown_jvm_for_restart`
+  (kill + clean socket/ready files) and `_relaunch_and_login_in_place`
+  (launch + agent + app discovery + handle_login + CCP retry loop +
+  post-login + 2FA + disclaimers + wait_for_api_port + signal_ready).
+  `do_restart_in_place` itself becomes a thin wrapper that calls both
+  (preserving command-server `RESTART` and monitor-loop wedge
+  escalation behavior). `_escalate_to_jvm_restart` now calls them
+  separately with the cool-down in between:
+      teardown → cool-down → relaunch.
+  JVM is dead for the full 20min = zero CCP traffic on these
+  credentials during the cool-down = limiter actually has a chance
+  to reset.
+- Not the v0.4.0 feed-the-limiter bug: v0.4.0 was kill+relaunch+retry
+  with 60-600s gaps. v0.4.6 is kill+wait_20min+relaunch. Same
+  sequencing, vastly longer silent window. The v0.4.0 lesson was
+  "don't kill+relaunch quickly", not "don't kill at all" — v0.4.6
+  holds the line on both.
+- New test `test_teardown_fires_before_cooldown` asserts the call
+  order invariant so this never regresses.
+
 ## [0.4.5] - 2026-04-16
 
 ### Fixed
