@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import gi
 
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a

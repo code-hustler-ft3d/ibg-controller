@@ -76,6 +76,26 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.4
+
+**No breaking changes.** Polish + release-pipeline fix:
+
+- `release-image.yml` now actually fires on tag push (v0.5.3's
+  trigger was suppressed by GitHub's recursion guard). v0.5.4 is the
+  first tag whose image, SBOM, and cosign attestation publish
+  automatically end-to-end. No operator action required — just
+  `docker pull ghcr.io/code-hustler-ft3d/ibg-controller:v0.5.4`.
+- If you deployed v0.5.3 by building locally, you can keep that
+  deployment; there is no functional difference in the controller
+  between 0.5.3 and 0.5.4. Upgrade whenever convenient.
+- If you want v0.5.3's image retroactively (e.g. to pin a known
+  deployment by digest), a maintainer can invoke `gh workflow run
+  "Release image" -f tag=v0.5.3` from the Actions tab to backfill
+  it. File an issue if you need this.
+- New community touchpoints: `CONTRIBUTING.md`, a feature-request
+  template, and a question template. Nothing to upgrade — these
+  just make it easier to extend or ask about the controller.
+
 ### v0.5.3
 
 **No breaking changes.** Supply chain additions:

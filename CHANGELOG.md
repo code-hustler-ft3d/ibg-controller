@@ -4,6 +4,64 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.4] - 2026-04-18
+
+### Fixed
+
+- **`release-image.yml` trigger** — v0.5.3's `on: release: types:
+  [published]` trigger never fired because GitHub's recursion guard
+  suppresses downstream workflow triggers from `GITHUB_TOKEN`-originated
+  events (ci.yml creates the release). Switched to `on: push: tags:
+  ['v*']` so the image workflow runs in parallel with ci.yml and polls
+  (30 × 10s) for the release object before uploading the SBOM asset.
+  Result: v0.5.4 is the first tag whose image + SBOM + cosign attestation
+  land automatically end-to-end.
+- **`workflow_dispatch` input** — added a manual `tag` input so any
+  past tag (including v0.5.3) can be retroactively built by invoking
+  `gh workflow run "Release image" -f tag=v0.5.3`. Also handles the
+  case where CI-validated tags get re-built after a Dockerfile fix
+  without needing a new version bump.
+- **Metadata-action tag derivation** — replaced `type=semver` (which
+  reads `github.ref`, wrong on workflow_dispatch) with explicit
+  `type=raw` values computed from a centralised `version` step, so
+  both triggers produce identical tag sets.
+
+### Added
+
+- **[`CONTRIBUTING.md`](CONTRIBUTING.md)** at repo root — dev env setup,
+  test commands, and four "Adding a new..." walkthroughs (ALERT token,
+  dialog handler, env var, IBC-key mapping). Each walkthrough numbers
+  the implementation + doc + test steps so first-time contributors
+  have a deterministic path. Lowers the bar for the
+  `gnzsnz/ib-gateway-docker` community to extend this codebase as IBC
+  sunsets in September 2026.
+- **[`.github/CODEOWNERS`](.github/CODEOWNERS)** — path-scoped review
+  routing so workflow edits, the stability-contract docs
+  (`OBSERVABILITY.md`, `UPGRADING.md`, `CHANGELOG.md`), and
+  `SECURITY.md` auto-notify on any PR that touches them, even from
+  contributors who don't know those paths are sensitive.
+- **Feature request and question issue templates** under
+  `.github/ISSUE_TEMPLATE/`. Feature requests nudge contributors to
+  check `FROM_IBC.md`'s unsupported-keys matrix before filing;
+  questions route into a dedicated `question` label and point at the
+  relevant doc sections so answerable questions get answered faster.
+- **Enhanced PR template** — added a "Why" section so reviewers
+  aren't reverse-engineering motivation, updated the stale "60 tests
+  green" to "166+ tests green", expanded the doc-update checklist
+  (`OBSERVABILITY.md`, `FROM_IBC.md`, `UPGRADING.md`), and linked
+  `CONTRIBUTING.md`'s walkthroughs inline.
+- **README badges** — release version, release-image workflow
+  status, license, and cosign-signed shield. Gives drive-by visitors
+  a signal on release cadence and supply-chain posture without having
+  to open CHANGELOG or SECURITY.md.
+
+### Non-goals
+
+- v0.5.3's published image is still absent from GHCR until the
+  `release-image.yml` workflow is manually re-run against that tag.
+  Documented under "Per-version notes" in `UPGRADING.md`; not a
+  blocker because v0.5.4 supersedes it.
+
 ## [0.5.3] - 2026-04-18
 
 ### Added

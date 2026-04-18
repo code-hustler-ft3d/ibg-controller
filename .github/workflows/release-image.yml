@@ -20,12 +20,29 @@ name: Release image
 #     field includes the workflow file path.
 
 on:
-  # Fires after CI publishes the GitHub Release (see ci.yml's
-  # `Create GitHub Release` step). Running on release:published instead
-  # of tag-push avoids racing ci.yml for the release object that we
-  # attach the SBOM to.
-  release:
-    types: [published]
+  # Fires on any `v*` tag push, in parallel with ci.yml. The SBOM
+  # upload step polls until ci.yml's `Create GitHub Release` step
+  # has produced the release object (with the tarball attached), so
+  # attachment order is deterministic even though the workflows run
+  # concurrently.
+  #
+  # We can't use `on: release: types: [published]` because
+  # ci.yml creates the release via GITHUB_TOKEN, and GitHub
+  # intentionally suppresses downstream workflow triggers from
+  # GITHUB_TOKEN-originated events (recursion guard). Using a PAT
+  # would route around that but adds a secret to manage, which is
+  # worse supply-chain hygiene than a 30s poll.
+  push:
+    tags: ['v*']
+  # Manual trigger so a tag can be (re)built if its automatic run
+  # failed, or for building an image for a pre-existing tag that
+  # predates this workflow. Pass the tag name as the `tag` input.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.5.3)'
+        required: true
+        type: string
 
 permissions:
   contents: write     # upload SBOM to the release
@@ -42,6 +59,27 @@ jobs:
     steps:
       - name: Check out
         uses: actions/checkout@v4
+        with:
+          # On workflow_dispatch, ref is the input tag; on push, it's
+          # the pushed tag already (github.ref).
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Compute version inputs
+        id: version
+        # Centralise tag/version derivation so both triggers produce
+        # identical image tags and GH-release targets downstream.
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          if [ -z "$TAG" ]; then
+            echo "No tag resolved; refusing to build without a version."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          MAJOR_MINOR="$(echo "$VERSION" | cut -d. -f1-2)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$MAJOR_MINOR" >> "$GITHUB_OUTPUT"
+          echo "Computed: tag=$TAG version=$VERSION major_minor=$MAJOR_MINOR"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -76,15 +114,13 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            # Exact version tag, with and without the leading 'v' so
-            # both :v0.5.3 and :0.5.3 resolve to the same image.
-            type=semver,pattern=v{{version}}
-            type=semver,pattern={{version}}
-            # Major.minor floating tag so consumers can pin looser
-            # (e.g. :0.5 auto-resolves to the latest 0.5.x).
-            type=semver,pattern={{major}}.{{minor}}
-            # :latest moves with each new tag. Consumers who want
-            # reproducibility should pin to the digest.
+            # Tag with leading 'v', tag without 'v', and major.minor
+            # floating tag so consumers can pin at whatever strictness
+            # level they want. :latest moves with each new tag;
+            # reproducible deployments should pin to the digest instead.
+            type=raw,value=${{ steps.version.outputs.tag }}
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.major_minor }}
             type=raw,value=latest
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
@@ -151,13 +187,32 @@ jobs:
             --type spdxjson \
             "ghcr.io/${{ github.repository }}@${IMAGE_DIGEST}"
 
+      - name: Wait for GitHub release to exist
+        # ci.yml races us to create the release object. Poll until it's
+        # there (max 5 min) before trying to upload the SBOM, so the
+        # upload doesn't race the creation.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          for i in $(seq 1 30); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Release $TAG exists after ${i} poll(s)"
+              exit 0
+            fi
+            echo "Waiting for release $TAG to be created... ($i/30)"
+            sleep 10
+          done
+          echo "Release $TAG did not appear within 5 minutes; ci.yml failed or is stuck."
+          exit 1
+
       - name: Upload SBOM as release asset
         # Also expose the SBOM on the GitHub release page so consumers
         # who don't have cosign installed can still inspect it.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ steps.version.outputs.tag }}"
           gh release upload "$TAG" sbom.spdx.json --clobber \
             --repo "$GITHUB_REPOSITORY"
 
@@ -166,7 +221,7 @@ jobs:
         run: |
           cat <<EOF
           ================================================================
-          Image published: ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}
+          Image published: ghcr.io/${{ github.repository }}:${{ steps.version.outputs.version }}
           Digest:         ${{ steps.build-push.outputs.digest }}
 
           Verify signature:

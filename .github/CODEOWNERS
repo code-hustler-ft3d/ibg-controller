@@ -1,0 +1,24 @@
+# CODEOWNERS for ibg-controller.
+#
+# GitHub auto-requests these owners on any PR that touches the listed
+# paths. A code owner's review is required to merge when branch
+# protection is configured. Listing a single owner here isn't
+# redundant: it ensures the notification fires even on tiny PRs that
+# might otherwise get batched and missed.
+
+# Default: everything.
+* @code-hustler-ft3d
+
+# Release + supply chain. These paths have outsized blast radius —
+# a bad workflow edit can leak signing identity or publish a
+# compromised image. Same owner today, but kept separate so future
+# additions (reviewers, automation accounts) land in a focused place.
+/.github/workflows/    @code-hustler-ft3d
+/SECURITY.md           @code-hustler-ft3d
+
+# Stability contracts. Changes to the public ALERT_* + /health + env
+# var surfaces can silently break downstream monitors. Owner-review
+# required.
+/docs/OBSERVABILITY.md @code-hustler-ft3d
+/docs/UPGRADING.md     @code-hustler-ft3d
+/CHANGELOG.md          @code-hustler-ft3d

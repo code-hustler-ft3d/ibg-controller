@@ -1,6 +1,10 @@
 # ibg-controller
 
-[![CI](https://github.com/code-hustler-ft3d/ibg-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/code-hustler-ft3d/ibg-controller/actions)
+[![CI](https://github.com/code-hustler-ft3d/ibg-controller/actions/workflows/ci.yml/badge.svg)](https://github.com/code-hustler-ft3d/ibg-controller/actions/workflows/ci.yml)
+[![Release image](https://github.com/code-hustler-ft3d/ibg-controller/actions/workflows/release-image.yml/badge.svg)](https://github.com/code-hustler-ft3d/ibg-controller/actions/workflows/release-image.yml)
+[![Latest release](https://img.shields.io/github/v/release/code-hustler-ft3d/ibg-controller?sort=semver)](https://github.com/code-hustler-ft3d/ibg-controller/releases)
+[![License: MIT](https://img.shields.io/github/license/code-hustler-ft3d/ibg-controller)](LICENSE)
+[![cosign signed](https://img.shields.io/badge/cosign-signed-0a84ff?logo=sigstore&logoColor=white)](SECURITY.md)
 
 A Python + in-JVM Java agent drop-in replacement for
 [IBC](https://github.com/IbcAlpha/IBC) on IB Gateway, targeted at the
