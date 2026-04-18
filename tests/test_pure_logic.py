@@ -1113,5 +1113,118 @@ class TestResolveSafeDismissButtons(unittest.TestCase):
         self.assertEqual(extras, ("Continue", "Foo"))
 
 
+class TestShutdownAlert(unittest.TestCase):
+    """v0.5.2: shutdown() emits ALERT_SHUTDOWN with a documented format.
+
+    The grep-contract in docs/OBSERVABILITY.md promises specific key
+    names (mode=, signal=, graceful=, reason=) — if a refactor drops
+    or renames any of them, external monitors break silently. These
+    tests pin the format so that breakage fails CI instead of surfacing
+    in prod."""
+
+    def _run_shutdown(self, signum, proc_behavior="clean"):
+        """Invoke shutdown() with side effects suppressed; return the
+        list of log.info messages it emitted.
+
+        proc_behavior:
+          "absent" — gateway_proc is None (no JVM started yet)
+          "exited" — JVM already exited (poll returns 0)
+          "clean"  — terminate() + wait() succeed
+          "stuck"  — wait() raises TimeoutExpired, kill() succeeds
+        """
+        import subprocess
+        info_calls = []
+
+        class FakeProc:
+            def __init__(self, behavior):
+                self.behavior = behavior
+                self.pid = 12345
+
+            def poll(self):
+                return 0 if self.behavior == "exited" else None
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                if self.behavior == "stuck":
+                    raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+                return 0
+
+            def kill(self):
+                pass
+
+        if proc_behavior == "absent":
+            fake_proc = None
+        else:
+            fake_proc = FakeProc(proc_behavior)
+
+        with patch.object(gc, "gateway_proc", fake_proc), \
+             patch.object(gc, "READY_FILE", "/tmp/nonexistent-ready-file"), \
+             patch.object(gc.log, "info",
+                          side_effect=lambda msg: info_calls.append(msg)), \
+             patch.object(gc.log, "warning"), \
+             patch("os.unlink"), \
+             patch("sys.exit") as fake_exit:
+            gc.shutdown(signum, None)
+            fake_exit.assert_called_once_with(0)
+        return info_calls
+
+    def _find_alert(self, info_calls):
+        hits = [m for m in info_calls if m.startswith("ALERT_SHUTDOWN ")]
+        self.assertEqual(
+            len(hits), 1,
+            f"expected exactly one ALERT_SHUTDOWN line, got {len(hits)}: {info_calls!r}")
+        return hits[0]
+
+    def test_sigterm_clean_shutdown_emits_graceful_true(self):
+        import signal as _signal
+        calls = self._run_shutdown(_signal.SIGTERM, proc_behavior="clean")
+        alert = self._find_alert(calls)
+        self.assertIn("signal=SIGTERM", alert)
+        self.assertIn("graceful=true", alert)
+        self.assertIn(f"mode={gc.TRADING_MODE}", alert)
+        self.assertIn('reason="', alert)
+
+    def test_sigint_clean_shutdown_emits_graceful_true(self):
+        import signal as _signal
+        calls = self._run_shutdown(_signal.SIGINT, proc_behavior="clean")
+        alert = self._find_alert(calls)
+        self.assertIn("signal=SIGINT", alert)
+        self.assertIn("graceful=true", alert)
+
+    def test_stuck_jvm_emits_graceful_false(self):
+        import signal as _signal
+        calls = self._run_shutdown(_signal.SIGTERM, proc_behavior="stuck")
+        alert = self._find_alert(calls)
+        self.assertIn("graceful=false", alert)
+        self.assertIn("SIGKILL", alert,
+                      "graceful=false reason should mention SIGKILL for operator grep-ability")
+
+    def test_no_gateway_proc_still_emits_graceful_true(self):
+        # Controller can get SIGTERM before Gateway ever launches
+        # (e.g. immediate Docker stop during image boot). ALERT_SHUTDOWN
+        # must still fire so monitors see the lifecycle event.
+        import signal as _signal
+        calls = self._run_shutdown(_signal.SIGTERM, proc_behavior="absent")
+        alert = self._find_alert(calls)
+        self.assertIn("graceful=true", alert)
+
+    def test_alert_shape_has_documented_keys_in_order(self):
+        import signal as _signal
+        calls = self._run_shutdown(_signal.SIGTERM, proc_behavior="clean")
+        alert = self._find_alert(calls)
+        # Keys appear in the order docs/OBSERVABILITY.md advertises —
+        # mode, signal, graceful, reason — so grep-based extractors
+        # that assume positional order don't break silently.
+        mode_idx = alert.index("mode=")
+        signal_idx = alert.index("signal=")
+        graceful_idx = alert.index("graceful=")
+        reason_idx = alert.index('reason="')
+        self.assertLess(mode_idx, signal_idx)
+        self.assertLess(signal_idx, graceful_idx)
+        self.assertLess(graceful_idx, reason_idx)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

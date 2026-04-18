@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import gi
 
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -2799,7 +2799,14 @@ gateway_proc = None  # global so signal handler can reach it
 
 
 def shutdown(signum, frame):
-    log.info(f"Received signal {signum}, shutting down Gateway")
+    if signum == signal.SIGTERM:
+        signame = "SIGTERM"
+    elif signum == signal.SIGINT:
+        signame = "SIGINT"
+    else:
+        signame = f"signal-{signum}"
+    log.info(f"Received signal {signum} ({signame}), shutting down Gateway")
+    graceful = True
     if gateway_proc is not None and gateway_proc.poll() is None:
         gateway_proc.terminate()
         try:
@@ -2807,10 +2814,27 @@ def shutdown(signum, frame):
         except subprocess.TimeoutExpired:
             log.warning("Gateway didn't terminate cleanly, killing")
             gateway_proc.kill()
+            graceful = False
     try:
         os.unlink(READY_FILE)
     except FileNotFoundError:
         pass
+    # ALERT_SHUTDOWN grep-contract token (v0.5.2). INFO-level so it doesn't
+    # trip the ERROR-level wake-someone-up filters; monitors that want to
+    # distinguish operator-initiated shutdowns from JVM crashes can grep on
+    # the token itself. graceful=false means Gateway ignored SIGTERM and
+    # had to be SIGKILL'd — worth flagging in dashboards as it points at
+    # a JVM that's stuck (deadlocked Swing thread, blocked I/O, etc.).
+    if graceful:
+        reason = f"controller received {signame}; Gateway JVM exited cleanly within 15s"
+    else:
+        reason = (
+            f"controller received {signame}; Gateway JVM did not exit within 15s "
+            "of SIGTERM and was SIGKILL'd")
+    log.info(
+        f"ALERT_SHUTDOWN mode={TRADING_MODE} signal={signame} "
+        f"graceful={'true' if graceful else 'false'} "
+        f"reason=\"{reason}\"")
     sys.exit(0)
 
 

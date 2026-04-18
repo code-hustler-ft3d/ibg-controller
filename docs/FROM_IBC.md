@@ -76,16 +76,58 @@ review). The tool's `--help` output lists every key it knows about.
 | `BindAddress` | `CONTROLLER_COMMAND_SERVER_HOST` | Same. Defaults to `0.0.0.0` so Docker port forwarding works; restrict external exposure with `-p 127.0.0.1:7462:7462` on the host. |
 | `ControlFrom` | — | IBC uses an IP allowlist. ibg-controller uses an auth token instead: set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN=<random-secret>` and clients send `AUTH <token>\n` before each command. See [README.md §Security](../README.md#security). |
 
-### Unsupported in ibg-controller
+### Unsupported IBC keys
 
-If you rely on any of these, **stay on IBC**:
+Grouped by decision reason. The `ibc_config_to_env.py` tool warns on
+stderr whenever it sees any of these in your `config.ini`. If you
+**rely** on a row tagged *stay-on-IBC*, stop here — the controller
+has no equivalent and adding one isn't on the roadmap. Rows tagged
+*workaround* have an alternate path.
 
-- `FIX` / `FIXLoginId` / `FIXPassword` — FIX CTCI mode
-- `CustomConfig` — the controller reads env vars directly, not an ini file
-- `MinimizeMainWindow` / `MaximizeMainWindow` — no-op in headless Docker
-- `StoreSettingsOnServer` — Gateway's own default is used
-- `SuppressInfoMessages` / `LogComponents` — controller logging is governed by `CONTROLLER_DEBUG=1` only
-- `ClosedownAt` — IBC-specific scheduled-shutdown; use `AUTO_LOGOFF_TIME` for the Gateway-driven equivalent
+#### FIX CTCI mode — stay on IBC
+
+| IBC key | Why no controller equivalent |
+|---|---|
+| `FIX` | FIX CTCI (order routing over FIX protocol) isn't a code path the controller's auth/2FA/restart logic covers. Running the controller against a Gateway process in FIX mode hasn't been validated and isn't a goal for v0.x. If you need FIX, IBC's FIX code path stays the working choice. |
+| `FIXLoginId` | Same as `FIX`. |
+| `FIXPassword` | Same as `FIX`. |
+
+#### Headless Docker makes them no-ops — silently ignored
+
+| IBC key | Why |
+|---|---|
+| `MinimizeMainWindow` | The Gateway main window is never shown to a user in headless Docker; there's nothing to minimize. |
+| `MaximizeMainWindow` | Same reason. |
+| `StoreSettingsOnServer` | The controller doesn't override Gateway's own default here; whatever your IBKR account-level settings dictate is what you get. Explicitly setting this via IBC in a Docker deployment had no observable effect and won't here. |
+
+#### Config-shape mismatch — workaround available
+
+| IBC key | Workaround |
+|---|---|
+| `CustomConfig` | The controller reads env vars directly, not a rendered `config.ini`. If you had an IBC-side `CustomConfig` that pulled from a templated file, move those same knobs into env vars in your `.env` / Docker compose / secrets manager. `ibc_config_to_env.py` handles the rename from IBC keys; the outer templating layer stays yours. |
+| `SuppressInfoMessages` | Controller logging is governed by `CONTROLLER_DEBUG=1` only — there's one verbosity knob, not per-message filters. If you want a specific message silenced, open an issue with the exact line and why. |
+| `LogComponents` | Same reason as `SuppressInfoMessages`. |
+| `BypassWarning` | **Different shape**: IBC's `yes`/`no` becomes the controller's comma-separated allowlist of exact button labels. `BYPASS_WARNING="Yes,Continue,Acknowledge"`. Review the button text your Gateway actually shows and list each verbatim. The built-in allowlist already covers the common ones (`I Agree`, `Accept`, `Close`, `Continue`). IBC's generic "dismiss any warning" semantics is intentionally narrower here — an explicit allowlist avoids auto-clicking a button the operator didn't expect. |
+| `AcceptNonBrokerageAccountWarning` | Same as `BypassWarning`: add the exact button text (e.g. `I Accept`) to `BYPASS_WARNING`. |
+| `IbAutoClosedown` | Set `AUTO_LOGOFF_TIME=HH:MM` directly — the controller drives Gateway's Auto Log Off Time field with that value. |
+| `ClosedownAt` | Use `AUTO_LOGOFF_TIME` (for Gateway-driven logoff) or `AUTO_RESTART_TIME` (for an in-JVM restart cycle) — IBC's process-level `ClosedownAt` timer has no controller equivalent; use Gateway's own schedulers via these env vars. |
+| `ControlFrom` | Use an auth token instead of an IP allowlist: set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN=<random-secret>` and have clients send `AUTH <token>\n` before each command. See [`README.md` §Security](../README.md#security). This is strictly more portable than IP allowlisting in Docker/Kubernetes environments where source IPs change. |
+| `SendTWSLogsToConsole` | No equivalent — Gateway's own logs go to `launcher.log` inside the container, and `docker logs` captures controller stdout/stderr. If you need Gateway's own launcher log outside the container, `docker cp` it or mount `/var/log` as a volume. |
+| `IbDir` | You don't normally need to set this in Docker; the image puts Gateway at a fixed path. If you're installing on a host machine and Gateway lives somewhere non-standard, use `TWS_PATH`. |
+
+#### Already handled implicitly — no-op from you
+
+These IBC keys describe behaviors the controller already does by
+default. You don't need to set anything.
+
+| IBC key | What the controller does by default |
+|---|---|
+| `TwoFactorDevice` / `SecondFactorDevice` | Polls for the 2FA dialog to be dismissed (user approves IB Key on phone, dialog disappears, controller proceeds). Same approach IBC takes. |
+| `LogToConsole` | Controller always logs to stdout/stderr. |
+
+If you find an IBC key not covered here, run it through
+`ibc_config_to_env.py` — the tool's warnings surface anything it
+doesn't know about so you can decide what to do.
 
 ## The one-shot tool
 

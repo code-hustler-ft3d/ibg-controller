@@ -260,17 +260,21 @@ process is running (for Kubernetes-style readiness).
 
 The controller also emits stable grep-contract log tokens
 (`ALERT_CCP_PERSISTENT`, `ALERT_JVM_RESTART_EXHAUSTED`,
-`ALERT_2FA_FAILED`, `ALERT_PASSWORD_EXPIRED`, `ALERT_LOGIN_FAILED`)
-that external monitors can pattern-match on regardless of log level.
-`ALERT_PASSWORD_EXPIRED` fires in two flavors — `status=warning` (with
-`days_remaining=N` when the dialog reports it, actionable before
-lockout) and `status=expired` (login is already blocked, rotate the
-password in IBKR's web portal). `ALERT_LOGIN_FAILED` fires when
-Gateway surfaces a credential-rejection modal or when the
-`launcher.log` fingerprint matches a bad-credentials auth flow
-(`reason=bad-credentials`), so monitors can tell a stale-password
-account lockout apart from IBKR's silent cooldown
+`ALERT_2FA_FAILED`, `ALERT_PASSWORD_EXPIRED`, `ALERT_LOGIN_FAILED`,
+`ALERT_SHUTDOWN`) that external monitors can pattern-match on
+regardless of log level. `ALERT_PASSWORD_EXPIRED` fires in two
+flavors — `status=warning` (with `days_remaining=N` when the dialog
+reports it, actionable before lockout) and `status=expired` (login
+is already blocked, rotate the password in IBKR's web portal).
+`ALERT_LOGIN_FAILED` fires when Gateway surfaces a credential-rejection
+modal or when the `launcher.log` fingerprint matches a bad-credentials
+auth flow (`reason=bad-credentials`), so monitors can tell a
+stale-password account lockout apart from IBKR's silent cooldown
 (`ALERT_CCP_PERSISTENT`) without waiting for the CCP-retry ceiling.
+`ALERT_SHUTDOWN` is the lifecycle complement — INFO-level and emitted
+on SIGTERM/SIGINT with `graceful=true|false` so dashboards can
+distinguish operator-initiated shutdowns from Gateway-JVM crashes,
+and flag stuck-JVM `graceful=false` restarts that need attention.
 
 The shipped `Dockerfile` includes a `HEALTHCHECK` that curls `/health`
 every 30s with a 180s start-period. In `DUAL_MODE=yes` it probes both
@@ -336,8 +340,8 @@ make
 # Syntax-check the Python controller + validate the agent jar manifest
 make test
 
-# Create a release tarball (dist/ibg-controller-0.5.1.tar.gz)
-make release VERSION=0.5.1
+# Create a release tarball (dist/ibg-controller-0.5.2.tar.gz)
+make release VERSION=0.5.2
 
 # Install directly into a running ibgateway home (for dev on host, or
 # as called by the Docker image's setup stage)
@@ -349,7 +353,7 @@ Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 ### Installing from a release tarball (for consumers who don't build)
 
 ```bash
-VER=0.5.1
+VER=0.5.2
 curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
 tar -xzf ibg-controller-${VER}.tar.gz
 cd ibg-controller-${VER}
@@ -358,7 +362,7 @@ DESTDIR=/home/ibgateway ./install.sh
 
 The tarball layout is flat:
 ```
-ibg-controller-0.5.1/
+ibg-controller-0.5.2/
 ├── gateway-input-agent.jar    ← installed to $DESTDIR/gateway-input-agent.jar
 ├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
 ├── ibc_config_to_env.py       ← one-shot IBC config.ini → env migration tool

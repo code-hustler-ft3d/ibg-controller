@@ -36,12 +36,12 @@ There's also a shallow `GET /ready` that returns `200` with
 `{"status":"up"}` as long as the controller process is running. Useful
 for Kubernetes-style readiness where "process up" is the signal.
 
-### JSON shape (v0.5.0)
+### JSON shape (v0.5.2)
 
 ```json
 {
   "status": "healthy",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "mode": "live",
   "state": "MONITORING",
   "jvm_pid": 12345,
@@ -226,6 +226,47 @@ immediately; re-auth retries repeat the alert every ~3 minutes, and
 the `_diagnose_login_failure` terminal path emits once per process
 lifetime before the controller exits).
 
+### `ALERT_SHUTDOWN`
+
+```
+ALERT_SHUTDOWN mode=live signal=SIGTERM graceful=true reason="controller received SIGTERM; Gateway JVM exited cleanly within 15s"
+ALERT_SHUTDOWN mode=live signal=SIGTERM graceful=false reason="controller received SIGTERM; Gateway JVM did not exit within 15s of SIGTERM and was SIGKILL'd"
+ALERT_SHUTDOWN mode=paper signal=SIGINT graceful=true reason="controller received SIGINT; Gateway JVM exited cleanly within 15s"
+```
+
+**When fired**: once, from the `signal.SIGTERM` / `signal.SIGINT`
+handler, as the final log line before `sys.exit(0)`. Every clean
+shutdown emits this, so its *absence* in the last ~N seconds of
+container logs (where N is your JVM shutdown timeout) is itself a
+signal: it means the controller process died without going through
+the signal handler, i.e. an unexpected JVM or interpreter crash.
+
+**Log level**: `INFO`, deliberately. This is a lifecycle event, not an
+alert that should wake someone. It sits outside the ERROR-level
+`wake-someone-up` grep (see **Grepping logs for ALERT tokens** below)
+but is still catchable via the `ALERT_` prefix.
+
+**What `graceful=false` means**: the controller sent `SIGTERM` to the
+Gateway JVM, waited 15s for a clean exit, got none, and fell through
+to `SIGKILL`. Root causes are usually one of:
+1. A Swing EDT deadlock — the JVM's shutdown hook can't drain because
+   the UI thread is blocked (rare; usually points at a Gateway-version
+   bug worth reporting upstream).
+2. A blocked native I/O call in the IBKR networking stack.
+3. The JVM is mid-GC / in a stop-the-world pause. A 15s wait should
+   normally cover this, so seeing this repeatedly points at resource
+   starvation on the host.
+
+**What the operator should do**: `graceful=true` is informational only.
+`graceful=false` on a one-off is usually not worth paging on; repeated
+occurrences warrant checking host CPU/memory pressure and, if the
+host looks fine, capturing a JVM thread dump before the next
+`graceful=false` SIGKILL (`kill -3 <jvm-pid>` into `stderr` — watch
+`docker logs`).
+
+**Recommended debounce**: none for `graceful=true`. `graceful=false`
+should page on the 3rd occurrence in 1h, not the 1st.
+
 ### `ALERT_2FA_FAILED`
 
 ```
@@ -327,11 +368,20 @@ Alert on `probe_success == 0` for 5m.
 ### Grepping logs for ALERT tokens
 
 ```bash
-# Tier 1: wake somebody up
-docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|JVM_RESTART_EXHAUSTED|2FA_FAILED|PASSWORD_EXPIRED)'
+# Tier 1: wake somebody up (ERROR-level only)
+docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|JVM_RESTART_EXHAUSTED|2FA_FAILED|PASSWORD_EXPIRED|LOGIN_FAILED)'
 
-# Just the latest occurrence of each
+# Just the latest occurrence of each (ERROR-level only)
 docker logs ibkr 2>&1 | grep -E '^[0-9]+:[0-9]+ \[ERROR\] ALERT_' | tail
+
+# Tier 2: lifecycle dashboards — includes ALERT_SHUTDOWN (INFO-level).
+# Useful to distinguish clean operator-driven restarts from JVM crashes.
+docker logs --since=1h ibkr 2>&1 | grep -Eo 'ALERT_[A-Z_]+[^"]*"[^"]*"'
+
+# Stuck-JVM detector: ALERT_SHUTDOWN with graceful=false means Gateway
+# ignored SIGTERM for 15s and had to be SIGKILL'd. 3+ in the last hour
+# is a host-health or Gateway-version problem worth investigating.
+docker logs --since=1h ibkr 2>&1 | grep -c 'ALERT_SHUTDOWN .* graceful=false'
 ```
 
 ### JSON field extraction
@@ -346,8 +396,9 @@ curl -sf http://ibkr:8080/health | \
 
 The field names and semantics of `/health` JSON and the prefix + key
 names of `ALERT_*` tokens are part of the public API as of v0.4.9.
-`ALERT_PASSWORD_EXPIRED` was added in v0.5.0 and `ALERT_LOGIN_FAILED`
-in v0.5.1, both under the same stability contract.
+`ALERT_PASSWORD_EXPIRED` was added in v0.5.0, `ALERT_LOGIN_FAILED`
+in v0.5.1, and `ALERT_SHUTDOWN` (INFO-level, lifecycle signal) in
+v0.5.2 — all under the same stability contract.
 Breaking changes will be called out in the CHANGELOG and accompany a
 minor version bump. Adding new fields to `/health` or new
 `ALERT_*` tokens is not a breaking change.

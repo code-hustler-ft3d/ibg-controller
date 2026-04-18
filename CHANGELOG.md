@@ -4,6 +4,40 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-04-18
+
+### Added
+
+- New **`ALERT_SHUTDOWN`** grep-contract log token (INFO-level)
+  emitted from the `SIGTERM` / `SIGINT` handler. Format:
+  `ALERT_SHUTDOWN mode=<live|paper> signal=<SIGTERM|SIGINT> graceful=<true|false> reason="..."`.
+  `graceful=false` means the Gateway JVM ignored `SIGTERM` for 15s
+  and had to be `SIGKILL`'d — points at a deadlocked Swing EDT, a
+  blocked native I/O call, or host resource starvation. Its *absence*
+  in the last ~N seconds of a container's logs before an exit is
+  itself a signal: the controller died without going through the
+  signal handler, i.e. unexpected JVM / interpreter crash rather
+  than operator-initiated restart. Sits at INFO deliberately so it
+  doesn't trip ERROR-level wake-someone-up grep filters, but remains
+  catchable via the `ALERT_` prefix.
+  Full grep-contract:
+  [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md#alert_shutdown).
+- New [`docs/UPGRADING.md`](docs/UPGRADING.md) — version-to-version
+  upgrade workflow, rollback recipe, and per-version operator notes.
+  Fills a gap: the CHANGELOG lists *what* changed, not *what an
+  operator needs to do* to move from one tag to the next. Pre-1.0
+  version scheme is called out explicitly: minor bumps in the `0.x`
+  series are allowed to contain breaking changes, and every one that
+  does will be called out in the CHANGELOG's **Removed** / **Changed**
+  sections and in `UPGRADING.md`.
+- Expanded [`docs/FROM_IBC.md` unsupported-IBC-keys matrix](docs/FROM_IBC.md#unsupported-ibc-keys):
+  converted the old 6-bullet list into four grouped tables
+  (stay-on-IBC, no-op in headless Docker, config-shape mismatch with
+  workaround, handled implicitly) covering every IBC key
+  `ibc_config_to_env.py` knows about. Gives IBC users evaluating a
+  switch a single place to confirm whether their setup has a clean
+  migration path.
+
 ## [0.5.1] - 2026-04-17
 
 ### Added
