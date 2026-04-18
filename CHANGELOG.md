@@ -4,6 +4,93 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.6] - 2026-04-18
+
+### Fixed
+
+- **Stranded IBKR session slots — root-cause fix.** v0.5.5 was
+  containment (extended grace + adaptive cool-down + visibility); it
+  reduced how often stranded slots happen and softened the blast when
+  they do, but did not eliminate the underlying cause. v0.5.6 attacks
+  the root cause: during mid-life restart and controller shutdown, the
+  controller now dispatches a UI-level window-close to Gateway's main
+  window *before* any SIGTERM. A `WINDOW_CLOSING` `AWTEvent` posted to
+  the system event queue fires Gateway's own `WindowListener` — the
+  same handler a user clicking the X button would trigger — which
+  performs an ordered CCP session-close on the way out. This is the
+  shutdown path the Gateway vendor expects, and it drains the IBKR
+  session slot *server-side* before the JVM exits. If the clean close
+  succeeds within `CLEAN_LOGOUT_TIMEOUT_SECONDS` (default 15s),
+  SIGTERM is skipped entirely. If it fails (agent unreachable, or JVM
+  doesn't exit in time), the controller falls through to v0.5.5's
+  defense-in-depth: SIGTERM + `JVM_TEARDOWN_GRACE_SECONDS` grace →
+  SIGKILL → adaptive CCP cool-down. So v0.5.6 is strictly additive —
+  best case, no stranded slot at all; worst case, same safety net as
+  v0.5.5.
+
+### Added
+
+- **`ALERT_CLEAN_LOGOUT`** log token (INFO-level) emitted by both
+  `_teardown_jvm_for_restart` and the `SIGTERM`/`SIGINT` handler.
+  Format:
+  `ALERT_CLEAN_LOGOUT mode=<live|paper> pid=<pid|none> status=<succeeded|failed_unreachable|failed_timeout> reason="..."`.
+  `status=succeeded` is the happy path and the new stability-contract
+  signal operators should watch. `failed_unreachable` means the
+  AT-SPI agent didn't respond to `CLOSE_WIN` (Gateway UI not yet up,
+  main window title moved); `failed_timeout` means the close event
+  was delivered but the JVM didn't exit in `CLEAN_LOGOUT_TIMEOUT_SECONDS`
+  — the Gateway close handler may be stalled on CCP I/O. Either
+  failure mode falls through to the SIGTERM path, so no session is
+  "more stuck" than it was pre-0.5.6 — they just don't get the clean
+  path's benefit. Fully documented in
+  [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md#alert_clean_logout)
+  with emission shape, operator guidance, and debounce recommendation.
+  Part of the public stability contract from v0.5.6 onward.
+- **`CLEAN_LOGOUT_TIMEOUT_SECONDS`** env var (default 15). Seconds to
+  wait for the Gateway JVM to exit after `WINDOW_CLOSING` is
+  dispatched. Bump to 30 if your tenant's CCP session-close regularly
+  takes longer than 15s (visible as `status=failed_timeout` without
+  follow-up `ALERT_CCP_PERSISTENT`); lower only if you explicitly
+  want to accept failed_timeout more aggressively and rely on the
+  SIGTERM fallback.
+- **`CLOSE_WIN <title_substr>` agent command** in
+  `GatewayInputAgent.java` — finds a top-level Swing window whose
+  title contains the substring and posts a `WindowEvent.WINDOW_CLOSING`
+  via `Toolkit.getDefaultToolkit().getSystemEventQueue().postEvent`.
+  This mimics a user clicking the X button so Gateway's native
+  `WindowListener` runs, vs signal-dispatched JVM shutdown hooks which
+  skip that code path. Agent returns `OK` on dispatch or
+  `ERR not_found …` if no window matched — idempotent and safe to
+  retry.
+- **`_attempt_clean_logout(timeout_seconds=None)`** pure-logic helper
+  returning a `(ok, status, reason)` tuple. Returns
+  `(True, "succeeded", …)` when the JVM exits within the poll
+  deadline, `(False, "failed_unreachable", …)` when the agent
+  `CLOSE_WIN` call is rejected, and `(False, "failed_timeout", …)`
+  when the event was delivered but the JVM remains alive past the
+  deadline. Fully unit-tested independent of the teardown/shutdown
+  shells.
+- **10 new unit tests** in `tests/test_pure_logic.py`: 5 for
+  `_attempt_clean_logout` (`TestAttemptCleanLogout`), 3 added to
+  `TestShutdownAlert` (clean-logout happy path, fall-through to
+  SIGTERM, timeout-then-SIGKILL still reports
+  `graceful=false`), and 2 added to `TestUncleanShutdownAlert`
+  (clean logout skips teardown SIGTERM path; clean-logout failure
+  still emits the fall-through alerts). Test total: 176 → 186.
+
+### Docs
+
+- `OBSERVABILITY.md` — added the `ALERT_CLEAN_LOGOUT` section with
+  emission shape, status-value grep contract, per-status operator
+  remediation, and a recommended debounce. Added
+  `CLEAN_LOGOUT_TIMEOUT_SECONDS` to the env-var reference table and a
+  clean-logout success-rate grep example. Bumped the JSON-shape
+  `version` field to 0.5.6. Stability-contract paragraph now notes
+  v0.5.6 added `ALERT_CLEAN_LOGOUT`.
+- `UPGRADING.md` — added the v0.5.6 section (non-breaking upgrade;
+  explains the root-cause attack; tuning `CLEAN_LOGOUT_TIMEOUT_SECONDS`;
+  note that v0.5.5 defenses remain as fallback).
+
 ## [0.5.5] - 2026-04-18
 
 ### Fixed

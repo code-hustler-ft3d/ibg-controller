@@ -76,6 +76,47 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.6
+
+**No breaking changes.** Attacks the root cause of the stranded-session
+CCP lockout that v0.5.5 contained but did not eliminate. Where v0.5.5
+made the JVM teardown *safer* (longer grace, adaptive cool-down,
+visibility), v0.5.6 makes it *correct*: the controller now dispatches a
+UI-level window-close to Gateway's main window before any SIGTERM,
+firing Gateway's own `WindowListener` — the same code path as a user
+clicking the X button — which performs an ordered CCP session-close
+server-side. If the clean close succeeds within
+`CLEAN_LOGOUT_TIMEOUT_SECONDS` (default 15s), SIGTERM is skipped
+entirely and no stranded slot is produced. If it fails (agent
+unreachable, or JVM doesn't exit in time), the controller falls
+through to v0.5.5's SIGTERM + grace → SIGKILL → adaptive cool-down
+defenses.
+
+Upgrade is strictly additive: best case, stranded slots stop
+happening; worst case, you're back to v0.5.5 behaviour.
+
+What to watch after upgrading:
+
+- New `ALERT_CLEAN_LOGOUT` (INFO) emits on every teardown and
+  lifecycle shutdown. `status=succeeded` is the happy path and the
+  dominant case. `status=failed_unreachable` points at the agent /
+  Gateway UI not being ready (rare after auth succeeds).
+  `status=failed_timeout` means the UI close was delivered but
+  Gateway's close handler didn't exit the JVM in time — if you see
+  this alongside subsequent `ALERT_CCP_PERSISTENT`, raise
+  `CLEAN_LOGOUT_TIMEOUT_SECONDS` before touching anything else. See
+  [`OBSERVABILITY.md`](OBSERVABILITY.md#alert_clean_logout).
+
+New env vars (all optional, all defaulted):
+
+| Var | Default | When to tune |
+|---|---|---|
+| `CLEAN_LOGOUT_TIMEOUT_SECONDS` | `15` | Bump to 30 if `ALERT_CLEAN_LOGOUT status=failed_timeout` is frequent and correlates with follow-up `ALERT_CCP_PERSISTENT`. Lower only if you want to intentionally fall through to SIGTERM faster. |
+
+v0.5.5's env vars (`JVM_TEARDOWN_GRACE_SECONDS`, `CCP_COOLDOWN_*`)
+all still apply — they now govern the fallback path when the clean
+logout fails, rather than every teardown.
+
 ### v0.5.5
 
 **No breaking changes.** Defensive fix for a CCP-lockout failure mode

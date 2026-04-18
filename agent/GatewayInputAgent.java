@@ -4,7 +4,9 @@ import java.awt.Component;
 import java.awt.Container;
 import java.awt.Dialog;
 import java.awt.Frame;
+import java.awt.Toolkit;
 import java.awt.Window;
+import java.awt.event.WindowEvent;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.PrintWriter;
@@ -58,6 +60,7 @@ import javax.swing.tree.TreePath;
  *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
  *   SETTEXT_LOGIN_PASSWORD <text>         → OK | ERR ...
  *   WAIT_LOGIN_FRAME <timeout_ms>         → OK | ERR timeout | ERR invalid_timeout=...
+ *   CLOSE_WIN <title_substr>              → OK | ERR not_found window_title_substring=...
  *
  * Component lookup is by AccessibleContext.getAccessibleName() or by
  * setText()/AbstractButton.getText(), matching what AT-SPI exposes.
@@ -265,6 +268,19 @@ public class GatewayInputAgent {
                 // the JVM-side lookup sees the frame correctly.
                 return doWaitLoginFrame(rest);
             }
+            case "CLOSE_WIN": {
+                // v0.5.6: post a WINDOW_CLOSING event to the first showing
+                // window whose title contains <title_substr>. This fires
+                // the Gateway main frame's registered WindowListener —
+                // i.e. the same path a user clicking the window's X
+                // button would take — which on Gateway drives a clean
+                // CCP session-close before the JVM exits. Distinct from
+                // SIGTERM, which only runs JVM shutdown hooks on a
+                // dedicated thread; WINDOW_CLOSING goes through the EDT
+                // and the UI-level close handler.
+                // Protocol: CLOSE_WIN <title_substr>
+                return doCloseWindow(rest);
+            }
             default:
                 return "ERR unknown_command:" + cmd;
         }
@@ -339,6 +355,23 @@ public class GatewayInputAgent {
             if (title.contains(titleSubstring)) return w;
         }
         return null;
+    }
+
+    private static String doCloseWindow(String titleSubstr) {
+        final Window target = findWindowByTitleSubstring(titleSubstr);
+        if (target == null) {
+            return "ERR not_found window_title_substring=" + titleSubstr;
+        }
+        // postEvent is thread-safe and dispatches on the EDT. Using
+        // WINDOW_CLOSING (not dispose()) ensures any registered
+        // WindowListener.windowClosing() runs — this is the hook
+        // Gateway uses for its own clean-logout path. If the EDT is
+        // stalled the event sits in the queue; the caller is expected
+        // to poll for the JVM to exit and fall back to SIGTERM on
+        // timeout.
+        Toolkit.getDefaultToolkit().getSystemEventQueue().postEvent(
+                new WindowEvent(target, WindowEvent.WINDOW_CLOSING));
+        return "OK";
     }
 
     private static String doSetTextInWindow(String rest) throws Exception {

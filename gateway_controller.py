@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import gi
 
 
-__version__ = "0.5.5"
+__version__ = "0.5.6"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -609,6 +609,37 @@ def agent_click_in_window(title_substring, button_text):
     if resp.startswith("OK"):
         return True
     log.error(f"agent CLICK_IN_WIN {title_substring!r}: {resp}")
+    return False
+
+
+def agent_close_window(title_substring):
+    """v0.5.6: Post a WINDOW_CLOSING event to the first showing window
+    whose title contains ``title_substring``. Returns True if the event
+    was dispatched (i.e. the window was found and the agent accepted
+    the request), False otherwise. Does NOT wait for the window to
+    actually close — callers should poll ``GATEWAY_PROC`` for exit.
+
+    Used by ``_attempt_clean_logout`` to drive the same close path a
+    user would trigger by clicking the window's X button, which hits
+    Gateway's registered WindowListener. Unlike SIGTERM (which triggers
+    JVM shutdown hooks on a dedicated thread), this goes through the
+    EDT and Gateway's UI-level close handler — which in turn does a
+    clean CCP session-close before the JVM exits, freeing the IBKR
+    session slot server-side rather than stranding it.
+
+    Short agent timeout (2s): if the agent doesn't respond quickly the
+    JVM is almost certainly in a state where clean logout won't work
+    anyway, and we want to fall through to SIGTERM promptly.
+    """
+    try:
+        resp = _agent_request(f"CLOSE_WIN {title_substring}", timeout=2)
+    except Exception as e:
+        log.warning(
+            f"agent CLOSE_WIN {title_substring!r}: {type(e).__name__}: {e}")
+        return False
+    if resp.startswith("OK"):
+        return True
+    log.warning(f"agent CLOSE_WIN {title_substring!r}: {resp}")
     return False
 
 
@@ -2859,15 +2890,34 @@ def shutdown(signum, frame):
     else:
         signame = f"signal-{signum}"
     log.info(f"Received signal {signum} ({signame}), shutting down Gateway")
+    # v0.5.6: read GATEWAY_PROC (uppercase) directly so post-restart
+    # signals address the current JVM, not the original one. The
+    # lowercase ``gateway_proc`` alias is only the module-load reference
+    # and is not updated by ``_relaunch_and_login_in_place``.
+    proc = GATEWAY_PROC if GATEWAY_PROC is not None else gateway_proc
     graceful = True
-    if gateway_proc is not None and gateway_proc.poll() is None:
-        gateway_proc.terminate()
-        try:
-            gateway_proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            log.warning("Gateway didn't terminate cleanly, killing")
-            gateway_proc.kill()
-            graceful = False
+    clean_logout_applied = False
+    if proc is not None and proc.poll() is None:
+        pid = proc.pid
+        # v0.5.6: try UI-driven clean logout first, same pattern as the
+        # mid-life _teardown_jvm_for_restart path. If Gateway's close
+        # handler runs, the CCP session is released cleanly and we skip
+        # SIGTERM entirely. Signal-handler context: keep the timeout
+        # conservative so docker's default 10s stop-grace still leaves
+        # room for SIGTERM fallback.
+        clean_success, clean_status, clean_reason = _attempt_clean_logout()
+        log.info(
+            f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
+            f"status={clean_status} reason=\"{clean_reason}\"")
+        clean_logout_applied = clean_success
+        if not clean_success:
+            proc.terminate()
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                log.warning("Gateway didn't terminate cleanly, killing")
+                proc.kill()
+                graceful = False
     try:
         os.unlink(READY_FILE)
     except FileNotFoundError:
@@ -2878,7 +2928,11 @@ def shutdown(signum, frame):
     # the token itself. graceful=false means Gateway ignored SIGTERM and
     # had to be SIGKILL'd — worth flagging in dashboards as it points at
     # a JVM that's stuck (deadlocked Swing thread, blocked I/O, etc.).
-    if graceful:
+    if clean_logout_applied:
+        reason = (
+            f"controller received {signame}; Gateway JVM exited via clean "
+            "UI logout (WINDOW_CLOSING); no SIGTERM needed")
+    elif graceful:
         reason = f"controller received {signame}; Gateway JVM exited cleanly within 15s"
     else:
         reason = (
@@ -3423,6 +3477,69 @@ def start_health_server():
 # where even 30s isn't enough.
 _JVM_TEARDOWN_GRACE_SECONDS = int(os.environ.get("JVM_TEARDOWN_GRACE_SECONDS", "30"))
 
+# v0.5.6: Matches the titles of the Gateway main frame across the
+# versions observed in testing ("IB Gateway", "IBKR IB Gateway").
+# The agent's findWindowByTitleSubstring() takes a substring match,
+# so any stable fragment works.
+_GATEWAY_MAIN_WINDOW_TITLE_SUBSTR = "IB Gateway"
+
+# v0.5.6: How long to wait for the JVM to exit cleanly after driving a
+# WINDOW_CLOSING event to Gateway's main frame. Gateway's registered
+# WindowListener performs a proper CCP session-close which can take a
+# few seconds (network round-trip to IBKR + state flush) before the
+# JVM terminates. If this expires, _teardown_jvm_for_restart falls
+# through to the v0.5.5 SIGTERM path. Shorten in containers where
+# Docker's stop-grace-period is tight; lengthen on slow networks.
+_CLEAN_LOGOUT_TIMEOUT_SECONDS = int(
+    os.environ.get("CLEAN_LOGOUT_TIMEOUT_SECONDS", "15"))
+
+
+def _attempt_clean_logout(timeout_seconds=None):
+    """v0.5.6: Drive Gateway to close cleanly via its UI close handler
+    before we resort to SIGTERM. Returns ``(success, status, reason)``
+    where ``status`` is one of:
+
+    - ``"succeeded"`` — JVM exited within ``timeout_seconds`` of the
+      WINDOW_CLOSING dispatch. Gateway's close handler ran, so the CCP
+      session slot was cleanly released on IBKR's side. No stranded
+      slot, no need for the adaptive cool-down to absorb anything.
+    - ``"failed_unreachable"`` — the agent didn't respond to CLOSE_WIN
+      (socket missing, EDT deadlocked before we could post the event,
+      agent not yet initialised). Caller should fall through to the
+      SIGTERM path.
+    - ``"failed_timeout"`` — the agent accepted CLOSE_WIN but the JVM
+      didn't exit within ``timeout_seconds``. Gateway's WindowListener
+      is stuck; caller falls through to SIGTERM, and if *that* also
+      times out the v0.5.5 adaptive cool-down absorbs the stranded
+      slot.
+
+    Callers must have already checked that ``GATEWAY_PROC`` is alive.
+    This function tolerates the JVM exiting on its own mid-call (race
+    between the outer check and here) and reports success.
+    """
+    if timeout_seconds is None:
+        timeout_seconds = _CLEAN_LOGOUT_TIMEOUT_SECONDS
+
+    global GATEWAY_PROC
+    if GATEWAY_PROC is None or GATEWAY_PROC.poll() is not None:
+        return (True, "succeeded", "JVM already exited")
+
+    if not agent_close_window(_GATEWAY_MAIN_WINDOW_TITLE_SUBSTR):
+        return (False, "failed_unreachable",
+                "agent CLOSE_WIN did not succeed; falling back to SIGTERM")
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if GATEWAY_PROC.poll() is not None:
+            return (True, "succeeded",
+                    f"JVM exited cleanly within {timeout_seconds}s of "
+                    f"WINDOW_CLOSING")
+        time.sleep(0.25)
+
+    return (False, "failed_timeout",
+            f"JVM still alive {timeout_seconds}s after WINDOW_CLOSING "
+            f"dispatched; Gateway close handler may be stalled")
+
 
 def _teardown_jvm_for_restart():
     """v0.4.6: Terminate the current Gateway JVM and clear per-instance
@@ -3444,43 +3561,63 @@ def _teardown_jvm_for_restart():
     ``ALERT_JVM_UNCLEAN_SHUTDOWN`` — the suspected root cause of the
     persistent-lockout pattern where consecutive CCP lockouts accumulate
     faster than IBKR's session-slot timeout can drain them.
+
+    v0.5.6: before SIGTERM, attempt a UI-driven clean logout by posting
+    a WINDOW_CLOSING event to Gateway's main frame via the agent. This
+    fires Gateway's registered WindowListener (the same code path as a
+    user clicking the window's X button), which performs a proper CCP
+    session-close before the JVM exits. If clean logout succeeds, no
+    SIGTERM is needed and no slot is stranded — the root cause of the
+    v0.5.5 incident is eliminated. If it fails (agent unreachable, EDT
+    stalled, WindowListener itself broken), falls through to the v0.5.5
+    SIGTERM + adaptive-cool-down defence.
     """
     global GATEWAY_PROC
     if GATEWAY_PROC is not None and GATEWAY_PROC.poll() is None:
         pid = GATEWAY_PROC.pid
         log.info(f"RESTART: terminating Gateway PID {pid}")
-        clean = True
-        unclean_reason = ""
-        try:
-            GATEWAY_PROC.terminate()
+
+        # v0.5.6: try clean UI logout first. ALERT_CLEAN_LOGOUT is part
+        # of the public stability contract — monitoring can grep for it
+        # to track clean-logout success rate over time.
+        clean_success, clean_status, clean_reason = _attempt_clean_logout()
+        log.info(
+            f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
+            f"status={clean_status} reason=\"{clean_reason}\"")
+
+        if not clean_success:
+            clean = True
+            unclean_reason = ""
             try:
-                GATEWAY_PROC.wait(timeout=_JVM_TEARDOWN_GRACE_SECONDS)
-            except subprocess.TimeoutExpired:
-                log.warning(
-                    f"RESTART: Gateway didn't exit within "
-                    f"{_JVM_TEARDOWN_GRACE_SECONDS}s grace; SIGKILL'ing. "
-                    "IBKR session slot may be held server-side until timeout.")
-                GATEWAY_PROC.kill()
-                GATEWAY_PROC.wait(timeout=5)
+                GATEWAY_PROC.terminate()
+                try:
+                    GATEWAY_PROC.wait(timeout=_JVM_TEARDOWN_GRACE_SECONDS)
+                except subprocess.TimeoutExpired:
+                    log.warning(
+                        f"RESTART: Gateway didn't exit within "
+                        f"{_JVM_TEARDOWN_GRACE_SECONDS}s grace; SIGKILL'ing. "
+                        "IBKR session slot may be held server-side until timeout.")
+                    GATEWAY_PROC.kill()
+                    GATEWAY_PROC.wait(timeout=5)
+                    clean = False
+                    unclean_reason = (
+                        f"Gateway JVM ignored SIGTERM within "
+                        f"{_JVM_TEARDOWN_GRACE_SECONDS}s grace; required SIGKILL")
+            except Exception as e:
+                log.warning(f"RESTART: Gateway termination error: {e}")
                 clean = False
-                unclean_reason = (
-                    f"Gateway JVM ignored SIGTERM within "
-                    f"{_JVM_TEARDOWN_GRACE_SECONDS}s grace; required SIGKILL")
-        except Exception as e:
-            log.warning(f"RESTART: Gateway termination error: {e}")
-            clean = False
-            unclean_reason = f"teardown raised {type(e).__name__}: {e}"
-        if not clean:
-            # Stable grep token for external monitoring. Emitted once per
-            # unclean teardown, distinct from ALERT_SHUTDOWN (which is
-            # the lifecycle signal for controller exit). See
-            # docs/OBSERVABILITY.md for the grep-contract guarantees.
-            log.warning(
-                f"ALERT_JVM_UNCLEAN_SHUTDOWN mode={TRADING_MODE} "
-                f"pid={pid} reason=\"{unclean_reason}\" "
-                f"implication=\"IBKR CCP session slot likely held "
-                f"server-side until timeout; next auth attempt may hit "
-                f"lockout despite cool-down\"")
+                unclean_reason = f"teardown raised {type(e).__name__}: {e}"
+            if not clean:
+                # Stable grep token for external monitoring. Emitted once per
+                # unclean teardown, distinct from ALERT_SHUTDOWN (which is
+                # the lifecycle signal for controller exit). See
+                # docs/OBSERVABILITY.md for the grep-contract guarantees.
+                log.warning(
+                    f"ALERT_JVM_UNCLEAN_SHUTDOWN mode={TRADING_MODE} "
+                    f"pid={pid} reason=\"{unclean_reason}\" "
+                    f"implication=\"IBKR CCP session slot likely held "
+                    f"server-side until timeout; next auth attempt may hit "
+                    f"lockout despite cool-down\"")
     GATEWAY_PROC = None
 
     for p in (AGENT_SOCKET, READY_FILE):

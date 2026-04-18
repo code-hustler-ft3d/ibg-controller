@@ -1125,15 +1125,22 @@ class TestShutdownAlert(unittest.TestCase):
     tests pin the format so that breakage fails CI instead of surfacing
     in prod."""
 
-    def _run_shutdown(self, signum, proc_behavior="clean"):
+    def _run_shutdown(self, signum, proc_behavior="clean",
+                      clean_logout_result=None):
         """Invoke shutdown() with side effects suppressed; return the
         list of log.info messages it emitted.
 
         proc_behavior:
-          "absent" — gateway_proc is None (no JVM started yet)
+          "absent" — GATEWAY_PROC is None (no JVM started yet)
           "exited" — JVM already exited (poll returns 0)
           "clean"  — terminate() + wait() succeed
           "stuck"  — wait() raises TimeoutExpired, kill() succeeds
+
+        clean_logout_result: tuple (success, status, reason) controlling
+        what ``_attempt_clean_logout`` returns. Default forces the
+        ``failed_unreachable`` path so tests exercise the SIGTERM
+        fallback unless explicitly opting into the v0.5.6 clean-logout
+        behaviour.
         """
         import subprocess
         info_calls = []
@@ -1162,7 +1169,15 @@ class TestShutdownAlert(unittest.TestCase):
         else:
             fake_proc = FakeProc(proc_behavior)
 
-        with patch.object(gc, "gateway_proc", fake_proc), \
+        if clean_logout_result is None:
+            clean_logout_result = (
+                False, "failed_unreachable",
+                "test stub: force SIGTERM fallback")
+
+        with patch.object(gc, "GATEWAY_PROC", fake_proc), \
+             patch.object(gc, "gateway_proc", fake_proc), \
+             patch.object(gc, "_attempt_clean_logout",
+                          return_value=clean_logout_result), \
              patch.object(gc, "READY_FILE", "/tmp/nonexistent-ready-file"), \
              patch.object(gc.log, "info",
                           side_effect=lambda msg: info_calls.append(msg)), \
@@ -1227,6 +1242,153 @@ class TestShutdownAlert(unittest.TestCase):
         self.assertLess(mode_idx, signal_idx)
         self.assertLess(signal_idx, graceful_idx)
         self.assertLess(graceful_idx, reason_idx)
+
+    def test_clean_logout_success_skips_sigterm(self):
+        """v0.5.6: when clean UI logout succeeds, shutdown() emits
+        ALERT_CLEAN_LOGOUT status=succeeded AND ALERT_SHUTDOWN with the
+        'via clean UI logout' wording, and does NOT call proc.terminate.
+        """
+        import signal as _signal
+
+        clean_result = (True, "succeeded",
+                        "JVM exited cleanly within 15s of WINDOW_CLOSING")
+        calls = self._run_shutdown(
+            _signal.SIGTERM, proc_behavior="clean",
+            clean_logout_result=clean_result)
+
+        # ALERT_CLEAN_LOGOUT fires with status=succeeded.
+        logout_hits = [m for m in calls if m.startswith("ALERT_CLEAN_LOGOUT ")]
+        self.assertEqual(len(logout_hits), 1)
+        self.assertIn("status=succeeded", logout_hits[0])
+        self.assertIn(f"mode={gc.TRADING_MODE}", logout_hits[0])
+
+        # ALERT_SHUTDOWN still fires (lifecycle signal), graceful=true,
+        # reason attributes the exit to the clean UI logout.
+        alert = self._find_alert(calls)
+        self.assertIn("graceful=true", alert)
+        self.assertIn("clean UI logout", alert)
+        self.assertIn("WINDOW_CLOSING", alert)
+
+    def test_clean_logout_failure_falls_back_to_sigterm(self):
+        """v0.5.6: when clean UI logout fails (agent unreachable), shutdown()
+        emits ALERT_CLEAN_LOGOUT status=failed_* and still fires the old
+        SIGTERM path, so ALERT_SHUTDOWN graceful=true still appears."""
+        import signal as _signal
+
+        clean_result = (False, "failed_unreachable",
+                        "agent CLOSE_WIN did not succeed")
+        calls = self._run_shutdown(
+            _signal.SIGTERM, proc_behavior="clean",
+            clean_logout_result=clean_result)
+
+        logout_hits = [m for m in calls if m.startswith("ALERT_CLEAN_LOGOUT ")]
+        self.assertEqual(len(logout_hits), 1)
+        self.assertIn("status=failed_unreachable", logout_hits[0])
+
+        alert = self._find_alert(calls)
+        # SIGTERM path ran because clean_logout returned failure; the
+        # fake proc.wait() succeeds so graceful stays true and the
+        # reason is the existing "exited cleanly within 15s" wording.
+        self.assertIn("graceful=true", alert)
+        self.assertIn("exited cleanly within 15s", alert)
+
+    def test_clean_logout_timeout_then_sigkill_emits_graceful_false(self):
+        """v0.5.6: clean-logout timeout → SIGTERM → still stuck → SIGKILL.
+        This is the worst-case compound failure path: UI close didn't
+        work AND SIGTERM didn't work. Must still produce a usable
+        ALERT_SHUTDOWN with graceful=false so operators see it."""
+        import signal as _signal
+
+        clean_result = (False, "failed_timeout",
+                        "JVM still alive 15s after WINDOW_CLOSING")
+        calls = self._run_shutdown(
+            _signal.SIGTERM, proc_behavior="stuck",
+            clean_logout_result=clean_result)
+
+        logout_hits = [m for m in calls if m.startswith("ALERT_CLEAN_LOGOUT ")]
+        self.assertEqual(len(logout_hits), 1)
+        self.assertIn("status=failed_timeout", logout_hits[0])
+
+        alert = self._find_alert(calls)
+        self.assertIn("graceful=false", alert)
+        self.assertIn("SIGKILL", alert)
+
+
+class TestAttemptCleanLogout(unittest.TestCase):
+    """v0.5.6: _attempt_clean_logout drives the UI-level close path
+    instead of relying on JVM shutdown hooks. The three status values
+    (succeeded / failed_unreachable / failed_timeout) are part of the
+    ALERT_CLEAN_LOGOUT grep-contract, so the tests pin the mapping
+    from agent behaviour → status."""
+
+    def _fake_proc(self, poll_returns):
+        """Return a FakeProc whose poll() walks a list of return values
+        (one per call). Once exhausted, stays at the last value."""
+        class FakeProc:
+            def __init__(self, values):
+                self._values = list(values)
+                self.pid = 12345
+
+            def poll(self):
+                if len(self._values) > 1:
+                    return self._values.pop(0)
+                return self._values[0]
+        return FakeProc(poll_returns)
+
+    def test_succeeded_when_jvm_exits_within_timeout(self):
+        """Agent accepts CLOSE_WIN, JVM exits on the second poll."""
+        proc = self._fake_proc([None, None, 0])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "agent_close_window", return_value=True):
+            success, status, reason = gc._attempt_clean_logout(timeout_seconds=5)
+        self.assertTrue(success)
+        self.assertEqual(status, "succeeded")
+        self.assertIn("exited cleanly", reason)
+
+    def test_failed_unreachable_when_agent_rejects(self):
+        """Agent CLOSE_WIN returns False (socket missing, EDT stalled
+        before we could post). No polling wait — we bail immediately so
+        caller can SIGTERM promptly."""
+        proc = self._fake_proc([None])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "agent_close_window", return_value=False):
+            success, status, reason = gc._attempt_clean_logout(timeout_seconds=5)
+        self.assertFalse(success)
+        self.assertEqual(status, "failed_unreachable")
+        self.assertIn("falling back to SIGTERM", reason)
+
+    def test_failed_timeout_when_jvm_stays_alive(self):
+        """Agent accepts CLOSE_WIN but JVM never exits — WindowListener
+        is stalled. Caller falls back to SIGTERM."""
+        proc = self._fake_proc([None])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "agent_close_window", return_value=True):
+            success, status, reason = gc._attempt_clean_logout(timeout_seconds=1)
+        self.assertFalse(success)
+        self.assertEqual(status, "failed_timeout")
+        self.assertIn("still alive", reason)
+
+    def test_jvm_already_exited_reports_succeeded_without_agent_call(self):
+        """If the JVM exited on its own between the outer check and
+        here, we report success without dispatching CLOSE_WIN."""
+        proc = self._fake_proc([0])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "agent_close_window") as fake_close:
+            success, status, reason = gc._attempt_clean_logout(timeout_seconds=5)
+        self.assertTrue(success)
+        self.assertEqual(status, "succeeded")
+        self.assertIn("already exited", reason)
+        fake_close.assert_not_called()
+
+    def test_timeout_respects_env_default(self):
+        """When timeout_seconds is None, uses _CLEAN_LOGOUT_TIMEOUT_SECONDS."""
+        proc = self._fake_proc([None])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_CLEAN_LOGOUT_TIMEOUT_SECONDS", 1), \
+             patch.object(gc, "agent_close_window", return_value=True):
+            success, status, _ = gc._attempt_clean_logout()
+        self.assertFalse(success)
+        self.assertEqual(status, "failed_timeout")
 
 
 class TestAdaptiveCooldown(unittest.TestCase):
@@ -1298,11 +1460,21 @@ class TestUncleanShutdownAlert(unittest.TestCase):
         def kill(self):
             self._killed = True
 
-    def _run_teardown(self, behavior):
+    def _run_teardown(self, behavior, clean_logout_result=None):
+        """Run _teardown_jvm_for_restart with a FakeProc of ``behavior``.
+
+        ``clean_logout_result`` defaults to failure so the existing SIGTERM
+        path is exercised; override to test the v0.5.6 success path."""
+        if clean_logout_result is None:
+            clean_logout_result = (
+                False, "failed_unreachable",
+                "test stub: force SIGTERM fallback")
         warning_calls = []
         info_calls = []
         fake = self._FakeProc(behavior)
         with patch.object(gc, "GATEWAY_PROC", fake), \
+             patch.object(gc, "_attempt_clean_logout",
+                          return_value=clean_logout_result), \
              patch.object(gc.log, "warning",
                           side_effect=lambda msg: warning_calls.append(msg)), \
              patch.object(gc.log, "info",
@@ -1310,17 +1482,17 @@ class TestUncleanShutdownAlert(unittest.TestCase):
              patch.object(gc.log, "error"), \
              patch("os.unlink"):
             gc._teardown_jvm_for_restart()
-        return warning_calls
+        return warning_calls, info_calls
 
     def test_clean_teardown_does_not_emit_alert(self):
-        warnings = self._run_teardown("clean")
+        warnings, _ = self._run_teardown("clean")
         alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
         self.assertEqual(
             alerts, [],
             f"clean teardown should not emit ALERT_JVM_UNCLEAN_SHUTDOWN, got {warnings!r}")
 
     def test_sigkill_required_emits_alert(self):
-        warnings = self._run_teardown("stuck")
+        warnings, _ = self._run_teardown("stuck")
         alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
         self.assertEqual(len(alerts), 1,
                          f"expected exactly one ALERT_JVM_UNCLEAN_SHUTDOWN, got {warnings!r}")
@@ -1338,10 +1510,45 @@ class TestUncleanShutdownAlert(unittest.TestCase):
         # Defensive path: if terminate() itself raises, the teardown
         # log captures it AND we still emit the ALERT so the stranded
         # session hypothesis is visible in the log trail.
-        warnings = self._run_teardown("terminate_raises")
+        warnings, _ = self._run_teardown("terminate_raises")
         alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
         self.assertEqual(len(alerts), 1)
         self.assertIn("OSError", alerts[0])
+
+    def test_clean_logout_success_skips_sigterm_path(self):
+        """v0.5.6: when clean logout succeeds, teardown emits
+        ALERT_CLEAN_LOGOUT status=succeeded and does NOT emit
+        ALERT_JVM_UNCLEAN_SHUTDOWN, even if the FakeProc is configured
+        to be stuck — because terminate() is never called."""
+        clean_result = (True, "succeeded",
+                        "JVM exited cleanly within 15s of WINDOW_CLOSING")
+        warnings, info = self._run_teardown(
+            "stuck", clean_logout_result=clean_result)
+        unclean_alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
+        self.assertEqual(
+            unclean_alerts, [],
+            f"clean logout success should skip SIGTERM entirely, got {warnings!r}")
+        logout_alerts = [m for m in info if m.startswith("ALERT_CLEAN_LOGOUT ")]
+        self.assertEqual(len(logout_alerts), 1)
+        self.assertIn("status=succeeded", logout_alerts[0])
+        self.assertIn(f"mode={gc.TRADING_MODE}", logout_alerts[0])
+        self.assertIn("pid=12345", logout_alerts[0])
+
+    def test_clean_logout_failure_emits_alert_and_falls_through(self):
+        """v0.5.6: clean logout failure emits ALERT_CLEAN_LOGOUT status=
+        failed_* AND continues to the SIGTERM path. With a stuck JVM,
+        both ALERT_CLEAN_LOGOUT and ALERT_JVM_UNCLEAN_SHUTDOWN should
+        appear — showing operators the full compound-failure picture."""
+        clean_result = (False, "failed_timeout",
+                        "JVM still alive 15s after WINDOW_CLOSING")
+        warnings, info = self._run_teardown(
+            "stuck", clean_logout_result=clean_result)
+        logout_alerts = [m for m in info if m.startswith("ALERT_CLEAN_LOGOUT ")]
+        unclean_alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
+        self.assertEqual(len(logout_alerts), 1)
+        self.assertIn("status=failed_timeout", logout_alerts[0])
+        self.assertEqual(len(unclean_alerts), 1,
+                         "SIGTERM fallback still runs on clean-logout failure")
 
 
 if __name__ == "__main__":

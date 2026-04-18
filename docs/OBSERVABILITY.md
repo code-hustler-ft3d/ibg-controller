@@ -41,7 +41,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 ```json
 {
   "status": "healthy",
-  "version": "0.5.5",
+  "version": "0.5.6",
   "mode": "live",
   "state": "MONITORING",
   "jvm_pid": 12345,
@@ -267,6 +267,74 @@ host looks fine, capturing a JVM thread dump before the next
 **Recommended debounce**: none for `graceful=true`. `graceful=false`
 should page on the 3rd occurrence in 1h, not the 1st.
 
+### `ALERT_CLEAN_LOGOUT`
+
+```
+ALERT_CLEAN_LOGOUT mode=live pid=12345 status=succeeded reason="JVM exited cleanly within 15s of WINDOW_CLOSING"
+ALERT_CLEAN_LOGOUT mode=live pid=12345 status=failed_unreachable reason="agent CLOSE_WIN did not succeed; falling back to SIGTERM"
+ALERT_CLEAN_LOGOUT mode=paper pid=12346 status=failed_timeout reason="JVM still alive 15s after WINDOW_CLOSING dispatched; Gateway close handler may be stalled"
+```
+
+**When fired**: from `_teardown_jvm_for_restart` (mid-life JVM restart
+after a CCP lockout) and from the `SIGTERM`/`SIGINT` signal handler
+(controller-lifecycle shutdown), exactly once per teardown attempt.
+v0.5.6 drives Gateway to close via a `WindowEvent.WINDOW_CLOSING`
+dispatched to the main frame — the same code path a user clicking
+the window's X button would take. Gateway's registered WindowListener
+performs a proper CCP session-close before the JVM exits, which
+releases the IBKR session slot server-side instead of stranding it
+(the root cause documented in v0.5.5's
+[`ALERT_JVM_UNCLEAN_SHUTDOWN`](#alert_jvm_unclean_shutdown) section).
+
+**Log level**: `INFO`. This is a lifecycle/diagnostic signal, not an
+alert that should wake someone. Sits outside the ERROR-level
+wake-someone-up grep, but is catchable via the `ALERT_` prefix for
+dashboard use — the clean-logout success rate is the key metric.
+
+**Status values** (part of the grep-contract):
+
+- `succeeded` — JVM exited cleanly within `CLEAN_LOGOUT_TIMEOUT_SECONDS`
+  of the WINDOW_CLOSING dispatch. No SIGTERM was needed, no slot was
+  stranded. This is the happy path.
+- `failed_unreachable` — the agent didn't accept `CLOSE_WIN` (socket
+  missing, agent never initialised, or the EDT stalled before we could
+  post the event). The controller fell through to the v0.5.5 SIGTERM →
+  grace → SIGKILL path.
+- `failed_timeout` — the agent accepted `CLOSE_WIN` but the JVM didn't
+  exit within `CLEAN_LOGOUT_TIMEOUT_SECONDS`. Gateway's WindowListener
+  is stuck. The controller fell through to the SIGTERM path, and if
+  that *also* times out, `ALERT_JVM_UNCLEAN_SHUTDOWN` fires on top.
+
+**Why this matters**: pre-v0.5.6, the only teardown path was SIGTERM →
+grace → SIGKILL, which runs JVM shutdown hooks on a dedicated thread.
+When those hooks stall (Swing EDT deadlock, blocked native I/O), IBKR
+never receives a session-close and holds the slot server-side until
+its own timeout drains — the stranded-self-session pattern from v0.5.5.
+v0.5.6 attempts the UI-level close path first so Gateway's own
+close handler does the session-close directly, bypassing the shutdown
+hooks entirely. If this path works (the common case), stranded slots
+stop happening. If it doesn't, the v0.5.5 adaptive cool-down still
+absorbs the strand.
+
+**What the operator should do**: nothing for `status=succeeded` — the
+metric to watch is the ratio of `succeeded` vs `failed_*` over time.
+
+- If `failed_unreachable` dominates: the agent isn't coming up or is
+  crashing mid-session. Check `docker logs` for agent-related errors
+  and verify `gateway-input-agent.jar` is present at
+  `DESTDIR/gateway-input-agent.jar`.
+- If `failed_timeout` dominates: Gateway's WindowListener is stalled
+  (deadlocked EDT, blocked native I/O). Bump
+  `CLEAN_LOGOUT_TIMEOUT_SECONDS` to 30 for more headroom, and if the
+  ratio stays high, capture a JVM thread dump on the next occurrence
+  (`kill -3 <pid>` visible in docker logs) to find where the
+  WindowListener is hanging.
+
+**Recommended debounce**: none for `succeeded`. `failed_*` should page
+on the 3rd in 1h (correlated with `ALERT_CCP_PERSISTENT` — the pattern
+"clean logout keeps failing and CCP lockout keeps firing" indicates
+real host-level health issues).
+
 ### `ALERT_JVM_UNCLEAN_SHUTDOWN`
 
 ```
@@ -376,6 +444,7 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | `CCP_COOLDOWN_SECONDS` | `1200` | Base duration (seconds) of the silent cool-down applied before a mid-life JVM restart after a CCP lockout. This is the sleep time on the *first* restart attempt; subsequent attempts scale up via `CCP_COOLDOWN_MULTIPLIER`. |
 | `CCP_COOLDOWN_MAX_SECONDS` | `3600` | Upper cap on the adaptive cool-down (seconds). Raise if your IBKR tenant's server-side session timeout is longer than 1h and lockouts keep firing after the cap is hit. Added v0.5.5. |
 | `CCP_COOLDOWN_MULTIPLIER` | `1.5` | Multiplicative factor applied per restart attempt: attempt-1 = base, attempt-2 = base×1.5, attempt-3 = base×2.25, etc., capped at `CCP_COOLDOWN_MAX_SECONDS`. Set to `1.0` to restore the v0.5.4-and-earlier fixed-duration behaviour. Added v0.5.5. |
+| `CLEAN_LOGOUT_TIMEOUT_SECONDS` | `15` | Seconds to wait for the Gateway JVM to exit after dispatching `WindowEvent.WINDOW_CLOSING` (the v0.5.6 clean-logout path). Gateway's WindowListener performs a CCP session-close, which can take a few seconds (network round-trip to IBKR + state flush). If this expires, the controller falls through to the SIGTERM path. Shorten (e.g. `7`) if Docker's `--stop-timeout` is tight; lengthen on slow-network hosts. Added v0.5.6. |
 
 ## Example integrations
 
@@ -439,6 +508,14 @@ docker logs --since=1h ibkr 2>&1 | grep -c 'ALERT_JVM_UNCLEAN_SHUTDOWN'
 # firing right after, raise CCP_COOLDOWN_MAX_SECONDS.
 docker logs --since=1h ibkr 2>&1 | grep -E 'ALERT_(JVM_UNCLEAN_SHUTDOWN|CCP_PERSISTENT)'
 
+# Clean-logout success rate (v0.5.6). This is the key health signal
+# for the stranded-session fix: if succeeded/(succeeded+failed_*) is
+# close to 1.0, Gateway is closing cleanly and stranded slots are
+# prevented at the source.
+succeeded=$(docker logs --since=1h ibkr 2>&1 | grep -c 'ALERT_CLEAN_LOGOUT .* status=succeeded')
+failed=$(docker logs --since=1h ibkr 2>&1 | grep -cE 'ALERT_CLEAN_LOGOUT .* status=failed_')
+echo "clean-logout: succeeded=$succeeded failed=$failed"
+
 # Tier 2: lifecycle dashboards — includes ALERT_SHUTDOWN (INFO-level).
 # Useful to distinguish clean operator-driven restarts from JVM crashes.
 docker logs --since=1h ibkr 2>&1 | grep -Eo 'ALERT_[A-Z_]+[^"]*"[^"]*"'
@@ -463,9 +540,10 @@ The field names and semantics of `/health` JSON and the prefix + key
 names of `ALERT_*` tokens are part of the public API as of v0.4.9.
 `ALERT_PASSWORD_EXPIRED` was added in v0.5.0, `ALERT_LOGIN_FAILED`
 in v0.5.1, `ALERT_SHUTDOWN` (INFO-level, lifecycle signal) in
-v0.5.2, and `ALERT_JVM_UNCLEAN_SHUTDOWN` (WARNING-level,
-mid-life restart signal) in v0.5.5 — all under the same stability
-contract.
+v0.5.2, `ALERT_JVM_UNCLEAN_SHUTDOWN` (WARNING-level, mid-life
+restart signal) in v0.5.5, and `ALERT_CLEAN_LOGOUT` (INFO-level,
+teardown diagnostic with `status=succeeded|failed_unreachable|failed_timeout`)
+in v0.5.6 — all under the same stability contract.
 Breaking changes will be called out in the CHANGELOG and accompany a
 minor version bump. Adding new fields to `/health` or new
 `ALERT_*` tokens is not a breaking change.
