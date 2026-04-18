@@ -15,9 +15,29 @@ re-authentication events, and exposes IBC's TCP command server.
 
 ## Quick start
 
-The fastest way to use `ibg-controller` is via a
-`gnzsnz/ib-gateway-docker`-style image that bundles it. If you're
-building the image yourself:
+The fastest way to use `ibg-controller` is the pre-built image on
+GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/code-hustler-ft3d/ibg-controller:latest
+
+docker run -d --name ibkr \
+  --env-file /path/to/your/.env \
+  -e TRADING_MODE=paper \
+  -e TWS_SERVER_PAPER=cdc1.ibllc.com \
+  -p 127.0.0.1:4002:4004 \
+  ghcr.io/code-hustler-ft3d/ibg-controller:latest
+```
+
+Tags published: `:latest`, `:<major>.<minor>` (e.g. `:0.5`), and
+`:v<major>.<minor>.<patch>` (e.g. `:v0.5.3`). Every tag is signed with
+cosign via Sigstore keyless signing — see [`SECURITY.md`](SECURITY.md)
+for the verification recipe. For reproducible deployments, pin to a
+digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
+digest is printed in each release's CI log.
+
+If you'd rather build the image yourself (or compose ibg-controller
+into a larger image of your own):
 
 ```dockerfile
 # In the Dockerfile's setup stage:
@@ -340,8 +360,8 @@ make
 # Syntax-check the Python controller + validate the agent jar manifest
 make test
 
-# Create a release tarball (dist/ibg-controller-0.5.2.tar.gz)
-make release VERSION=0.5.2
+# Create a release tarball (dist/ibg-controller-0.5.3.tar.gz)
+make release VERSION=0.5.3
 
 # Install directly into a running ibgateway home (for dev on host, or
 # as called by the Docker image's setup stage)
@@ -353,7 +373,7 @@ Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 ### Installing from a release tarball (for consumers who don't build)
 
 ```bash
-VER=0.5.2
+VER=0.5.3
 curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
 tar -xzf ibg-controller-${VER}.tar.gz
 cd ibg-controller-${VER}
@@ -362,12 +382,12 @@ DESTDIR=/home/ibgateway ./install.sh
 
 The tarball layout is flat:
 ```
-ibg-controller-0.5.2/
+ibg-controller-0.5.3/
 ├── gateway-input-agent.jar    ← installed to $DESTDIR/gateway-input-agent.jar
 ├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
 ├── ibc_config_to_env.py       ← one-shot IBC config.ini → env migration tool
 ├── install.sh
-├── README.md, CHANGELOG.md, LICENSE
+├── README.md, CHANGELOG.md, LICENSE, SECURITY.md
 └── docs/
     ├── ADR-001-in-jvm-dialog-dispatcher.md
     ├── ARCHITECTURE.md
@@ -375,7 +395,8 @@ ibg-controller-0.5.2/
     ├── DISCONNECT_RECOVERY.md
     ├── FROM_IBC.md
     ├── MIGRATION.md
-    └── OBSERVABILITY.md
+    ├── OBSERVABILITY.md
+    └── UPGRADING.md
 ```
 
 ## Troubleshooting
@@ -492,6 +513,10 @@ and `AUTO_RESTART_TIME` if you want the controller to handle whichever
 Gateway is displaying.
 
 ## Security
+
+Full supply chain details (cosign verification, SBOM extraction,
+pinning to digests, vuln reporting): [`SECURITY.md`](SECURITY.md).
+Quick version of the deployment hygiene below.
 
 This is a narrow threat model — single-user container running a
 trading tool. But there are real things to get right.

@@ -1,0 +1,185 @@
+name: Release image
+
+# Triggers on any `v*` tag push. Builds the shipped Dockerfile, pushes
+# it to GitHub Container Registry, generates an SPDX SBOM, and signs
+# both the image and the SBOM with cosign using keyless signing
+# (OIDC via GitHub Actions) so consumers can verify provenance
+# without us distributing a private key.
+#
+# Extensibility notes for contributors:
+#   - The image is published to ghcr.io/${{ github.repository }} —
+#     i.e. ghcr.io/<owner>/<repo>. Forks publish to their own
+#     namespace automatically, no secrets setup required beyond the
+#     default GITHUB_TOKEN.
+#   - The `platforms` list below controls architectures. Start with
+#     linux/amd64 only because the gnzsnz/ib-gateway upstream base is
+#     validated on amd64; add linux/arm64 once upstream + our ATK
+#     wiring is confirmed on that arch.
+#   - If you rename the workflow file, update docs/SECURITY.md's
+#     cosign verification example — the `--certificate-identity`
+#     field includes the workflow file path.
+
+on:
+  # Fires after CI publishes the GitHub Release (see ci.yml's
+  # `Create GitHub Release` step). Running on release:published instead
+  # of tag-push avoids racing ci.yml for the release object that we
+  # attach the SBOM to.
+  release:
+    types: [published]
+
+permissions:
+  contents: write     # upload SBOM to the release
+  packages: write     # push to ghcr.io
+  id-token: write     # cosign keyless OIDC
+
+jobs:
+  build-push-sign:
+    runs-on: ubuntu-24.04
+    outputs:
+      image-digest: ${{ steps.build-push.outputs.digest }}
+      image-ref: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install host tools used by the Makefile
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends make unzip
+
+      - name: make (build agent jar + stage controller)
+        # Populate dist/ so the Dockerfile's COPY dist/... steps resolve.
+        # Running the same `make` target CI uses for the release tarball,
+        # so the image contents match the tarball contents bit-for-bit.
+        run: make
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags, labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            # Exact version tag, with and without the leading 'v' so
+            # both :v0.5.3 and :0.5.3 resolve to the same image.
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{version}}
+            # Major.minor floating tag so consumers can pin looser
+            # (e.g. :0.5 auto-resolves to the latest 0.5.x).
+            type=semver,pattern={{major}}.{{minor}}
+            # :latest moves with each new tag. Consumers who want
+            # reproducibility should pin to the digest.
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=IB Gateway controller — Python/Java replacement for IBC, shipped as a headless Docker image.
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push image
+        id: build-push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Embed buildx provenance so `docker buildx imagetools inspect`
+          # can reconstruct the build graph. Distinct from cosign
+          # provenance signing below — this is OCI-level attestation,
+          # cosign is Sigstore-level.
+          provenance: true
+          sbom: false   # we generate our own below with syft
+          # GHA cache keeps incremental rebuilds fast across tag bumps.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.4.1'
+
+      - name: Sign image with cosign (keyless)
+        # Uses the Github OIDC token as the identity; no private key
+        # needed and no secret to manage. The signature is stored as
+        # an OCI artifact next to the image in ghcr.io.
+        env:
+          IMAGE_DIGEST: ${{ steps.build-push.outputs.digest }}
+        run: |
+          # Sign each tag the build produced, referenced by digest to
+          # avoid tag-race weirdness.
+          echo "${{ steps.meta.outputs.tags }}" | while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            ref="${tag}@${IMAGE_DIGEST}"
+            echo "Signing $ref"
+            cosign sign --yes "$ref"
+          done
+
+      - name: Generate SPDX SBOM (syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/${{ github.repository }}@${{ steps.build-push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest SBOM with cosign
+        env:
+          IMAGE_DIGEST: ${{ steps.build-push.outputs.digest }}
+        run: |
+          # Attach the SBOM as a signed attestation. Consumers can
+          # fetch + verify with: cosign verify-attestation --type spdxjson
+          cosign attest --yes \
+            --predicate sbom.spdx.json \
+            --type spdxjson \
+            "ghcr.io/${{ github.repository }}@${IMAGE_DIGEST}"
+
+      - name: Upload SBOM as release asset
+        # Also expose the SBOM on the GitHub release page so consumers
+        # who don't have cosign installed can still inspect it.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          gh release upload "$TAG" sbom.spdx.json --clobber \
+            --repo "$GITHUB_REPOSITORY"
+
+      - name: Print verification recipe
+        # Summary block users can copy-paste to verify what just shipped.
+        run: |
+          cat <<EOF
+          ================================================================
+          Image published: ghcr.io/${{ github.repository }}:${GITHUB_REF_NAME#v}
+          Digest:         ${{ steps.build-push.outputs.digest }}
+
+          Verify signature:
+            cosign verify \\
+              --certificate-identity-regexp '^https://github.com/${{ github.repository }}/\.github/workflows/release-image\.yml@' \\
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+              ghcr.io/${{ github.repository }}@${{ steps.build-push.outputs.digest }}
+
+          Verify + extract SBOM:
+            cosign verify-attestation --type spdxjson \\
+              --certificate-identity-regexp '^https://github.com/${{ github.repository }}/\.github/workflows/release-image\.yml@' \\
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+              ghcr.io/${{ github.repository }}@${{ steps.build-push.outputs.digest }} \\
+              | jq -r '.payload' | base64 -d | jq '.predicate' > sbom.spdx.json
+          ================================================================
+          EOF

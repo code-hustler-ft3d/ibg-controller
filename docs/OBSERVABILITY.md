@@ -41,7 +41,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 ```json
 {
   "status": "healthy",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "mode": "live",
   "state": "MONITORING",
   "jvm_pid": 12345,

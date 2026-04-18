@@ -4,6 +4,47 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] - 2026-04-18
+
+### Added
+
+- **Published container image** at `ghcr.io/code-hustler-ft3d/ibg-controller`.
+  Each git tag push now triggers
+  `.github/workflows/release-image.yml` which builds the shipped
+  `Dockerfile`, pushes to GHCR with tags `:v<version>`, `:<major>.<minor>`,
+  and `:latest`, and records the digest in the CI log for pinning.
+  Drops the "you must `git clone` + `make` + `docker build`" barrier
+  for users who just want a ready-to-run image. Build is
+  reproducible from the tag: same upstream base, same dist/ artifacts,
+  same layer graph.
+- **Keyless cosign signing** via Sigstore of every pushed image. The
+  signing identity is the GitHub Actions OIDC token for this repo's
+  `release-image.yml` workflow. No private key to manage, no way for
+  a forked workflow to sign as us. Verify with `cosign verify` using
+  the recipe in [`SECURITY.md`](SECURITY.md).
+- **SPDX SBOM** generated with [syft](https://github.com/anchore/syft)
+  against the pushed image by digest, attached to the image as a
+  signed cosign attestation AND uploaded to the GitHub release page
+  as `sbom.spdx.json`. Consumers can audit the full layer-wise
+  dependency tree without pulling the image; reproducibility check:
+  the SBOM's root digest matches the image digest printed in CI.
+- **New [`SECURITY.md`](SECURITY.md) at the repo root** — supply chain
+  model, cosign verification walkthrough, pinning-by-digest recipe,
+  threat model, and private vulnerability reporting flow. Shows up
+  automatically on the GitHub repo's **Security** tab.
+- **README Quick start** updated to lead with `docker pull
+  ghcr.io/code-hustler-ft3d/ibg-controller:latest` — the "build
+  yourself" path is now a fallback rather than the default.
+
+### Non-goals
+
+- Multi-arch (`linux/arm64`) isn't enabled yet. The upstream
+  `gnzsnz/ib-gateway` base image's ARM-path behaviour (Zulu JRE at a
+  different location, ATK wrapper lookup) hasn't been verified inside
+  our CI gateway-version matrix. `linux/amd64` is the only supported
+  platform until that's validated — adding `linux/arm64` is a
+  one-line change in `release-image.yml` once it is.
+
 ## [0.5.2] - 2026-04-18
 
 ### Added

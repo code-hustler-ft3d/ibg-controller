@@ -76,6 +76,24 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.3
+
+**No breaking changes.** Supply chain additions:
+
+- Pre-built images are now published to GHCR on every tag:
+  `ghcr.io/code-hustler-ft3d/ibg-controller:v0.5.3` (and `:0.5`,
+  `:latest`). If you were building locally with `docker build`, you
+  can switch to `docker pull` instead, but the local-build path is
+  not deprecated.
+- Every image is cosign-signed keyless. If you want to enforce
+  signature verification in your deployment (recommended), see
+  [`SECURITY.md`](../SECURITY.md) for the `cosign verify` recipe.
+- SBOM is attached to the image as a signed attestation and to the
+  GitHub release as `sbom.spdx.json`.
+
+No action required — the existing `.env` and deployment flow keep
+working. Wire up cosign verification at your leisure.
+
 ### v0.5.2
 
 **No breaking changes.** Additive:
