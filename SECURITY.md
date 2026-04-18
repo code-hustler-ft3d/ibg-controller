@@ -60,7 +60,7 @@ chmod +x cosign && sudo mv cosign /usr/local/bin/
 
 Verify the image signature:
 ```bash
-IMAGE=ghcr.io/code-hustler-ft3d/ibg-controller:v0.5.4   # replace with your tag
+IMAGE=ghcr.io/code-hustler-ft3d/ibg-controller:v0.5.5   # replace with your tag
 
 cosign verify \
   --certificate-identity-regexp '^https://github.com/code-hustler-ft3d/ibg-controller/\.github/workflows/release-image\.yml@' \
@@ -93,7 +93,7 @@ digest:
 
 ```bash
 # Resolve the current digest for the tag you want
-docker buildx imagetools inspect ghcr.io/code-hustler-ft3d/ibg-controller:v0.5.4 \
+docker buildx imagetools inspect ghcr.io/code-hustler-ft3d/ibg-controller:v0.5.5 \
   | awk '/^Digest:/ {print $2}'
 
 # Use the digest in your compose / k8s / docker run

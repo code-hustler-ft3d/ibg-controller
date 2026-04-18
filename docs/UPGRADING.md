@@ -76,6 +76,59 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.5
+
+**No breaking changes.** Defensive fix for a CCP-lockout failure mode
+diagnosed on 2026-04-18: when a mid-life JVM restart had to SIGKILL
+an unresponsive Gateway, IBKR's server sometimes held the session
+slot past the then-fixed 1200s cool-down, so the *next* auth attempt
+from the same controller hit silent-drop lockout even though no
+concurrent web or mobile session existed. Symptoms looked identical
+to the "log out of IBKR elsewhere" scenario from v0.4.7, but the
+remediation was different — the stranded slot was ours, held
+server-side until IBKR's timeout drained it.
+
+What v0.5.5 changes:
+
+- **Adaptive long cool-down.** After a CCP-triggered JVM restart, the
+  controller now scales its silent wait by attempt index: 1200s →
+  1800s → 2700s → 3600s (capped) → 3600s for the default
+  `CCP_COOLDOWN_MULTIPLIER=1.5`. This gives IBKR escalating quiet
+  time to drain any stranded slot before we next auth. Operators who
+  want the old fixed-duration behaviour can set
+  `CCP_COOLDOWN_MULTIPLIER=1.0`.
+- **Extended SIGTERM grace for mid-life restarts.** Teardown now
+  waits 30s (was hardcoded 20s) before escalating to SIGKILL,
+  reducing the rate at which teardowns strand a slot in the first
+  place. Tunable via `JVM_TEARDOWN_GRACE_SECONDS`. Distinct from the
+  15s lifecycle-shutdown window in the SIGTERM handler, which is
+  unchanged.
+- **New `ALERT_JVM_UNCLEAN_SHUTDOWN` log token (WARNING)** fires on
+  every SIGKILL-escalated teardown. Use it to correlate with
+  subsequent `ALERT_CCP_PERSISTENT` emissions — if the pattern is
+  "unclean shutdown → CCP lockout that *doesn't* clear after the
+  adaptive cool-down", raise `CCP_COOLDOWN_MAX_SECONDS` above 3600.
+  See
+  [`OBSERVABILITY.md`](OBSERVABILITY.md#alert_jvm_unclean_shutdown).
+
+New env vars (all optional, all defaulted):
+
+| Var | Default | When to tune |
+|---|---|---|
+| `JVM_TEARDOWN_GRACE_SECONDS` | `30` | Bump to 60 if `ALERT_JVM_UNCLEAN_SHUTDOWN` is frequent — host is likely under CPU/memory pressure. |
+| `CCP_COOLDOWN_SECONDS` | `1200` | Base cool-down duration. Unchanged from v0.5.4's internal default; just now tunable. |
+| `CCP_COOLDOWN_MAX_SECONDS` | `3600` | Raise above 3600 only if lockouts keep firing after the cap is already being hit. |
+| `CCP_COOLDOWN_MULTIPLIER` | `1.5` | Set to `1.0` to restore v0.5.4's fixed-duration behaviour. |
+
+**If you're running pre-v0.5.5 and seeing the symptom** (persistent
+CCP lockout on a mode you know has no concurrent session), the
+manual remediation is: `docker stop` the container, log in to
+IBKR's Client Portal → Settings → User Settings → Manage Sessions,
+terminate any lingering TWS/Gateway/API session rows, wait 5
+minutes, then `docker start`. Once you're on v0.5.5 the adaptive
+cool-down will handle this without operator intervention in most
+cases.
+
 ### v0.5.4
 
 **No breaking changes.** Polish + release-pipeline fix:

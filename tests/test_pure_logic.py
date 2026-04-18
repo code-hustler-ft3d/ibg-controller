@@ -598,12 +598,15 @@ class TestEscalateToJvmRestart(unittest.TestCase):
         with patch.object(gc, "_teardown_jvm_for_restart",
                           side_effect=lambda: call_order.append("teardown")), \
              patch.object(gc, "_apply_ccp_long_cooldown",
-                          side_effect=lambda r: call_order.append("cooldown")), \
+                          side_effect=lambda r, attempt=1: call_order.append(
+                              f"cooldown(attempt={attempt})")), \
              patch.object(gc, "_relaunch_and_login_in_place",
                           side_effect=lambda: (call_order.append("relaunch") or True)), \
              patch.object(gc, "_reset_ccp_backoff"):
             gc._escalate_to_jvm_restart("test reason")
-        self.assertEqual(call_order, ["teardown", "cooldown", "relaunch"])
+        # v0.5.5: cooldown is now invoked with attempt= kwarg so the
+        # adaptive scaling sees the loop's 1-indexed retry counter.
+        self.assertEqual(call_order, ["teardown", "cooldown(attempt=1)", "relaunch"])
 
     def test_retries_after_restart_failure(self):
         # Third relaunch succeeds — first two returned False. Teardown
@@ -1224,6 +1227,121 @@ class TestShutdownAlert(unittest.TestCase):
         self.assertLess(mode_idx, signal_idx)
         self.assertLess(signal_idx, graceful_idx)
         self.assertLess(graceful_idx, reason_idx)
+
+
+class TestAdaptiveCooldown(unittest.TestCase):
+    """v0.5.5: CCP long cool-down scales with restart-attempt index.
+
+    Pins the scaling curve so a refactor can't silently revert to the
+    fixed-duration behaviour. That fixed 1200s was enough for IBKR's
+    rate limiter but not long enough to outlast a stranded session slot
+    from a prior unclean teardown — the root cause of the persistent
+    lockout pattern (see memory/project_ccp_concurrent_session.md).
+    """
+
+    def test_attempt_1_returns_base(self):
+        self.assertEqual(gc._compute_adaptive_cooldown(1, 1200, 1.5, 3600), 1200)
+
+    def test_attempt_2_scales_by_multiplier(self):
+        self.assertEqual(gc._compute_adaptive_cooldown(2, 1200, 1.5, 3600), 1800)
+
+    def test_attempt_3_scales_again(self):
+        self.assertEqual(gc._compute_adaptive_cooldown(3, 1200, 1.5, 3600), 2700)
+
+    def test_caps_at_max(self):
+        # 1200 * 1.5^10 = ~69k, clamped to 3600.
+        self.assertEqual(gc._compute_adaptive_cooldown(11, 1200, 1.5, 3600), 3600)
+
+    def test_multiplier_1_restores_legacy_fixed_behaviour(self):
+        # Opt-out env for operators who prefer the pre-v0.5.5 curve.
+        for attempt in range(1, 6):
+            self.assertEqual(
+                gc._compute_adaptive_cooldown(attempt, 1200, 1.0, 3600),
+                1200,
+                f"attempt={attempt} with mult=1.0 should stay at base")
+
+    def test_nonpositive_attempt_treated_as_base(self):
+        # Defensive: the docstring promises attempt <= 0 == 1.
+        self.assertEqual(gc._compute_adaptive_cooldown(0, 1200, 1.5, 3600), 1200)
+        self.assertEqual(gc._compute_adaptive_cooldown(-3, 1200, 1.5, 3600), 1200)
+
+    def test_return_is_int(self):
+        # time.sleep accepts float, but the log line reads better with an
+        # int and operators grep on round-number durations.
+        self.assertIsInstance(gc._compute_adaptive_cooldown(2, 1200, 1.5, 3600), int)
+
+
+class TestUncleanShutdownAlert(unittest.TestCase):
+    """v0.5.5: _teardown_jvm_for_restart() emits ALERT_JVM_UNCLEAN_SHUTDOWN
+    when SIGKILL is required, so operators can see when a restart likely
+    stranded an IBKR session slot."""
+
+    class _FakeProc:
+        def __init__(self, behavior):
+            self.behavior = behavior  # "clean" | "stuck" | "terminate_raises"
+            self.pid = 12345
+            self._killed = False
+
+        def poll(self):
+            return None  # alive at teardown entry
+
+        def terminate(self):
+            if self.behavior == "terminate_raises":
+                raise OSError("simulated terminate failure")
+
+        def wait(self, timeout=None):
+            if self.behavior == "stuck" and not self._killed:
+                import subprocess
+                raise subprocess.TimeoutExpired(cmd="x", timeout=timeout)
+            return 0
+
+        def kill(self):
+            self._killed = True
+
+    def _run_teardown(self, behavior):
+        warning_calls = []
+        info_calls = []
+        fake = self._FakeProc(behavior)
+        with patch.object(gc, "GATEWAY_PROC", fake), \
+             patch.object(gc.log, "warning",
+                          side_effect=lambda msg: warning_calls.append(msg)), \
+             patch.object(gc.log, "info",
+                          side_effect=lambda msg: info_calls.append(msg)), \
+             patch.object(gc.log, "error"), \
+             patch("os.unlink"):
+            gc._teardown_jvm_for_restart()
+        return warning_calls
+
+    def test_clean_teardown_does_not_emit_alert(self):
+        warnings = self._run_teardown("clean")
+        alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
+        self.assertEqual(
+            alerts, [],
+            f"clean teardown should not emit ALERT_JVM_UNCLEAN_SHUTDOWN, got {warnings!r}")
+
+    def test_sigkill_required_emits_alert(self):
+        warnings = self._run_teardown("stuck")
+        alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
+        self.assertEqual(len(alerts), 1,
+                         f"expected exactly one ALERT_JVM_UNCLEAN_SHUTDOWN, got {warnings!r}")
+        alert = alerts[0]
+        # Grep-contract pins:
+        self.assertIn(f"mode={gc.TRADING_MODE}", alert)
+        self.assertIn("pid=12345", alert)
+        self.assertIn('reason="', alert)
+        self.assertIn("SIGKILL", alert,
+                      "reason should mention SIGKILL for operator grep")
+        self.assertIn('implication="', alert,
+                      "implication= field documents the suspected consequence")
+
+    def test_terminate_exception_emits_alert(self):
+        # Defensive path: if terminate() itself raises, the teardown
+        # log captures it AND we still emit the ALERT so the stranded
+        # session hypothesis is visible in the log trail.
+        warnings = self._run_teardown("terminate_raises")
+        alerts = [w for w in warnings if "ALERT_JVM_UNCLEAN_SHUTDOWN" in w]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("OSError", alerts[0])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,76 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.5] - 2026-04-18
+
+### Fixed
+
+- **Stranded IBKR session slots from unclean JVM teardowns.** Empirical
+  finding during a 2026-04-18 incident: a container showed
+  `ALERT_CCP_PERSISTENT` on both live AND paper modes for 2+ hours
+  despite no concurrent web/mobile session. Root-cause analysis of
+  `_teardown_jvm_for_restart` showed SIGTERM → 20s wait → SIGKILL with
+  no explicit CCP session-close — the restart path relied on Gateway's
+  shutdown hooks to drain the IBKR session. When those hooks don't run
+  cleanly (Swing EDT stall, blocked native I/O), IBKR's server holds
+  the session slot until its own timeout fires, so the *next* auth
+  attempt from the *same* controller hits silent-drop CCP lockout as
+  if a concurrent session existed. The v0.5.4 fixed-duration cool-down
+  (1200s) was often shorter than IBKR's server-side drain, so the
+  restart loop would consume attempts against a still-stranded slot.
+  v0.5.5 attacks this three ways:
+  1. **Extended SIGTERM grace** — bumped from 20s to 30s via the new
+     `JVM_TEARDOWN_GRACE_SECONDS` env var, reducing the rate at which
+     SIGKILL is needed in the first place.
+  2. **Adaptive cool-down** — `_apply_ccp_long_cooldown` now scales by
+     attempt index (`base × multiplier^(attempt-1)`, capped). Default
+     progression: 1200s → 1800s → 2700s → 3600s (capped) → 3600s.
+     Gives IBKR escalating quiet time to drain any stranded slot
+     before the next auth attempt, instead of firing the same short
+     wait five times in a row against the same held slot.
+  3. **Operator visibility** — new `ALERT_JVM_UNCLEAN_SHUTDOWN` fires
+     on every SIGKILL-escalated teardown, so monitoring can correlate
+     unclean shutdowns with follow-up CCP lockouts and tune
+     `CCP_COOLDOWN_MAX_SECONDS` upward for longer-draining tenants.
+
+### Added
+
+- **`ALERT_JVM_UNCLEAN_SHUTDOWN`** log token (WARNING-level) emitted
+  by `_teardown_jvm_for_restart` when the JVM ignored SIGTERM past the
+  grace window or the teardown raised. Distinct from `ALERT_SHUTDOWN`
+  (controller-lifecycle, INFO-level) — this one fires on *mid-life*
+  restarts only. Fully documented in
+  [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md#alert_jvm_unclean_shutdown)
+  with emission shape, operator remediation, and debounce guidance.
+  Part of the public stability contract from v0.5.5 onward.
+- **`JVM_TEARDOWN_GRACE_SECONDS`** env var (default 30). Seconds to
+  wait for the Gateway JVM to exit after SIGTERM during mid-life
+  restart before SIGKILL. Bump to 60 under host resource pressure.
+- **`CCP_COOLDOWN_MAX_SECONDS`** env var (default 3600). Upper cap on
+  the adaptive long cool-down. Raise if your IBKR tenant's server-side
+  session timeout exceeds 1h.
+- **`CCP_COOLDOWN_MULTIPLIER`** env var (default 1.5). Multiplicative
+  factor per restart attempt. Set to `1.0` to restore v0.5.4 and
+  earlier's fixed-duration behaviour.
+- **`_compute_adaptive_cooldown` pure-logic helper** — extracted from
+  `_apply_ccp_long_cooldown` so the scaling math is covered by unit
+  tests independent of the sleep + logging shell.
+- **10 new unit tests** in `tests/test_pure_logic.py`: 7 for the
+  adaptive-cooldown scaling (`TestAdaptiveCooldown`) and 3 for the
+  unclean-shutdown alert emission (`TestUncleanShutdownAlert`). Test
+  total: 166 → 176.
+
+### Docs
+
+- `OBSERVABILITY.md` — added the `ALERT_JVM_UNCLEAN_SHUTDOWN` section,
+  a Tier 1.5 grep-examples block for operational warnings, and all
+  three new env vars in the reference table. Bumped the JSON-shape
+  `version` field to 0.5.5. Stability-contract paragraph now notes
+  v0.5.5 added `ALERT_JVM_UNCLEAN_SHUTDOWN`.
+- `UPGRADING.md` — added the v0.5.5 section (non-breaking upgrade,
+  explains the stranded-session diagnosis + when to tune the new env
+  vars).
+
 ## [0.5.4] - 2026-04-18
 
 ### Fixed

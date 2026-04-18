@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import gi
 
 
-__version__ = "0.5.4"
+__version__ = "0.5.5"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -2262,21 +2262,73 @@ _JVM_RESTART_MAX_ATTEMPTS = int(os.environ.get("JVM_RESTART_MAX_ATTEMPTS", "5"))
 # Env var ``CCP_COOLDOWN_SECONDS`` (default 1200 = 20min).
 _CCP_COOLDOWN_SECONDS_DEFAULT = 1200
 
+# v0.5.5: adaptive cool-down scales with restart-attempt index. The fixed
+# 1200s was sufficient for rate-limiter reset but not for stranded-session
+# release — when a prior JVM's CCP session slot is still held server-side
+# (see ALERT_JVM_UNCLEAN_SHUTDOWN), the next auth immediately hits lockout
+# and the cycle repeats. Scaling the wait per attempt (1200 → 1800 → 2700
+# → 3600 capped) gives IBKR's session-slot timeout a chance to drain even
+# when our SIGTERM didn't close the socket cleanly.
+# Env vars: ``CCP_COOLDOWN_MAX_SECONDS`` (default 3600),
+# ``CCP_COOLDOWN_MULTIPLIER`` (default 1.5; set 1.0 to restore the
+# pre-v0.5.5 fixed-duration behaviour).
+_CCP_COOLDOWN_MAX_SECONDS_DEFAULT = 3600
+_CCP_COOLDOWN_MULTIPLIER_DEFAULT = 1.5
 
-def _apply_ccp_long_cooldown(reason):
-    """Sleep a long duration (default 20min) to let IBKR's CCP rate
-    limiter fully clear before a JVM restart. Required because
-    killing and relaunching the JVM without the cool-down feeds the
-    limiter a fresh handshake and keeps the lockout armed (exactly
-    the failure mode the v0.4.0 changelog described).
 
-    Env var: ``CCP_COOLDOWN_SECONDS`` (int seconds, default 1200).
+def _compute_adaptive_cooldown(attempt, base_seconds, multiplier, max_seconds):
+    """Pure-logic helper: scale the CCP cool-down by restart-attempt index.
+
+    Attempt 1 returns base_seconds; each subsequent attempt multiplies.
+    Values of ``attempt <= 0`` are treated as 1 (base duration). Result
+    is capped at ``max_seconds`` and returned as ``int`` seconds.
+
+    Split out so the scaling curve is unit-testable without blocking
+    on ``time.sleep``.
     """
-    cool_down_s = int(os.environ.get(
+    safe_attempt = max(int(attempt), 1)
+    scaled = int(base_seconds * (multiplier ** (safe_attempt - 1)))
+    return min(scaled, max_seconds)
+
+
+def _apply_ccp_long_cooldown(reason, attempt=1):
+    """Sleep long enough for IBKR's CCP rate limiter AND any stranded
+    session slots to drain before a JVM restart.
+
+    v0.5.5: adaptive scaling by restart attempt. Each consecutive
+    attempt extends the wait by ``CCP_COOLDOWN_MULTIPLIER`` (default
+    1.5x), capped at ``CCP_COOLDOWN_MAX_SECONDS`` (default 3600 = 1h).
+    Prior versions slept a fixed ``CCP_COOLDOWN_SECONDS`` (default 1200)
+    every time, which cleared the rate limiter but could not outlast an
+    IBKR-side session-slot hold from a prior unclean teardown — the
+    pattern documented in memory/project_ccp_concurrent_session.md
+    where lockouts persisted across multiple full escalation cycles.
+
+    Args:
+        reason: context string included in the log line.
+        attempt: 1-indexed restart-attempt number from the caller's loop
+                 (``_escalate_to_jvm_restart``). Defaults to 1 for legacy
+                 callers that don't track attempt count.
+
+    Env vars:
+        CCP_COOLDOWN_SECONDS     base duration (default 1200)
+        CCP_COOLDOWN_MAX_SECONDS cap (default 3600)
+        CCP_COOLDOWN_MULTIPLIER  per-attempt multiplier (default 1.5;
+                                 set to 1.0 for fixed-duration legacy
+                                 behaviour).
+    """
+    base = int(os.environ.get(
         "CCP_COOLDOWN_SECONDS", str(_CCP_COOLDOWN_SECONDS_DEFAULT)))
-    log.warning(f"CCP long cool-down ({reason}): sleeping {cool_down_s}s "
-                "before JVM restart. Short waits keep IBKR's rate "
-                "limiter armed; this silence lets it reset.")
+    cap = int(os.environ.get(
+        "CCP_COOLDOWN_MAX_SECONDS", str(_CCP_COOLDOWN_MAX_SECONDS_DEFAULT)))
+    mult = float(os.environ.get(
+        "CCP_COOLDOWN_MULTIPLIER", str(_CCP_COOLDOWN_MULTIPLIER_DEFAULT)))
+    cool_down_s = _compute_adaptive_cooldown(attempt, base, mult, cap)
+    log.warning(
+        f"CCP long cool-down ({reason}): sleeping {cool_down_s}s "
+        f"(attempt={attempt}, base={base}, mult={mult}, cap={cap}). "
+        "Adaptive scaling lets IBKR's rate limiter + any stranded "
+        "session slots drain; each restart attempt extends the wait.")
     time.sleep(cool_down_s)
 
 
@@ -2352,7 +2404,8 @@ def _escalate_to_jvm_restart(reason):
                     "tearing down JVM before long cool-down (v0.4.6 silent cool-down)")
         _teardown_jvm_for_restart()
         _apply_ccp_long_cooldown(
-            f"{reason}; JVM restart {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}"
+            f"{reason}; JVM restart {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}",
+            attempt=attempt,
         )
         log.warning(f"JVM restart attempt {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}: "
                     "cool-down complete, launching fresh JVM")
@@ -3363,6 +3416,14 @@ def start_health_server():
     log.info(f"Health server: listening on {host}:{port} (GET /health, /ready)")
 
 
+# v0.5.5: SIGTERM grace period extended from 20s to 30s. Gateway's JVM
+# shutdown hooks need time to close the CCP session cleanly on IBKR's
+# side; a too-short grace forces SIGKILL, which leaves IBKR holding the
+# session slot until its own timeout fires. Env override for environments
+# where even 30s isn't enough.
+_JVM_TEARDOWN_GRACE_SECONDS = int(os.environ.get("JVM_TEARDOWN_GRACE_SECONDS", "30"))
+
+
 def _teardown_jvm_for_restart():
     """v0.4.6: Terminate the current Gateway JVM and clear per-instance
     state files (agent socket, ready file) so a subsequent launch starts
@@ -3376,20 +3437,50 @@ def _teardown_jvm_for_restart():
     (20min cool-down with JVM alive → CCP still locked on restart).
     Killing the JVM first makes the cool-down genuinely silent from
     IBKR's perspective, which is the whole point.
+
+    v0.5.5: extended SIGTERM grace from 20s to 30s so Gateway's JVM
+    shutdown hooks have time to send a clean CCP session-close to IBKR
+    before fallback SIGKILL. When SIGKILL is required, emits
+    ``ALERT_JVM_UNCLEAN_SHUTDOWN`` — the suspected root cause of the
+    persistent-lockout pattern where consecutive CCP lockouts accumulate
+    faster than IBKR's session-slot timeout can drain them.
     """
     global GATEWAY_PROC
     if GATEWAY_PROC is not None and GATEWAY_PROC.poll() is None:
-        log.info(f"RESTART: terminating Gateway PID {GATEWAY_PROC.pid}")
+        pid = GATEWAY_PROC.pid
+        log.info(f"RESTART: terminating Gateway PID {pid}")
+        clean = True
+        unclean_reason = ""
         try:
             GATEWAY_PROC.terminate()
             try:
-                GATEWAY_PROC.wait(timeout=20)
+                GATEWAY_PROC.wait(timeout=_JVM_TEARDOWN_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
-                log.warning("RESTART: Gateway didn't exit cleanly, killing")
+                log.warning(
+                    f"RESTART: Gateway didn't exit within "
+                    f"{_JVM_TEARDOWN_GRACE_SECONDS}s grace; SIGKILL'ing. "
+                    "IBKR session slot may be held server-side until timeout.")
                 GATEWAY_PROC.kill()
                 GATEWAY_PROC.wait(timeout=5)
+                clean = False
+                unclean_reason = (
+                    f"Gateway JVM ignored SIGTERM within "
+                    f"{_JVM_TEARDOWN_GRACE_SECONDS}s grace; required SIGKILL")
         except Exception as e:
             log.warning(f"RESTART: Gateway termination error: {e}")
+            clean = False
+            unclean_reason = f"teardown raised {type(e).__name__}: {e}"
+        if not clean:
+            # Stable grep token for external monitoring. Emitted once per
+            # unclean teardown, distinct from ALERT_SHUTDOWN (which is
+            # the lifecycle signal for controller exit). See
+            # docs/OBSERVABILITY.md for the grep-contract guarantees.
+            log.warning(
+                f"ALERT_JVM_UNCLEAN_SHUTDOWN mode={TRADING_MODE} "
+                f"pid={pid} reason=\"{unclean_reason}\" "
+                f"implication=\"IBKR CCP session slot likely held "
+                f"server-side until timeout; next auth attempt may hit "
+                f"lockout despite cool-down\"")
     GATEWAY_PROC = None
 
     for p in (AGENT_SOCKET, READY_FILE):

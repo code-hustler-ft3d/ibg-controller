@@ -41,7 +41,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 ```json
 {
   "status": "healthy",
-  "version": "0.5.4",
+  "version": "0.5.5",
   "mode": "live",
   "state": "MONITORING",
   "jvm_pid": 12345,
@@ -267,6 +267,50 @@ host looks fine, capturing a JVM thread dump before the next
 **Recommended debounce**: none for `graceful=true`. `graceful=false`
 should page on the 3rd occurrence in 1h, not the 1st.
 
+### `ALERT_JVM_UNCLEAN_SHUTDOWN`
+
+```
+ALERT_JVM_UNCLEAN_SHUTDOWN mode=live pid=12345 reason="Gateway JVM ignored SIGTERM within 30s grace; required SIGKILL" implication="IBKR CCP session slot likely held server-side until timeout; next auth attempt may hit lockout despite cool-down"
+ALERT_JVM_UNCLEAN_SHUTDOWN mode=paper pid=12346 reason="teardown raised OSError: [Errno 3] No such process" implication="IBKR CCP session slot likely held server-side until timeout; next auth attempt may hit lockout despite cool-down"
+```
+
+**When fired**: from `_teardown_jvm_for_restart`, exactly once per
+restart where `SIGTERM` didn't bring the JVM down within the
+`JVM_TEARDOWN_GRACE_SECONDS` window (default 30s) or where the
+teardown raised an exception. Distinct from `ALERT_SHUTDOWN` which
+covers controller-lifecycle exits — this one fires on *mid-life*
+JVM restarts (CCP lockout escalation, monitor-loop recovery).
+
+**Log level**: `WARNING`. Indicates a degraded but non-terminal state
+— the restart loop continues, but the current teardown likely
+stranded an IBKR session slot that will hold until IBKR's own
+server-side timeout drains it.
+
+**Why this matters**: the v0.5.5 CHANGELOG documents the empirical
+finding that persistent CCP lockouts accumulating across multiple
+full escalation cycles (observed at v0.3.2 / v0.4.x) trace back to
+stranded session slots from SIGKILL'd JVMs. The v0.5.5 combination
+of the extended grace window, this alert, and the adaptive
+`CCP_COOLDOWN_MAX_SECONDS` lets operators see when the teardown was
+unclean and gives IBKR enough silence to drain the stranded slot
+before the next auth attempt.
+
+**What the operator should do**: one-off occurrences are usually
+absorbed by the adaptive cool-down (the next attempt will sleep
+long enough for the stranded slot to drain). Repeated occurrences
+(3+ in 1h) indicate Gateway's shutdown hooks aren't running cleanly
+— check host CPU/memory pressure, consider bumping
+`JVM_TEARDOWN_GRACE_SECONDS` to 60, and if the ratio stays high,
+capture a JVM thread dump (`kill -3 <pid>`) on the next occurrence
+to find where shutdown is hanging.
+
+**Recommended debounce**: page on the 3rd occurrence in 1h. Correlate
+with subsequent `ALERT_CCP_PERSISTENT` emissions — the expected
+pattern is unclean-shutdown → adaptive-cool-down succeeds → no
+`ALERT_CCP_PERSISTENT` follow-up. If `ALERT_CCP_PERSISTENT` fires
+right after, the adaptive cool-down cap may be too low for your
+IBKR tenant's session timeout; raise `CCP_COOLDOWN_MAX_SECONDS`.
+
 ### `ALERT_2FA_FAILED`
 
 ```
@@ -328,6 +372,10 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 |---|---|---|
 | `CONTROLLER_HEALTH_SERVER_PORT` | `8080` (in the shipped image), unset (source checkout) | TCP port to listen on. In `DUAL_MODE=yes`, paper auto-offsets to `port+1`. Set to empty to disable the health server entirely. |
 | `CONTROLLER_HEALTH_SERVER_HOST` | `0.0.0.0` (in the shipped image), `0.0.0.0` (code default) | Bind address. `0.0.0.0` is required for Docker port mapping to work; restrict external exposure with `-p 127.0.0.1:8080:8080` on the host side, not the container-internal bind. |
+| `JVM_TEARDOWN_GRACE_SECONDS` | `30` | Seconds to wait for Gateway JVM to exit after `SIGTERM` during a *mid-life* restart before escalating to `SIGKILL`. Bump to 60 if `ALERT_JVM_UNCLEAN_SHUTDOWN` is frequent — Gateway's shutdown hooks may need more time under resource pressure. Distinct from the 15s lifecycle-shutdown window in the SIGTERM handler. Added v0.5.5. |
+| `CCP_COOLDOWN_SECONDS` | `1200` | Base duration (seconds) of the silent cool-down applied before a mid-life JVM restart after a CCP lockout. This is the sleep time on the *first* restart attempt; subsequent attempts scale up via `CCP_COOLDOWN_MULTIPLIER`. |
+| `CCP_COOLDOWN_MAX_SECONDS` | `3600` | Upper cap on the adaptive cool-down (seconds). Raise if your IBKR tenant's server-side session timeout is longer than 1h and lockouts keep firing after the cap is hit. Added v0.5.5. |
+| `CCP_COOLDOWN_MULTIPLIER` | `1.5` | Multiplicative factor applied per restart attempt: attempt-1 = base, attempt-2 = base×1.5, attempt-3 = base×2.25, etc., capped at `CCP_COOLDOWN_MAX_SECONDS`. Set to `1.0` to restore the v0.5.4-and-earlier fixed-duration behaviour. Added v0.5.5. |
 
 ## Example integrations
 
@@ -374,6 +422,23 @@ docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|JVM_RESTART_EX
 # Just the latest occurrence of each (ERROR-level only)
 docker logs ibkr 2>&1 | grep -E '^[0-9]+:[0-9]+ \[ERROR\] ALERT_' | tail
 
+# Tier 1.5: operational warnings (WARNING-level) — not wake-someone-up on
+# a single occurrence, but worth a dashboard. ALERT_JVM_UNCLEAN_SHUTDOWN
+# fires when a mid-life JVM restart needed SIGKILL after the
+# JVM_TEARDOWN_GRACE_SECONDS window expired, which typically strands
+# an IBKR session slot server-side.
+docker logs --since=1h ibkr 2>&1 | grep 'ALERT_JVM_UNCLEAN_SHUTDOWN'
+
+# Count unclean shutdowns in the last hour. 3+ in 1h is the
+# page-a-human threshold.
+docker logs --since=1h ibkr 2>&1 | grep -c 'ALERT_JVM_UNCLEAN_SHUTDOWN'
+
+# Correlate unclean shutdowns with subsequent CCP lockouts — expected
+# pattern is unclean-shutdown, adaptive cool-down succeeds, no
+# follow-up ALERT_CCP_PERSISTENT. If ALERT_CCP_PERSISTENT keeps
+# firing right after, raise CCP_COOLDOWN_MAX_SECONDS.
+docker logs --since=1h ibkr 2>&1 | grep -E 'ALERT_(JVM_UNCLEAN_SHUTDOWN|CCP_PERSISTENT)'
+
 # Tier 2: lifecycle dashboards — includes ALERT_SHUTDOWN (INFO-level).
 # Useful to distinguish clean operator-driven restarts from JVM crashes.
 docker logs --since=1h ibkr 2>&1 | grep -Eo 'ALERT_[A-Z_]+[^"]*"[^"]*"'
@@ -397,8 +462,10 @@ curl -sf http://ibkr:8080/health | \
 The field names and semantics of `/health` JSON and the prefix + key
 names of `ALERT_*` tokens are part of the public API as of v0.4.9.
 `ALERT_PASSWORD_EXPIRED` was added in v0.5.0, `ALERT_LOGIN_FAILED`
-in v0.5.1, and `ALERT_SHUTDOWN` (INFO-level, lifecycle signal) in
-v0.5.2 — all under the same stability contract.
+in v0.5.1, `ALERT_SHUTDOWN` (INFO-level, lifecycle signal) in
+v0.5.2, and `ALERT_JVM_UNCLEAN_SHUTDOWN` (WARNING-level,
+mid-life restart signal) in v0.5.5 — all under the same stability
+contract.
 Breaking changes will be called out in the CHANGELOG and accompany a
 minor version bump. Adding new fields to `/health` or new
 `ALERT_*` tokens is not a breaking change.
