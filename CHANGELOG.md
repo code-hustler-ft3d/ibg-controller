@@ -55,12 +55,12 @@ and the project follows [Semantic Versioning](https://semver.org/).
   a signal on release cadence and supply-chain posture without having
   to open CHANGELOG or SECURITY.md.
 
-### Non-goals
+### Notes
 
-- v0.5.3's published image is still absent from GHCR until the
-  `release-image.yml` workflow is manually re-run against that tag.
-  Documented under "Per-version notes" in `UPGRADING.md`; not a
-  blocker because v0.5.4 supersedes it.
+- v0.5.3's image was backfilled immediately after v0.5.4 shipped
+  by dispatching the fixed workflow against `tag=v0.5.3`. Both
+  tags now exist on GHCR with signatures and SBOM attestations;
+  no operator action needed.
 
 ## [0.5.3] - 2026-04-18
 

@@ -34,7 +34,7 @@ docker run -d --name ibkr \
 ```
 
 Tags published: `:latest`, `:<major>.<minor>` (e.g. `:0.5`), and
-`:v<major>.<minor>.<patch>` (e.g. `:v0.5.3`). Every tag is signed with
+`:v<major>.<minor>.<patch>` (e.g. `:v0.5.4`). Every tag is signed with
 cosign via Sigstore keyless signing — see [`SECURITY.md`](SECURITY.md)
 for the verification recipe. For reproducible deployments, pin to a
 digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
@@ -364,8 +364,8 @@ make
 # Syntax-check the Python controller + validate the agent jar manifest
 make test
 
-# Create a release tarball (dist/ibg-controller-0.5.3.tar.gz)
-make release VERSION=0.5.3
+# Create a release tarball (dist/ibg-controller-0.5.4.tar.gz)
+make release VERSION=0.5.4
 
 # Install directly into a running ibgateway home (for dev on host, or
 # as called by the Docker image's setup stage)
@@ -377,7 +377,7 @@ Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 ### Installing from a release tarball (for consumers who don't build)
 
 ```bash
-VER=0.5.3
+VER=0.5.4
 curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
 tar -xzf ibg-controller-${VER}.tar.gz
 cd ibg-controller-${VER}
@@ -386,7 +386,7 @@ DESTDIR=/home/ibgateway ./install.sh
 
 The tarball layout is flat:
 ```
-ibg-controller-0.5.3/
+ibg-controller-0.5.4/
 ├── gateway-input-agent.jar    ← installed to $DESTDIR/gateway-input-agent.jar
 ├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
 ├── ibc_config_to_env.py       ← one-shot IBC config.ini → env migration tool
