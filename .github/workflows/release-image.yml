@@ -135,6 +135,12 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
+          # Pin the upstream Gateway base by digest so published releases
+          # don't silently track `:stable`. Bump this in lockstep with a
+          # deliberate Gateway-version upgrade. Multi-arch manifest (amd64
+          # + arm64) as of 10.45.1c, sha256:b4ede80…
+          build-args: |
+            UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1c@sha256:b4ede803caf48279b4bdc21c8de1fb19edaef8bedbb2b49153e72b042f660bf3
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Embed buildx provenance so `docker buildx imagetools inspect`

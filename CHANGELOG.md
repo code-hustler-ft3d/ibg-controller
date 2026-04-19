@@ -4,6 +4,12 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.8] - 2026-04-19
+
+### Fixed
+
+- **Release image now pins Gateway upstream by digest** (`gnzsnz/ib-gateway:10.45.1c@sha256:b4ede80…`) instead of resolving `:stable` at build time. v0.5.7 shipped Gateway 10.37.1q because `:stable` resolved to an older build — a silent downgrade from the 10.45.1c consumers were running from local builds. v0.5.8 is byte-identical controller code to 0.5.6/0.5.7; only the upstream pin changes.
+
 ## [0.5.7] - 2026-04-19
 
 ### Changed
