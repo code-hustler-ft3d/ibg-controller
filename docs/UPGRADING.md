@@ -130,11 +130,14 @@ full 7-status table.
 What to watch after upgrading:
 
 - `ALERT_CCP_PERSISTENT_HALT` (ERROR): new paging target. If this
-  fires, the runbook is in the alert's `remediation=` field — log in
-  to IBKR Client Portal → Settings → User Settings → Manage
-  Sessions, terminate any lingering TWS/Gateway/API session rows,
-  wait 5 minutes, then restart the container. Until the operator
-  restarts, the controller process stays exited.
+  fires, the runbook is in the alert's `remediation=` field —
+  **log into IBKR Mobile as this username** (iOS or Android). Per
+  IBKR's docs, mobile login auto-logs-out all TWS/Gateway sessions
+  and is the reliable kick for both concurrent and stranded slots.
+  Then restart the container. IBKR's web Client Portal does NOT
+  kick the slot (read-only concurrent; production-validated), so
+  don't rely on it. Until the operator runs through this, the
+  controller process stays exited.
 - `ALERT_CLEAN_LOGOUT status=failed_unreachable` rate should drop
   sharply. Pre-v0.5.9, every boot-time SIGTERM (e.g., `docker stop`
   during the first 30s) emitted this — noisy and misleading. v0.5.9
@@ -232,12 +235,13 @@ New env vars (all optional, all defaulted):
 
 **If you're running pre-v0.5.5 and seeing the symptom** (persistent
 CCP lockout on a mode you know has no concurrent session), the
-manual remediation is: `docker stop` the container, log in to
-IBKR's Client Portal → Settings → User Settings → Manage Sessions,
-terminate any lingering TWS/Gateway/API session rows, wait 5
-minutes, then `docker start`. Once you're on v0.5.5 the adaptive
-cool-down will handle this without operator intervention in most
-cases.
+manual remediation is: `docker stop` the container, **log into
+IBKR Mobile as the affected username** (mobile login auto-logs-out
+all TWS/Gateway sessions — the reliable kick for stranded slots),
+then `docker start`. IBKR's web Client Portal is NOT effective here
+(read-only concurrent for TWS slots; production-validated not to
+kick). Once you're on v0.5.5+ the adaptive cool-down plus v0.5.6's
+clean-logout path prevents most strandings before they happen.
 
 ### v0.5.4
 

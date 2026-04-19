@@ -15,8 +15,12 @@ and the project follows [Semantic Versioning](https://semver.org/).
   2026-04-19 production incident: each teardown's SIGKILL fallback was
   re-stranding the IBKR session slot and extending IBKR's server-side
   zombie timer, so 5 retries compounded the lockout we were trying to
-  clear (24h of stuck state across both live and paper accounts;
-  operator had to log out of Client Portal sessions manually).
+  clear (24h of stuck state; operator ultimately cleared it by
+  logging into IBKR Mobile, which per IBKR's docs auto-logs-out all
+  TWS/Gateway sessions — web Client Portal login/logout was
+  ineffective against the stranded slot despite ~8h of attempts,
+  confirming Client Portal is read-only concurrent for TWS auth
+  slots).
   Halt-by-default prevents the controller from participating in the
   slot-stranding feedback loop. v0.5.6's clean UI logout reduced how
   often a teardown ends in SIGKILL, but didn't help in the post-CCP

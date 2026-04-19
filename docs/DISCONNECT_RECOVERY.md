@@ -19,10 +19,12 @@ See also:
 
 ## Scenario: CCP lockout (concurrent IBKR session)
 
-**TL;DR**: another IBKR session (web portal, mobile app, another TWS)
-is holding the auth slot for your account. The controller cannot see
-or clear it. Log out of IBKR everywhere else, then wait for the next
-auto-retry.
+**TL;DR**: another TWS/Gateway session (or a stranded slot from a
+prior unclean teardown) is holding the auth slot for your account.
+The controller cannot see or clear it. **Log into IBKR Mobile as the
+affected username** — mobile login force-logs-out all TWS/Gateway
+sessions and is the reliable kick path. The web Client Portal does
+NOT kick the slot.
 
 ### Symptoms
 
@@ -38,11 +40,11 @@ auto-retry.
   ```
 - After the second lockout in a row, the controller flags it:
   ```
-  CCP lockout has hit 2 times in a row. The most common cause is a concurrent IBKR session (web portal or mobile app) holding the auth slot on the live account. If cool-downs aren't clearing, log out of IBKR web/mobile and let the next auto-retry grab the session. See docs/DISCONNECT_RECOVERY.md Scenario: CCP lockout.
+  CCP lockout has hit 2 times in a row. Most common cause is a concurrent IBKR session (another TWS/Gateway) or a stranded slot from a prior unclean teardown on the live account. Remediation: log into IBKR Mobile as this username — mobile login auto-logs-out all TWS/Gateway sessions and is the reliable kick path. IBKR Client Portal (web) login does NOT kick the slot. See docs/DISCONNECT_RECOVERY.md — scenario 'CCP lockout (concurrent IBKR session)'.
   ```
 - On the third+ lockout, the structured alert token fires:
   ```
-  ALERT_CCP_PERSISTENT consecutive_lockouts=3 mode=live suggested_action="log out of IBKR web/mobile to release the session slot"
+  ALERT_CCP_PERSISTENT consecutive_lockouts=3 mode=live suggested_action="log into IBKR Mobile as this username to force-log-out the held TWS/Gateway slot; IBKR Client Portal (web) does NOT kick the slot"
   ```
 - `/health` shows:
   ```json
@@ -58,13 +60,22 @@ auto-retry.
 
 ### Root cause
 
-**Another IBKR session is already authenticated on the same account.**
-This is almost always:
-1. The IBKR web portal (`https://www.interactivebrokers.com/`) —
-   commonly forgotten tabs in another browser or on another device.
-2. The IBKR mobile app (iOS or Android).
-3. A separate TWS or Gateway instance running somewhere else (a
-   previous container you forgot to shut down, a desktop TWS left on).
+**Another TWS-class session is holding the auth slot, or a stranded
+slot from a prior unclean teardown hasn't drained yet.** In
+descending order of frequency:
+1. A separate TWS or Gateway instance running somewhere else (a
+   previous container you forgot to shut down, a desktop TWS left on,
+   another `ibg-controller` against the same account, an IBC
+   deployment).
+2. A **stranded self-session** from a prior SIGKILL'd Gateway of ours
+   (pre-v0.5.6 pattern, or v0.5.6+ when the clean-logout path
+   fallback fires). IBKR holds the slot server-side until the
+   operator kicks it or its internal timeout drains (observed >8h).
+3. IBKR Mobile app logged in on the same username (mobile holds a
+   TWS-class slot).
+4. IBKR web portal (`https://www.interactivebrokers.com/`) — usually
+   NOT the cause; the web portal is read-only concurrent for TWS auth
+   slots, and logging in or out of it does not kick a held slot.
 
 IBKR's CCP (Client Connection Processor) allows only one active session
 per account. When a second login is attempted, CCP **silently drops**
@@ -93,26 +104,37 @@ curl -s http://<container>:8080/health | jq '.ccp_lockout_streak'
 
 Then on your end:
 
-1. **Log out of IBKR everywhere else**:
-   - `https://www.interactivebrokers.com/` web portal (close ALL
-     browser tabs on ALL devices — the portal session is sticky).
-   - IBKR mobile app (iOS and Android). Force-close the app, then
-     launch it and verify it prompts for a fresh login (not just
-     auto-resuming your previous session).
-   - IBKR desktop TWS if you're running it elsewhere.
-   - Any other ibg-controller / IBC container on the same account.
+1. **Log into IBKR Mobile as the affected username** (iOS or Android).
+   Per IBKR's own docs: *"When you log in to your IBKR Mobile
+   application, all other TWS sessions will automatically be logged
+   out."* This is the reliable kick path — it works for both genuine
+   concurrent sessions and for stranded slots from a prior unclean
+   teardown. Complete any mobile-side TOTP; the kick happens as soon
+   as the mobile app authenticates.
 
-2. **Wait for the next auto-retry.** Do NOT manually restart the
+2. **Stop any other TWS-class session on the same account.** Desktop
+   TWS, another ibg-controller container, another IBC deployment.
+   Otherwise these will re-grab the slot and you'll ping-pong with
+   step 1.
+
+3. **Skip the web Client Portal.** It's read-only concurrent for TWS
+   auth slots — logging in or out of it does NOT kick a held slot
+   (confirmed in production: 8h of web-portal logout attempts did not
+   release a stranded slot).
+
+4. **Wait for the next auto-retry.** Do NOT manually restart the
    container — the controller is already in a retry loop, and
-   restarting mid-cool-down can re-arm CCP for a fresh cycle. The
-   next `JVM restart attempt N/5: cool-down complete` should auth
-   successfully within ~30 seconds (including TOTP entry if 2FA is
-   enabled).
+   restarting mid-cool-down can re-arm CCP for a fresh cycle. On
+   v0.5.9+ with `CCP_LOCKOUT_MAX_JVM_RESTARTS=0`, the controller will
+   eventually emit `ALERT_CCP_PERSISTENT_HALT` and exit instead of
+   looping; after you've done step 1 you can safely
+   `docker compose restart` in that case (see the halt scenario
+   below).
 
-3. **If you're in the middle of a 20-min silent cool-down** and want
+5. **If you're in the middle of a 20-min silent cool-down** and want
    to skip it: `docker compose restart <container>` is allowed but
-   only safe if you're *certain* the concurrent session is gone.
-   Otherwise you'll restart into the same lockout.
+   only safe if you've completed step 1 first. Otherwise you'll
+   restart into the same lockout.
 
 ### Verification
 
@@ -134,11 +156,16 @@ Then `/health` returns `200` with `"status":"healthy"`.
 
 ### Prevention
 
-- **Never log into IBKR web or mobile while the Gateway is running.**
-  This is the #1 cause of CCP lockout.
-- If you need the web portal (to change account settings, check
-  positions, etc.): stop the Gateway container first, do your thing,
-  log out of web, then restart the Gateway.
+- **Don't log into IBKR Mobile while the Gateway is running.** Mobile
+  login auto-logs-out all TWS/Gateway sessions by design — this is
+  the #1 controllable cause of an in-band CCP lockout.
+- **Don't run concurrent TWS-class sessions on the same account.**
+  Desktop TWS, another ibg-controller, another IBC. Any two of these
+  against the same credentials hold each other's slots.
+- **Web portal is safer than mobile** (read-only concurrent for TWS
+  slots) but not zero-risk — if you log in there and IBKR prompts
+  any kind of session migration, the Gateway can still lose its
+  slot. Treat it as: OK to use occasionally, don't rely on it.
 - For longer-term setups: ask IBKR support whether your account
   supports an **API-only sub-user** dedicated to the Gateway. This
   avoids login conflicts with the primary credentials. Not all
@@ -309,7 +336,7 @@ Operator action is only needed if the exhausted token fires.
 | Short API port flap | ✅ next monitor cycle | ❌ not needed | `/health` flips briefly |
 | Gateway JVM crash | ✅ in-place restart | ❌ not needed | `jvm_alive: false` in `/health` |
 | CCP rate limiter tripped (genuine) | ✅ silent cool-down | ❌ not needed (wait up to 20 min) | `ccp_backoff_seconds > 0` |
-| **CCP lockout — concurrent session** | ❌ cannot auto-recover | ✅ log out of IBKR web/mobile | `ALERT_CCP_PERSISTENT` + `ccp_lockout_streak >= 3` |
+| **CCP lockout — concurrent/stranded session** | ❌ cannot auto-recover | ✅ log into IBKR Mobile (force-kicks TWS slot; web Portal does NOT) | `ALERT_CCP_PERSISTENT` + `ccp_lockout_streak >= 3` |
 | **2FA automation failed** | ❌ cannot auto-recover | ✅ fix `TWOFACTOR_CODE` or VNC-enter | `ALERT_2FA_FAILED` |
 | **JVM restart cap exhausted** | ❌ process exits | ✅ verify account, restart container | `ALERT_JVM_RESTART_EXHAUSTED` |
 

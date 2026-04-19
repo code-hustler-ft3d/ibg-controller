@@ -100,7 +100,7 @@ Format: `ALERT_<NAME> key1=value1 key2="value 2 with spaces" ...`
 ### `ALERT_CCP_PERSISTENT`
 
 ```
-ALERT_CCP_PERSISTENT consecutive_lockouts=3 mode=live suggested_action="log out of IBKR web/mobile to release the session slot"
+ALERT_CCP_PERSISTENT consecutive_lockouts=3 mode=live suggested_action="log into IBKR Mobile as this username to force-log-out the held TWS/Gateway slot; IBKR Client Portal (web) does NOT kick the slot"
 ```
 
 **When fired**: after `_ccp_lockout_streak` reaches 3 or more. Repeats
@@ -109,15 +109,18 @@ succeeds (which resets the streak).
 
 **What it means**: the controller has hit three consecutive CCP
 lockouts despite its own backoff and silent-cool-down recovery. The
-overwhelmingly likely cause is **a concurrent IBKR session** (web
-portal, mobile app, another TWS instance) holding the auth slot on
-the same account. The controller cannot resolve this — operator action
-is required.
+cause is either **a concurrent TWS/Gateway session** on the same
+account or a **stranded slot** from a prior unclean teardown. The
+controller cannot resolve this — operator action is required.
 
 **What the operator should do**: see the
 [CCP lockout scenario in `DISCONNECT_RECOVERY.md`](DISCONNECT_RECOVERY.md#scenario-ccp-lockout-concurrent-ibkr-session).
-Short version: log out of IBKR web and mobile, then let the controller's
-next auto-retry pick up the freed slot.
+Short version: **log into IBKR Mobile as the affected username** —
+per IBKR's docs, mobile login auto-logs-out all TWS/Gateway sessions
+and is the reliable kick for both concurrent and stranded slots. The
+web Client Portal does NOT kick the slot (read-only concurrent —
+production-validated). After the kick, the controller's next
+auto-retry picks up the freed slot.
 
 **Recommended debounce for external notifications**: 20 min (matches
 the internal JVM-restart cooldown cycle).
@@ -125,7 +128,7 @@ the internal JVM-restart cooldown cycle).
 ### `ALERT_CCP_PERSISTENT_HALT`
 
 ```
-ALERT_CCP_PERSISTENT_HALT mode=live reason="persistent CCP lockout after in-JVM relogin loop exhausted; CCP_LOCKOUT_MAX_JVM_RESTARTS=0" remediation="log in/out of IBKR web/mobile to release the session slot, then restart the controller; if no concurrent session exists, wait 15 minutes for IBKR's server-side session timeout to drain a stranded slot before restarting"
+ALERT_CCP_PERSISTENT_HALT mode=live reason="persistent CCP lockout after in-JVM relogin loop exhausted; CCP_LOCKOUT_MAX_JVM_RESTARTS=0" remediation="log into IBKR Mobile as this username to force-log-out the held TWS/Gateway slot (IBKR Client Portal login does NOT kick the slot — confirmed in production), then restart the container"
 ```
 
 **When fired**: exactly once, from `_escalate_to_jvm_restart`, just
@@ -146,11 +149,18 @@ path couldn't clear. Root cause is almost always one of:
 
 **What the operator should do**: follow the alert's own `remediation=`
 field — it embeds the runbook so oncall doesn't need to look it up.
-Short version: log in to IBKR's Client Portal → Settings → User
-Settings → Manage Sessions, terminate lingering TWS/Gateway/API
-session rows, wait 5 minutes, then `docker restart ibkr` (or
-equivalent). If the restart hits the same lockout immediately,
-the stranded slot hasn't drained yet — wait 15 more minutes.
+Short version: **log into IBKR Mobile as the affected username** (iOS
+or Android). Per IBKR's docs, mobile login auto-logs-out all
+TWS/Gateway sessions and is the reliable kick path for both genuine
+concurrent sessions and stranded slots. Once the mobile app
+authenticates, `docker restart ibkr` (or equivalent) — the controller
+comes back and the next auth grabs the freed slot. Do NOT rely on
+IBKR's web Client Portal — it is read-only concurrent for TWS auth
+slots and does not kick a held slot (production-validated: 8h of
+web-only remediation did not clear a stranded slot; mobile login
+cleared it immediately and the controller authed in ~30s on next
+restart). Server-side drain without operator action takes many hours
+and is not a reliable path.
 
 **Log level**: `ERROR`. Paging target. The controller process is exited
 after this alert, so downstream monitoring that infers "unhealthy"

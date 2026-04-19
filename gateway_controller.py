@@ -2195,19 +2195,23 @@ def _detect_ccp_lockout(timeout=25):
             if _ccp_lockout_streak == _CCP_STREAK_WARN_CONCURRENT:
                 log.warning(
                     f"CCP lockout has hit {_ccp_lockout_streak} times in "
-                    "a row. The most common cause is a concurrent IBKR "
-                    "session (web portal or mobile app) holding the auth "
-                    f"slot on the {TRADING_MODE} account. If cool-downs "
-                    "aren't clearing, log out of IBKR web/mobile and let "
-                    "the next auto-retry grab the session. See "
-                    "docs/DISCONNECT_RECOVERY.md — scenario 'CCP lockout "
-                    "(concurrent IBKR session)'.")
+                    "a row. Most common cause is a concurrent IBKR "
+                    "session (another TWS/Gateway) or a stranded slot "
+                    f"from a prior unclean teardown on the {TRADING_MODE} "
+                    "account. Remediation: log into IBKR Mobile as this "
+                    "username — mobile login auto-logs-out all "
+                    "TWS/Gateway sessions and is the reliable kick path. "
+                    "IBKR Client Portal (web) login does NOT kick the "
+                    "slot. See docs/DISCONNECT_RECOVERY.md — scenario "
+                    "'CCP lockout (concurrent IBKR session)'.")
             elif _ccp_lockout_streak >= _CCP_STREAK_ALERT_PERSISTENT:
                 log.error(
                     f"ALERT_CCP_PERSISTENT consecutive_lockouts="
                     f"{_ccp_lockout_streak} mode={TRADING_MODE} "
-                    "suggested_action=\"log out of IBKR web/mobile to "
-                    "release the session slot\"")
+                    "suggested_action=\"log into IBKR Mobile as this "
+                    "username to force-log-out the held TWS/Gateway "
+                    "slot; IBKR Client Portal (web) does NOT kick the "
+                    "slot\"")
             return True
         time.sleep(1)
     return False
@@ -2467,8 +2471,10 @@ def _escalate_to_jvm_restart(reason):
         log.error(
             f"ALERT_CCP_PERSISTENT_HALT mode={TRADING_MODE} "
             f"reason=\"{reason}\" "
-            f"remediation=\"log in/out of IBKR web/mobile to release any "
-            f"held session slot, then restart the container\"")
+            f"remediation=\"log into IBKR Mobile as this username to "
+            f"force-log-out the held TWS/Gateway slot (IBKR Client "
+            f"Portal login does NOT kick the slot — confirmed in "
+            f"production), then restart the container\"")
         sys.exit(1)
 
     cap = _CCP_LOCKOUT_MAX_JVM_RESTARTS
