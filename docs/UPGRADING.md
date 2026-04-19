@@ -76,6 +76,75 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.9
+
+**BEHAVIOR CHANGE — read this before upgrading.** The automatic
+CCP-lockout-triggered JVM restart loop is now **opt-in**. Pre-v0.5.9,
+when the controller saw a persistent CCP lockout it fell into
+`_escalate_to_jvm_restart` and cycled up to 5 SIGTERM-grace-SIGKILL
+teardown attempts with adaptive cool-downs between them. v0.5.9 emits
+the new `ALERT_CCP_PERSISTENT_HALT` grep token and `sys.exit(1)`
+immediately by default. The restart loop is still available — you opt
+in by setting `CCP_LOCKOUT_MAX_JVM_RESTARTS` to a positive integer.
+
+Why the flip: a 2026-04-19 production incident traced 24h of stuck
+state across live + paper accounts to the escalation loop itself.
+Each teardown's SIGKILL fallback re-stranded the IBKR session slot
+and extended IBKR's server-side zombie timer, so the 5 retries
+compounded the lockout they were trying to clear instead of
+resolving it. v0.5.6's clean UI logout (`WINDOW_CLOSING`) reduced how
+often a teardown ends in SIGKILL but doesn't help in the post-CCP
+disposed-shell state where Gateway's main window isn't findable —
+exactly the state `_escalate_to_jvm_restart` runs in. The safer
+default is "stop and page a human"; the loop is still there for
+operators who decided the recovery vs. lockout-compounding tradeoff
+the other way.
+
+Also fixed in v0.5.9: SIGTERMs received before `MONITORING` state
+(e.g., during boot, during LOGIN, while the 2FA dialog is up) no
+longer emit a misleading `status=failed_unreachable` `ALERT_CLEAN_LOGOUT`.
+Pre-auth states now emit `status=safe_no_session`, `POST_LOGIN` emits
+`status=zombie_slot_cannot_release`, and `TWO_FA` tries to cancel
+the in-flight 2FA dialog and emits `status=cancelled_pending_2fa` or
+`status=failed_cancel_2fa`.
+
+**If your deployment depended on the old auto-recovery behaviour**,
+set `CCP_LOCKOUT_MAX_JVM_RESTARTS=5` to keep pre-v0.5.9 semantics.
+For most operators, the recommended default is to **leave it at 0
+and wire `ALERT_CCP_PERSISTENT_HALT` to paging** — the historical
+"recovery" path was adding to the problem more often than it was
+resolving it.
+
+New env var (opt-in; default preserves halt-by-default behaviour):
+
+| Var | Default | When to tune |
+|---|---|---|
+| `CCP_LOCKOUT_MAX_JVM_RESTARTS` | `0` | Set to `5` to restore the pre-v0.5.9 auto-restart loop (5 SIGKILL-capable teardowns with adaptive cool-downs). Supersedes `JVM_RESTART_MAX_ATTEMPTS`. Leave at `0` unless you have automation downstream that expects auto-recovery and no operator paging. |
+
+New grep-contract statuses on `ALERT_CLEAN_LOGOUT`:
+`safe_no_session`, `zombie_slot_cannot_release`,
+`cancelled_pending_2fa`, `failed_cancel_2fa`. See
+[`OBSERVABILITY.md`](OBSERVABILITY.md#alert_clean_logout) for the
+full 7-status table.
+
+What to watch after upgrading:
+
+- `ALERT_CCP_PERSISTENT_HALT` (ERROR): new paging target. If this
+  fires, the runbook is in the alert's `remediation=` field — log in
+  to IBKR Client Portal → Settings → User Settings → Manage
+  Sessions, terminate any lingering TWS/Gateway/API session rows,
+  wait 5 minutes, then restart the container. Until the operator
+  restarts, the controller process stays exited.
+- `ALERT_CLEAN_LOGOUT status=failed_unreachable` rate should drop
+  sharply. Pre-v0.5.9, every boot-time SIGTERM (e.g., `docker stop`
+  during the first 30s) emitted this — noisy and misleading. v0.5.9
+  reclassifies those as `safe_no_session`.
+- If you set `CCP_LOCKOUT_MAX_JVM_RESTARTS` to a positive value, the
+  existing v0.5.5 alerts (`ALERT_JVM_UNCLEAN_SHUTDOWN`,
+  `ALERT_JVM_RESTART_EXHAUSTED`) still apply. The loop behaviour is
+  unchanged beyond the cap now coming from the new env var instead
+  of the internal `_JVM_RESTART_MAX_ATTEMPTS` constant.
+
 ### v0.5.6
 
 **No breaking changes.** Attacks the root cause of the stranded-session

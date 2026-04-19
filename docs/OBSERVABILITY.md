@@ -41,7 +41,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 ```json
 {
   "status": "healthy",
-  "version": "0.5.6",
+  "version": "0.5.9",
   "mode": "live",
   "state": "MONITORING",
   "jvm_pid": 12345,
@@ -121,6 +121,53 @@ next auto-retry pick up the freed slot.
 
 **Recommended debounce for external notifications**: 20 min (matches
 the internal JVM-restart cooldown cycle).
+
+### `ALERT_CCP_PERSISTENT_HALT`
+
+```
+ALERT_CCP_PERSISTENT_HALT mode=live reason="persistent CCP lockout after in-JVM relogin loop exhausted; CCP_LOCKOUT_MAX_JVM_RESTARTS=0" remediation="log in/out of IBKR web/mobile to release the session slot, then restart the controller; if no concurrent session exists, wait 15 minutes for IBKR's server-side session timeout to drain a stranded slot before restarting"
+```
+
+**When fired**: exactly once, from `_escalate_to_jvm_restart`, just
+before the controller calls `sys.exit(1)`. v0.5.9 made halt-by-default
+the new behaviour: pre-v0.5.9 the controller would cycle up to 5
+SIGKILL-capable teardown attempts with adaptive cool-downs before
+emitting `ALERT_JVM_RESTART_EXHAUSTED`. That loop is now opt-in via
+`CCP_LOCKOUT_MAX_JVM_RESTARTS` (default `0`); with the default, the
+controller emits this alert and exits immediately rather than
+participating in the slot-stranding feedback loop.
+
+**What it means**: a persistent CCP lockout that the in-JVM relogin
+path couldn't clear. Root cause is almost always one of:
+1. A concurrent IBKR session (web portal, mobile, another TWS
+   instance) holding the auth slot.
+2. A stranded session slot from a prior SIGKILL teardown that IBKR
+   hasn't drained yet (the v0.5.5 pattern).
+
+**What the operator should do**: follow the alert's own `remediation=`
+field — it embeds the runbook so oncall doesn't need to look it up.
+Short version: log in to IBKR's Client Portal → Settings → User
+Settings → Manage Sessions, terminate lingering TWS/Gateway/API
+session rows, wait 5 minutes, then `docker restart ibkr` (or
+equivalent). If the restart hits the same lockout immediately,
+the stranded slot hasn't drained yet — wait 15 more minutes.
+
+**Log level**: `ERROR`. Paging target. The controller process is exited
+after this alert, so downstream monitoring that infers "unhealthy"
+from the `/health` endpoint being unreachable will fire in parallel.
+The grep-contract alert gives earlier visibility with actionable
+context.
+
+**Why this replaces `ALERT_JVM_RESTART_EXHAUSTED` in the default config**:
+`ALERT_JVM_RESTART_EXHAUSTED` still fires when `CCP_LOCKOUT_MAX_JVM_RESTARTS`
+is set to a positive integer and that cap is reached — the loop
+semantics are preserved for operators who opted in. With the default
+`=0`, the loop doesn't run, so `ALERT_JVM_RESTART_EXHAUSTED` doesn't
+fire either; `ALERT_CCP_PERSISTENT_HALT` is the immediate-halt
+equivalent. Both should be wired to paging.
+
+**Recommended debounce**: none. Page on first occurrence — the
+controller is already exited.
 
 ### `ALERT_JVM_RESTART_EXHAUSTED`
 
@@ -291,19 +338,45 @@ alert that should wake someone. Sits outside the ERROR-level
 wake-someone-up grep, but is catchable via the `ALERT_` prefix for
 dashboard use — the clean-logout success rate is the key metric.
 
-**Status values** (part of the grep-contract):
+**Status values** (part of the grep-contract). v0.5.6 introduced
+the first three; v0.5.9 added four more to cover pre-MONITORING
+shutdown paths that previously emitted a misleading
+`failed_unreachable`:
 
-- `succeeded` — JVM exited cleanly within `CLEAN_LOGOUT_TIMEOUT_SECONDS`
-  of the WINDOW_CLOSING dispatch. No SIGTERM was needed, no slot was
-  stranded. This is the happy path.
-- `failed_unreachable` — the agent didn't accept `CLOSE_WIN` (socket
-  missing, agent never initialised, or the EDT stalled before we could
-  post the event). The controller fell through to the v0.5.5 SIGTERM →
-  grace → SIGKILL path.
-- `failed_timeout` — the agent accepted `CLOSE_WIN` but the JVM didn't
-  exit within `CLEAN_LOGOUT_TIMEOUT_SECONDS`. Gateway's WindowListener
-  is stuck. The controller fell through to the SIGTERM path, and if
-  that *also* times out, `ALERT_JVM_UNCLEAN_SHUTDOWN` fires on top.
+- `succeeded` (v0.5.6) — JVM exited cleanly within
+  `CLEAN_LOGOUT_TIMEOUT_SECONDS` of the WINDOW_CLOSING dispatch. No
+  SIGTERM was needed, no slot was stranded. Happy path.
+- `failed_unreachable` (v0.5.6) — the agent didn't accept `CLOSE_WIN`
+  (socket missing, agent never initialised, or the EDT stalled before
+  we could post the event). The controller fell through to the
+  v0.5.5 SIGTERM → grace → SIGKILL path. Now only emitted in states
+  where the main window should exist (MONITORING + post-auth
+  pre-monitoring); pre-v0.5.9 also emitted during boot/LOGIN/2FA.
+- `failed_timeout` (v0.5.6) — the agent accepted `CLOSE_WIN` but the
+  JVM didn't exit within `CLEAN_LOGOUT_TIMEOUT_SECONDS`. Gateway's
+  WindowListener is stuck. Controller falls through to SIGTERM and
+  if that also times out, `ALERT_JVM_UNCLEAN_SHUTDOWN` fires on top.
+- `safe_no_session` (v0.5.9) — SIGTERM received in a pre-auth state
+  (`INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`), or
+  received when no Gateway JVM is running. No CCP slot is held, so
+  SIGTERM is safe; the alert is for audit only. This replaces the
+  bulk of pre-v0.5.9's spurious `failed_unreachable` emissions.
+- `zombie_slot_cannot_release` (v0.5.9) — SIGTERM received in
+  `POST_LOGIN`. A CCP slot is in flight but Gateway hasn't rendered
+  a main window yet, so there is no UI close path; SIGTERM strands
+  the slot server-side until IBKR's timeout drains it. Distinct
+  label so operators don't mistake this for a UI-close failure.
+  If you see this frequently, correlate with boot duration —
+  POST_LOGIN is usually a few-second window.
+- `cancelled_pending_2fa` (v0.5.9) — SIGTERM received in `TWO_FA`;
+  controller dispatched `CLOSE_WIN` on the 2FA dialog and the JVM
+  exited within `CLEAN_LOGOUT_TIMEOUT_SECONDS`, cancelling the
+  half-authed handshake before IBKR could fully allocate the slot.
+  Not a slot-stranding event.
+- `failed_cancel_2fa` (v0.5.9) — SIGTERM received in `TWO_FA`; agent
+  rejected `CLOSE_WIN` or JVM didn't exit within the timeout. Falls
+  through to SIGTERM. May strand a slot depending on how far the 2FA
+  handshake progressed.
 
 **Why this matters**: pre-v0.5.6, the only teardown path was SIGTERM →
 grace → SIGKILL, which runs JVM shutdown hooks on a dedicated thread.
@@ -445,6 +518,7 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | `CCP_COOLDOWN_MAX_SECONDS` | `3600` | Upper cap on the adaptive cool-down (seconds). Raise if your IBKR tenant's server-side session timeout is longer than 1h and lockouts keep firing after the cap is hit. Added v0.5.5. |
 | `CCP_COOLDOWN_MULTIPLIER` | `1.5` | Multiplicative factor applied per restart attempt: attempt-1 = base, attempt-2 = base×1.5, attempt-3 = base×2.25, etc., capped at `CCP_COOLDOWN_MAX_SECONDS`. Set to `1.0` to restore the v0.5.4-and-earlier fixed-duration behaviour. Added v0.5.5. |
 | `CLEAN_LOGOUT_TIMEOUT_SECONDS` | `15` | Seconds to wait for the Gateway JVM to exit after dispatching `WindowEvent.WINDOW_CLOSING` (the v0.5.6 clean-logout path). Gateway's WindowListener performs a CCP session-close, which can take a few seconds (network round-trip to IBKR + state flush). If this expires, the controller falls through to the SIGTERM path. Shorten (e.g. `7`) if Docker's `--stop-timeout` is tight; lengthen on slow-network hosts. Added v0.5.6. |
+| `CCP_LOCKOUT_MAX_JVM_RESTARTS` | `0` | Number of SIGKILL-capable JVM teardown cycles `_escalate_to_jvm_restart` will attempt before giving up. Default `0` = halt immediately and emit `ALERT_CCP_PERSISTENT_HALT` (v0.5.9's new behaviour; rationale: the retry loop can compound the lockout it's trying to clear by re-stranding slots on each teardown). Set to `5` to restore pre-v0.5.9 auto-retry behaviour. Supersedes the internal `_JVM_RESTART_MAX_ATTEMPTS` constant when set positive. Added v0.5.9. |
 
 ## Example integrations
 
@@ -486,7 +560,7 @@ Alert on `probe_success == 0` for 5m.
 
 ```bash
 # Tier 1: wake somebody up (ERROR-level only)
-docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|JVM_RESTART_EXHAUSTED|2FA_FAILED|PASSWORD_EXPIRED|LOGIN_FAILED)'
+docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|CCP_PERSISTENT_HALT|JVM_RESTART_EXHAUSTED|2FA_FAILED|PASSWORD_EXPIRED|LOGIN_FAILED)'
 
 # Just the latest occurrence of each (ERROR-level only)
 docker logs ibkr 2>&1 | grep -E '^[0-9]+:[0-9]+ \[ERROR\] ALERT_' | tail
@@ -541,9 +615,13 @@ names of `ALERT_*` tokens are part of the public API as of v0.4.9.
 `ALERT_PASSWORD_EXPIRED` was added in v0.5.0, `ALERT_LOGIN_FAILED`
 in v0.5.1, `ALERT_SHUTDOWN` (INFO-level, lifecycle signal) in
 v0.5.2, `ALERT_JVM_UNCLEAN_SHUTDOWN` (WARNING-level, mid-life
-restart signal) in v0.5.5, and `ALERT_CLEAN_LOGOUT` (INFO-level,
-teardown diagnostic with `status=succeeded|failed_unreachable|failed_timeout`)
-in v0.5.6 — all under the same stability contract.
-Breaking changes will be called out in the CHANGELOG and accompany a
-minor version bump. Adding new fields to `/health` or new
-`ALERT_*` tokens is not a breaking change.
+restart signal) in v0.5.5, `ALERT_CLEAN_LOGOUT` (INFO-level,
+teardown diagnostic) in v0.5.6 with three initial `status=` values,
+and `ALERT_CCP_PERSISTENT_HALT` (ERROR-level, halt-and-page) plus
+four additional `ALERT_CLEAN_LOGOUT` `status=` values
+(`safe_no_session`, `zombie_slot_cannot_release`,
+`cancelled_pending_2fa`, `failed_cancel_2fa`) in v0.5.9 — all under
+the same stability contract. Breaking changes will be called out in
+the CHANGELOG and accompany a minor version bump. Adding new fields
+to `/health`, new `ALERT_*` tokens, or new `status=` values to
+existing tokens is not a breaking change.

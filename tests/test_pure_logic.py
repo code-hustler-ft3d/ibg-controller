@@ -578,8 +578,15 @@ class TestEscalateToJvmRestart(unittest.TestCase):
       - Resets CCP backoff on success.
     """
 
+    # v0.5.9: halt-by-default is exercised by ``TestCcpPersistentHalt``
+    # below. These tests opt back into the pre-v0.5.9 loop by patching
+    # ``_CCP_LOCKOUT_MAX_JVM_RESTARTS`` to a positive value, which keeps
+    # the invariants they pin (teardown-before-cooldown, retry-on-failure,
+    # sys.exit after cap) testable without silent defaults.
+
     def test_returns_true_on_first_restart_success(self):
-        with patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
+             patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
              patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
              patch.object(gc, "_relaunch_and_login_in_place", return_value=True) as relaunch, \
              patch.object(gc, "_reset_ccp_backoff") as reset:
@@ -595,7 +602,8 @@ class TestEscalateToJvmRestart(unittest.TestCase):
         # "Attempt N: connecting to server" retry loop keeps hitting
         # IBKR throughout the cool-down and the CCP limiter never clears.
         call_order = []
-        with patch.object(gc, "_teardown_jvm_for_restart",
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
+             patch.object(gc, "_teardown_jvm_for_restart",
                           side_effect=lambda: call_order.append("teardown")), \
              patch.object(gc, "_apply_ccp_long_cooldown",
                           side_effect=lambda r, attempt=1: call_order.append(
@@ -612,7 +620,8 @@ class TestEscalateToJvmRestart(unittest.TestCase):
         # Third relaunch succeeds — first two returned False. Teardown
         # and cool-down must fire before every relaunch attempt, not
         # just the first.
-        with patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
+             patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
              patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
              patch.object(gc, "_relaunch_and_login_in_place",
                           side_effect=[False, False, True]) as relaunch, \
@@ -625,16 +634,102 @@ class TestEscalateToJvmRestart(unittest.TestCase):
     def test_exits_after_restart_cap(self):
         # Every relaunch fails. Must sys.exit(1) after the cap and not
         # loop forever.
-        with patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
+             patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
              patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
              patch.object(gc, "_relaunch_and_login_in_place", return_value=False) as relaunch, \
              patch.object(gc, "_reset_ccp_backoff"):
             with self.assertRaises(SystemExit) as ctx:
                 gc._escalate_to_jvm_restart("test reason")
             self.assertEqual(ctx.exception.code, 1)
-            self.assertEqual(teardown.call_count, gc._JVM_RESTART_MAX_ATTEMPTS)
-            self.assertEqual(cooldown.call_count, gc._JVM_RESTART_MAX_ATTEMPTS)
-            self.assertEqual(relaunch.call_count, gc._JVM_RESTART_MAX_ATTEMPTS)
+            self.assertEqual(teardown.call_count, 5)
+            self.assertEqual(cooldown.call_count, 5)
+            self.assertEqual(relaunch.call_count, 5)
+
+
+class TestCcpPersistentHalt(unittest.TestCase):
+    """v0.5.9: CCP-lockout recovery is halt-by-default.
+
+    Pre-v0.5.9, ``_escalate_to_jvm_restart`` ran 5 JVM-teardown cycles
+    before giving up. On 2026-04-19 a production incident showed that
+    each teardown's SIGKILL fallback re-stranded the IBKR session slot
+    and extended IBKR's server-side zombie timer, so 5 retries
+    compounded the lockout we were trying to clear. v0.5.9 makes the
+    loop opt-in via ``CCP_LOCKOUT_MAX_JVM_RESTARTS``; default 0 emits
+    ``ALERT_CCP_PERSISTENT_HALT`` and exits so an operator can clear
+    the server-side state before the controller re-opens the auth
+    pipe."""
+
+    def _run_escalate_capturing_errors(self):
+        errors = []
+        with patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
+             patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
+             patch.object(gc, "_relaunch_and_login_in_place") as relaunch, \
+             patch.object(gc, "_reset_ccp_backoff"), \
+             patch.object(gc.log, "error",
+                          side_effect=lambda msg: errors.append(msg)), \
+             patch.object(gc.log, "warning"):
+            with self.assertRaises(SystemExit) as ctx:
+                gc._escalate_to_jvm_restart("in-JVM relogin exhausted")
+        return ctx, errors, teardown, cooldown, relaunch
+
+    def test_default_env_halts_without_touching_jvm(self):
+        """Default (env=0) must NOT call _teardown_jvm_for_restart —
+        that's the whole point: each teardown's SIGKILL fallback is
+        what re-strands the slot. Halt first, let operator intervene."""
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 0):
+            ctx, errors, teardown, cooldown, relaunch = (
+                self._run_escalate_capturing_errors())
+        self.assertEqual(ctx.exception.code, 1)
+        teardown.assert_not_called()
+        cooldown.assert_not_called()
+        relaunch.assert_not_called()
+
+    def test_default_emits_ccp_persistent_halt_alert(self):
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 0):
+            _ctx, errors, _t, _c, _r = self._run_escalate_capturing_errors()
+        halt_hits = [m for m in errors
+                     if m.startswith("ALERT_CCP_PERSISTENT_HALT ")]
+        self.assertEqual(len(halt_hits), 1,
+                         f"expected exactly one ALERT_CCP_PERSISTENT_HALT, "
+                         f"got {len(halt_hits)}: {errors!r}")
+        alert = halt_hits[0]
+        self.assertIn(f"mode={gc.TRADING_MODE}", alert)
+        self.assertIn('reason="in-JVM relogin exhausted"', alert)
+        self.assertIn("remediation=", alert,
+                      "operators need a remediation pointer in the grep line")
+
+    def test_positive_env_preserves_old_loop_semantics(self):
+        """Opt-in path: env=3 → exactly 3 teardown/cooldown/relaunch
+        cycles before sys.exit. Confirms the pre-v0.5.9 behaviour is
+        still reachable."""
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 3), \
+             patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
+             patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
+             patch.object(gc, "_relaunch_and_login_in_place",
+                          return_value=False) as relaunch, \
+             patch.object(gc, "_reset_ccp_backoff"):
+            with self.assertRaises(SystemExit) as ctx:
+                gc._escalate_to_jvm_restart("test")
+        self.assertEqual(ctx.exception.code, 1)
+        self.assertEqual(teardown.call_count, 3)
+        self.assertEqual(cooldown.call_count, 3)
+        self.assertEqual(relaunch.call_count, 3)
+
+    def test_positive_env_halt_alert_not_emitted_when_loop_succeeds(self):
+        """Opt-in path returns True on first success — no halt alert."""
+        errors = []
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 3), \
+             patch.object(gc, "_teardown_jvm_for_restart"), \
+             patch.object(gc, "_apply_ccp_long_cooldown"), \
+             patch.object(gc, "_relaunch_and_login_in_place", return_value=True), \
+             patch.object(gc, "_reset_ccp_backoff"), \
+             patch.object(gc.log, "error",
+                          side_effect=lambda msg: errors.append(msg)):
+            gc._escalate_to_jvm_restart("test")
+        halt_hits = [m for m in errors
+                     if m.startswith("ALERT_CCP_PERSISTENT_HALT ")]
+        self.assertEqual(halt_hits, [])
 
 
 class TestRecoverJvmOrEscalate(unittest.TestCase):
@@ -791,7 +886,10 @@ class TestAlertJvmRestartExhausted(unittest.TestCase):
     Stable prefix, key=value pairs, one line per terminal escalation."""
 
     def test_emits_alert_token_before_exit(self):
-        with patch.object(gc, "_teardown_jvm_for_restart"), \
+        # v0.5.9: opt into the pre-v0.5.9 JVM-restart loop so the
+        # exhaustion branch is actually reachable. Default is halt.
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
+             patch.object(gc, "_teardown_jvm_for_restart"), \
              patch.object(gc, "_apply_ccp_long_cooldown"), \
              patch.object(gc, "_relaunch_and_login_in_place", return_value=False), \
              patch.object(gc, "_reset_ccp_backoff"):
@@ -801,12 +899,14 @@ class TestAlertJvmRestartExhausted(unittest.TestCase):
         output = "\n".join(ctx.output)
         self.assertIn("ALERT_JVM_RESTART_EXHAUSTED", output)
         self.assertIn("mode=", output)
-        self.assertIn(f"attempts={gc._JVM_RESTART_MAX_ATTEMPTS}", output)
+        self.assertIn("attempts=5", output)
         self.assertIn("reason=\"unit test exhaustion", output)
 
     def test_no_alert_token_on_success_path(self):
         # Successful recovery must NOT emit the terminal alert token.
-        with patch.object(gc, "_teardown_jvm_for_restart"), \
+        # v0.5.9: same opt-in; default halt path never even tries.
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
+             patch.object(gc, "_teardown_jvm_for_restart"), \
              patch.object(gc, "_apply_ccp_long_cooldown"), \
              patch.object(gc, "_relaunch_and_login_in_place", return_value=True), \
              patch.object(gc, "_reset_ccp_backoff"):
@@ -1126,7 +1226,7 @@ class TestShutdownAlert(unittest.TestCase):
     in prod."""
 
     def _run_shutdown(self, signum, proc_behavior="clean",
-                      clean_logout_result=None):
+                      clean_logout_result=None, state=None):
         """Invoke shutdown() with side effects suppressed; return the
         list of log.info messages it emitted.
 
@@ -1137,10 +1237,15 @@ class TestShutdownAlert(unittest.TestCase):
           "stuck"  — wait() raises TimeoutExpired, kill() succeeds
 
         clean_logout_result: tuple (success, status, reason) controlling
-        what ``_attempt_clean_logout`` returns. Default forces the
-        ``failed_unreachable`` path so tests exercise the SIGTERM
-        fallback unless explicitly opting into the v0.5.6 clean-logout
-        behaviour.
+        what ``_attempt_state_aware_clean_logout`` returns. Default
+        forces the ``failed_unreachable`` path so tests exercise the
+        SIGTERM fallback unless explicitly opting into the v0.5.6
+        clean-logout behaviour.
+
+        state: controller State to pin. Default ``State.MONITORING``
+        preserves the v0.5.6 behaviour the original tests were written
+        against; v0.5.9 state-aware tests pass an explicit earlier
+        state to exercise the pre-MONITORING paths.
         """
         import subprocess
         info_calls = []
@@ -1174,9 +1279,13 @@ class TestShutdownAlert(unittest.TestCase):
                 False, "failed_unreachable",
                 "test stub: force SIGTERM fallback")
 
+        if state is None:
+            state = gc.State.MONITORING
+
         with patch.object(gc, "GATEWAY_PROC", fake_proc), \
              patch.object(gc, "gateway_proc", fake_proc), \
-             patch.object(gc, "_attempt_clean_logout",
+             patch.object(gc, "_current_state", state), \
+             patch.object(gc, "_attempt_state_aware_clean_logout",
                           return_value=clean_logout_result), \
              patch.object(gc, "READY_FILE", "/tmp/nonexistent-ready-file"), \
              patch.object(gc.log, "info",
@@ -1312,6 +1421,240 @@ class TestShutdownAlert(unittest.TestCase):
         alert = self._find_alert(calls)
         self.assertIn("graceful=false", alert)
         self.assertIn("SIGKILL", alert)
+
+
+class TestStateAwareShutdown(unittest.TestCase):
+    """v0.5.9: SIGTERM / SIGINT during pre-MONITORING states emits a
+    distinct ALERT_CLEAN_LOGOUT status label instead of falling through
+    to v0.5.6's ``failed_unreachable`` (which was misleading — the
+    agent wasn't unreachable, the main window just didn't exist yet).
+
+    The status-label contract:
+      INIT/LAUNCHING/AGENT_WAIT/APP_DISCOVERY/LOGIN → safe_no_session
+      POST_LOGIN                                   → zombie_slot_cannot_release
+      TWO_FA                                       → cancelled_pending_2fa / failed_cancel_2fa
+      DISCLAIMERS…MONITORING                       → v0.5.6 monitoring path
+    """
+
+    def _run_shutdown_in_state(self, state, proc_behavior="clean",
+                               clean_logout_result=None):
+        helper = TestShutdownAlert()
+        import signal as _signal
+        return helper._run_shutdown(
+            _signal.SIGTERM,
+            proc_behavior=proc_behavior,
+            clean_logout_result=clean_logout_result,
+            state=state,
+        )
+
+    def _get_clean_logout_line(self, calls):
+        hits = [m for m in calls if m.startswith("ALERT_CLEAN_LOGOUT ")]
+        self.assertEqual(
+            len(hits), 1,
+            f"expected exactly one ALERT_CLEAN_LOGOUT, got {len(hits)}: "
+            f"{calls!r}")
+        return hits[0]
+
+    def test_init_state_emits_safe_no_session(self):
+        calls = self._run_shutdown_in_state(gc.State.INIT)
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=safe_no_session", line)
+        # The reason must record which state we were in so operators
+        # can tell "no JVM yet" from "auth not yet clicked" in logs.
+        self.assertIn("state=INIT", line)
+
+    def test_launching_state_emits_safe_no_session(self):
+        calls = self._run_shutdown_in_state(gc.State.LAUNCHING)
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=safe_no_session", line)
+        self.assertIn("state=LAUNCHING", line)
+
+    def test_agent_wait_state_emits_safe_no_session(self):
+        calls = self._run_shutdown_in_state(gc.State.AGENT_WAIT)
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=safe_no_session", line)
+
+    def test_app_discovery_state_emits_safe_no_session(self):
+        calls = self._run_shutdown_in_state(gc.State.APP_DISCOVERY)
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=safe_no_session", line)
+
+    def test_login_state_emits_safe_no_session(self):
+        calls = self._run_shutdown_in_state(gc.State.LOGIN)
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=safe_no_session", line)
+
+    def test_post_login_state_emits_zombie_slot_cannot_release(self):
+        """POST_LOGIN is the honest label: we have a CCP slot in flight
+        but Gateway has not yet shown a main window we can WINDOW_CLOSE.
+        SIGTERM here strands the slot — monitoring needs to see that
+        distinctly from 'safe' and from 'close attempted'."""
+        calls = self._run_shutdown_in_state(gc.State.POST_LOGIN)
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=zombie_slot_cannot_release", line)
+        self.assertIn("CCP slot in flight", line)
+        self.assertIn("state=POST_LOGIN", line)
+
+    def test_pre_auth_state_does_not_call_clean_logout(self):
+        """Safe-no-session paths must skip _attempt_state_aware_clean_logout
+        entirely — the v0.5.6 helper needs the main window which
+        doesn't exist yet, so calling it would always return
+        failed_unreachable and poison the grep pipeline."""
+        called = []
+        helper = TestShutdownAlert()
+        import signal as _signal
+        with patch.object(gc, "_attempt_state_aware_clean_logout",
+                          side_effect=lambda _s: called.append("x") or (
+                              False, "failed_unreachable", "")):
+            helper._run_shutdown(
+                _signal.SIGTERM, proc_behavior="clean",
+                state=gc.State.INIT,
+            )
+        self.assertEqual(
+            called, [],
+            "_attempt_state_aware_clean_logout must not be called in "
+            "INIT state")
+
+    def test_monitoring_state_still_uses_v056_clean_logout(self):
+        """MONITORING must delegate to _attempt_state_aware_clean_logout
+        (which under the hood calls the v0.5.6 helper). This is the
+        unchanged happy path from v0.5.6."""
+        clean_result = (True, "succeeded",
+                        "JVM exited cleanly within 15s of WINDOW_CLOSING")
+        calls = self._run_shutdown_in_state(
+            gc.State.MONITORING,
+            clean_logout_result=clean_result,
+        )
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=succeeded", line)
+
+    def test_no_gateway_proc_emits_safe_no_session_regardless_of_state(self):
+        """If GATEWAY_PROC is None, there's no JVM to close; the correct
+        status is safe_no_session no matter what state the controller
+        was notionally in. Covers the 'SIGTERM before launch_gateway'
+        race as well as the already-exited case."""
+        calls = self._run_shutdown_in_state(
+            gc.State.MONITORING, proc_behavior="absent")
+        line = self._get_clean_logout_line(calls)
+        self.assertIn("status=safe_no_session", line)
+
+
+class TestClassifyShutdownForState(unittest.TestCase):
+    """v0.5.9: pure-logic mapping from State → (attempt_close, status,
+    reason). Split out so the decision table is testable without
+    running the signal handler."""
+
+    def test_pre_auth_states_skip_close_attempt(self):
+        for state in (gc.State.INIT, gc.State.LAUNCHING,
+                      gc.State.AGENT_WAIT, gc.State.APP_DISCOVERY,
+                      gc.State.LOGIN):
+            attempt, status, _reason = gc._classify_shutdown_for_state(state)
+            self.assertFalse(
+                attempt,
+                f"{state.value}: should NOT attempt clean logout "
+                "(no slot held, no UI to close)")
+            self.assertEqual(status, "safe_no_session")
+
+    def test_post_login_does_not_attempt_but_flags_zombie(self):
+        attempt, status, reason = gc._classify_shutdown_for_state(
+            gc.State.POST_LOGIN)
+        self.assertFalse(attempt)
+        self.assertEqual(status, "zombie_slot_cannot_release")
+        self.assertIn("CCP slot in flight", reason)
+
+    def test_two_fa_attempts_close_with_cancellation_label(self):
+        attempt, status, _reason = gc._classify_shutdown_for_state(
+            gc.State.TWO_FA)
+        self.assertTrue(attempt)
+        self.assertEqual(status, "cancelled_pending_2fa")
+
+    def test_monitoring_family_attempts_close(self):
+        for state in (gc.State.DISCLAIMERS, gc.State.API_WAIT,
+                      gc.State.CONFIG, gc.State.READY,
+                      gc.State.COMMAND_SERVER, gc.State.MONITORING):
+            attempt, _status, _reason = gc._classify_shutdown_for_state(state)
+            self.assertTrue(
+                attempt,
+                f"{state.value}: should attempt clean logout "
+                "(main window rendered; WINDOW_CLOSING can land)")
+
+
+class TestAttemptStateAwareCleanLogout(unittest.TestCase):
+    """v0.5.9: TWO_FA path closes the 2FA dialog via the agent before
+    relying on the v0.5.6 main-window close. The status labels
+    cancelled_pending_2fa / failed_cancel_2fa are part of the
+    ALERT_CLEAN_LOGOUT grep-contract."""
+
+    def _fake_proc(self, poll_returns):
+        class FakeProc:
+            def __init__(self, values):
+                self._values = list(values)
+                self.pid = 12345
+
+            def poll(self):
+                if len(self._values) > 1:
+                    return self._values.pop(0)
+                return self._values[0]
+        return FakeProc(poll_returns)
+
+    def test_two_fa_success_cancels_pending_auth(self):
+        """Agent closes the 2FA dialog and JVM exits → cancelled_pending_2fa."""
+        proc = self._fake_proc([None, 0])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_CLEAN_LOGOUT_TIMEOUT_SECONDS", 5), \
+             patch.object(gc, "agent_close_window",
+                          return_value=True) as close:
+            success, status, reason = gc._attempt_state_aware_clean_logout(
+                gc.State.TWO_FA)
+        self.assertTrue(success)
+        self.assertEqual(status, "cancelled_pending_2fa")
+        self.assertIn("2FA dialog closed", reason)
+        close.assert_called_once_with("Second Factor")
+
+    def test_two_fa_agent_rejects_returns_failed_cancel(self):
+        proc = self._fake_proc([None])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "agent_close_window", return_value=False):
+            success, status, reason = gc._attempt_state_aware_clean_logout(
+                gc.State.TWO_FA)
+        self.assertFalse(success)
+        self.assertEqual(status, "failed_cancel_2fa")
+        self.assertIn("falling back to SIGTERM", reason)
+
+    def test_two_fa_timeout_returns_failed_cancel(self):
+        """Agent accepts but JVM stays alive → failed_cancel_2fa, not
+        the v0.5.6 failed_timeout (distinct grep label)."""
+        proc = self._fake_proc([None])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_CLEAN_LOGOUT_TIMEOUT_SECONDS", 1), \
+             patch.object(gc, "agent_close_window", return_value=True):
+            success, status, _ = gc._attempt_state_aware_clean_logout(
+                gc.State.TWO_FA)
+        self.assertFalse(success)
+        self.assertEqual(status, "failed_cancel_2fa")
+
+    def test_two_fa_jvm_already_exited(self):
+        """Same race semantics as v0.5.6: if JVM exits between outer
+        check and here, report success without dispatching CLOSE_WIN."""
+        proc = self._fake_proc([0])
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "agent_close_window") as close:
+            success, status, _ = gc._attempt_state_aware_clean_logout(
+                gc.State.TWO_FA)
+        self.assertTrue(success)
+        self.assertEqual(status, "cancelled_pending_2fa")
+        close.assert_not_called()
+
+    def test_monitoring_delegates_to_v056_helper(self):
+        """Non-TWO_FA states should just delegate to _attempt_clean_logout
+        unchanged — no behaviour change for the v0.5.6 happy path."""
+        expected = (True, "succeeded", "JVM exited cleanly within 15s")
+        with patch.object(gc, "_attempt_clean_logout",
+                          return_value=expected) as inner:
+            result = gc._attempt_state_aware_clean_logout(
+                gc.State.MONITORING)
+        self.assertEqual(result, expected)
+        inner.assert_called_once_with()
 
 
 class TestAttemptCleanLogout(unittest.TestCase):

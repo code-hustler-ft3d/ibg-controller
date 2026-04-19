@@ -47,7 +47,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import gi
 
 
-__version__ = "0.5.6"
+__version__ = "0.5.9"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -2286,6 +2286,20 @@ _INPLACE_RELOGIN_MAX_ATTEMPTS = 8
 # Past this cap the controller exits (``sys.exit(1)``).
 _JVM_RESTART_MAX_ATTEMPTS = int(os.environ.get("JVM_RESTART_MAX_ATTEMPTS", "5"))
 
+# v0.5.9: CCP-lockout-triggered JVM restarts are now opt-in. The
+# historical behaviour (5 escalations, each SIGKILL-capable on its
+# teardown) was the root cause of the 2026-04-19 incident where a 24h
+# retry loop re-stranded an IBKR auth slot 5 times and extended IBKR's
+# server-side zombie timer each time. Default 0 means: on the first
+# path that would call ``_escalate_to_jvm_restart``, emit
+# ``ALERT_CCP_PERSISTENT_HALT`` and exit the controller — Docker's
+# healthcheck flags the container unhealthy and the operator
+# investigates before the controller re-opens the auth pipe. Set to a
+# positive integer to restore the pre-v0.5.9 auto-recovery loop, capped
+# at that many attempts (supersedes ``JVM_RESTART_MAX_ATTEMPTS``).
+_CCP_LOCKOUT_MAX_JVM_RESTARTS = int(
+    os.environ.get("CCP_LOCKOUT_MAX_JVM_RESTARTS", "0"))
+
 # v0.4.5: long CCP cool-down before a JVM restart. Much longer than the
 # exponential attempt-spacing backoff (``_apply_ccp_backoff``) — CCP
 # needs silence to reset, not just spacing. Empirical observation:
@@ -2429,29 +2443,57 @@ def _escalate_to_jvm_restart(reason):
     Returns True on successful JVM restart. Calls ``sys.exit(1)`` if
     restart keeps failing past ``_JVM_RESTART_MAX_ATTEMPTS`` (the fresh
     JVM keeps hitting CCP lockout even after each silent cool-down).
+
+    v0.5.9: halt-by-default via ``CCP_LOCKOUT_MAX_JVM_RESTARTS``. When
+    that env var is 0 (the new default), this function emits
+    ``ALERT_CCP_PERSISTENT_HALT`` and exits immediately without touching
+    the JVM. This prevents the 2026-04-19 re-stranding pattern — each
+    prior escalation cycle's SIGKILL teardown was extending IBKR's
+    server-side zombie-slot timer, compounding the lockout we were
+    trying to clear. When set to a positive integer, restores the
+    pre-v0.5.9 loop capped at that many attempts (supersedes
+    ``_JVM_RESTART_MAX_ATTEMPTS``).
     """
-    for attempt in range(1, _JVM_RESTART_MAX_ATTEMPTS + 1):
-        log.warning(f"JVM restart attempt {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}: "
+    if _CCP_LOCKOUT_MAX_JVM_RESTARTS <= 0:
+        log.error(
+            "CCP-lockout-triggered JVM restart is disabled (default since "
+            "v0.5.9). Each SIGKILL teardown re-strands the IBKR session "
+            "slot and extends the server-side zombie timer; the safest "
+            "recovery is to halt and let an operator investigate. Set "
+            "CCP_LOCKOUT_MAX_JVM_RESTARTS to a positive integer to "
+            "restore the pre-v0.5.9 auto-restart loop.")
+        # Stable grep token for external monitoring. Emitted exactly once
+        # per terminal halt. See docs/OBSERVABILITY.md for the grep-contract.
+        log.error(
+            f"ALERT_CCP_PERSISTENT_HALT mode={TRADING_MODE} "
+            f"reason=\"{reason}\" "
+            f"remediation=\"log in/out of IBKR web/mobile to release any "
+            f"held session slot, then restart the container\"")
+        sys.exit(1)
+
+    cap = _CCP_LOCKOUT_MAX_JVM_RESTARTS
+    for attempt in range(1, cap + 1):
+        log.warning(f"JVM restart attempt {attempt}/{cap}: "
                     "tearing down JVM before long cool-down (v0.4.6 silent cool-down)")
         _teardown_jvm_for_restart()
         _apply_ccp_long_cooldown(
-            f"{reason}; JVM restart {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}",
+            f"{reason}; JVM restart {attempt}/{cap}",
             attempt=attempt,
         )
-        log.warning(f"JVM restart attempt {attempt}/{_JVM_RESTART_MAX_ATTEMPTS}: "
+        log.warning(f"JVM restart attempt {attempt}/{cap}: "
                     "cool-down complete, launching fresh JVM")
         if _relaunch_and_login_in_place():
             log.info("JVM restart succeeded; API port is open")
             _reset_ccp_backoff()
             return True
         log.error(f"JVM restart attempt {attempt} failed")
-    log.error(f"JVM restart limit ({_JVM_RESTART_MAX_ATTEMPTS}) exhausted "
+    log.error(f"JVM restart limit ({cap}) exhausted "
               "after silent cool-downs; exiting")
     # Stable grep token for external monitoring. Emitted exactly once per
     # terminal escalation. See docs/OBSERVABILITY.md for the grep-contract.
     log.error(
         f"ALERT_JVM_RESTART_EXHAUSTED mode={TRADING_MODE} "
-        f"attempts={_JVM_RESTART_MAX_ATTEMPTS} "
+        f"attempts={cap} "
         f"reason=\"{reason}\"")
     sys.exit(1)
 
@@ -2882,6 +2924,114 @@ def signal_ready():
 gateway_proc = None  # global so signal handler can reach it
 
 
+# v0.5.9: states with no CCP slot in flight. SIGTERM during these is
+# safe — there's nothing for Gateway's close handler to release. Emit
+# ALERT_CLEAN_LOGOUT status=safe_no_session for the grep pipeline so
+# operators can confirm shutdown timing wasn't a factor when
+# investigating subsequent lockouts.
+_PRE_AUTH_STATES = {
+    State.INIT, State.LAUNCHING, State.AGENT_WAIT,
+    State.APP_DISCOVERY, State.LOGIN,
+}
+
+# v0.5.9: states where the main "IB Gateway" window exists and the
+# v0.5.6 _attempt_clean_logout path should work. The intermediate
+# post-login states (DISCLAIMERS, API_WAIT, CONFIG, READY,
+# COMMAND_SERVER) are grouped with MONITORING because by that point
+# Gateway has rendered its main shell window, so WINDOW_CLOSING has
+# somewhere to land — even if a modal dialog (disclaimer, config) is
+# visible on top.
+_CLEAN_LOGOUT_ELIGIBLE_STATES = {
+    State.DISCLAIMERS, State.API_WAIT, State.CONFIG,
+    State.READY, State.COMMAND_SERVER, State.MONITORING,
+}
+
+# v0.5.9: 2FA dialog title substring. Matches ``TWOFA_WINDOW_SUBSTR``
+# used in ``handle_2fa`` — kept separate so the shutdown path doesn't
+# reach into a helper function's local constant.
+_TWO_FA_WINDOW_TITLE_SUBSTR = "Second Factor"
+
+
+def _classify_shutdown_for_state(state):
+    """v0.5.9: decide the ALERT_CLEAN_LOGOUT status label for a SIGTERM
+    received in ``state``, and whether to attempt the v0.5.6 UI-close
+    path. Pure-logic helper so the decision table is unit-testable
+    without running the signal handler.
+
+    Returns ``(attempt_clean_logout, status_if_not_attempting, reason)``.
+    If ``attempt_clean_logout`` is True, the caller delegates to
+    ``_attempt_clean_logout`` and uses its returned status. Otherwise
+    the caller emits ``status_if_not_attempting`` / ``reason`` directly
+    and falls through to SIGTERM.
+
+    Why dispatch here rather than always calling _attempt_clean_logout:
+    the v0.5.6 helper looks for the main "IB Gateway" window. In
+    pre-MONITORING states that window doesn't exist yet, so the helper
+    always returns ``failed_unreachable`` — noisy and misleading.
+    Worse, POST_LOGIN and TWO_FA have a CCP slot in flight but no
+    main-window UI close path, so we need distinct status labels
+    (``zombie_slot_cannot_release`` / ``cancelled_pending_2fa``) to
+    tell operators that SIGTERM in those states is a slot-stranding
+    event independent of Gateway responding.
+    """
+    if state in _PRE_AUTH_STATES:
+        return (False, "safe_no_session",
+                f"state={state.value}; no CCP slot held, SIGTERM is safe")
+    if state == State.POST_LOGIN:
+        return (False, "zombie_slot_cannot_release",
+                f"state={state.value}; CCP slot in flight but Gateway has "
+                "no main-window UI close path yet; SIGTERM will strand "
+                "the slot server-side until IBKR's timeout drains it")
+    if state == State.TWO_FA:
+        # Caller tries agent_close_window on the 2FA dialog; if that
+        # succeeds, Gateway cancels the half-authed handshake.
+        return (True, "cancelled_pending_2fa",
+                f"state={state.value}; attempting to close 2FA dialog to "
+                "cancel the in-flight auth")
+    if state in _CLEAN_LOGOUT_ELIGIBLE_STATES:
+        return (True, "monitoring_ui_close",
+                f"state={state.value}; attempting Gateway main-window close")
+    # Unknown state — safest behaviour is to attempt clean logout
+    # (matches v0.5.6) and let its result drive the status.
+    return (True, "monitoring_ui_close",
+            f"state={state.value} (unclassified); attempting clean logout")
+
+
+def _attempt_state_aware_clean_logout(state):
+    """v0.5.9: state-aware wrapper around _attempt_clean_logout.
+
+    For MONITORING and post-auth pre-monitoring states: delegates to
+    the v0.5.6 helper (find main window, post WINDOW_CLOSING, poll JVM
+    exit). For TWO_FA: close the 2FA dialog first via the agent, then
+    poll for JVM exit. Other states are handled upstream by
+    ``_classify_shutdown_for_state`` and never reach this function.
+
+    Returns ``(success, status, reason)`` mirroring
+    ``_attempt_clean_logout``. Status values extended beyond v0.5.6:
+    ``cancelled_pending_2fa`` (2FA dialog closed, JVM exited),
+    ``failed_cancel_2fa`` (2FA dialog not found or agent rejected).
+    """
+    if state == State.TWO_FA:
+        global GATEWAY_PROC
+        if GATEWAY_PROC is None or GATEWAY_PROC.poll() is not None:
+            return (True, "cancelled_pending_2fa", "JVM already exited")
+        if not agent_close_window(_TWO_FA_WINDOW_TITLE_SUBSTR):
+            return (False, "failed_cancel_2fa",
+                    "agent CLOSE_WIN on 2FA dialog failed; "
+                    "falling back to SIGTERM")
+        deadline = time.monotonic() + _CLEAN_LOGOUT_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if GATEWAY_PROC.poll() is not None:
+                return (True, "cancelled_pending_2fa",
+                        "2FA dialog closed; JVM exited cleanly within "
+                        f"{_CLEAN_LOGOUT_TIMEOUT_SECONDS}s")
+            time.sleep(0.25)
+        return (False, "failed_cancel_2fa",
+                "2FA dialog closed via agent but JVM did not exit within "
+                f"{_CLEAN_LOGOUT_TIMEOUT_SECONDS}s; falling back to SIGTERM")
+    return _attempt_clean_logout()
+
+
 def shutdown(signum, frame):
     if signum == signal.SIGTERM:
         signame = "SIGTERM"
@@ -2897,20 +3047,34 @@ def shutdown(signum, frame):
     proc = GATEWAY_PROC if GATEWAY_PROC is not None else gateway_proc
     graceful = True
     clean_logout_applied = False
-    if proc is not None and proc.poll() is None:
-        pid = proc.pid
-        # v0.5.6: try UI-driven clean logout first, same pattern as the
-        # mid-life _teardown_jvm_for_restart path. If Gateway's close
-        # handler runs, the CCP session is released cleanly and we skip
-        # SIGTERM entirely. Signal-handler context: keep the timeout
-        # conservative so docker's default 10s stop-grace still leaves
-        # room for SIGTERM fallback.
-        clean_success, clean_status, clean_reason = _attempt_clean_logout()
+    # v0.5.9: state-aware shutdown. Each exit path emits
+    # ALERT_CLEAN_LOGOUT with a distinct status so monitoring can
+    # distinguish "safe, no slot held" from "slot in flight, can't
+    # cleanly release".
+    state = _current_state
+    if proc is None or proc.poll() is not None:
+        pid = "none"
+        status = "safe_no_session"
+        reason_text = f"no Gateway JVM present (state={state.value})"
         log.info(
             f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
-            f"status={clean_status} reason=\"{clean_reason}\"")
-        clean_logout_applied = clean_success
-        if not clean_success:
+            f"status={status} reason=\"{reason_text}\"")
+    else:
+        pid = proc.pid
+        attempt_close, fallback_status, fallback_reason = (
+            _classify_shutdown_for_state(state))
+        if attempt_close:
+            clean_success, clean_status, clean_reason = (
+                _attempt_state_aware_clean_logout(state))
+            log.info(
+                f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
+                f"status={clean_status} reason=\"{clean_reason}\"")
+            clean_logout_applied = clean_success
+        else:
+            log.info(
+                f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
+                f"status={fallback_status} reason=\"{fallback_reason}\"")
+        if not clean_logout_applied:
             proc.terminate()
             try:
                 proc.wait(timeout=15)

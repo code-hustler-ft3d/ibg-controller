@@ -4,6 +4,93 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.9] - 2026-04-19
+
+### Changed (BEHAVIOR CHANGE — see UPGRADING.md)
+
+- **CCP-lockout-triggered JVM restart is now opt-in.** Default behaviour
+  flipped: when `_escalate_to_jvm_restart` would previously loop up to 5
+  SIGKILL-capable teardown cycles with adaptive cool-downs, it now emits
+  `ALERT_CCP_PERSISTENT_HALT` and exits immediately. Root cause from a
+  2026-04-19 production incident: each teardown's SIGKILL fallback was
+  re-stranding the IBKR session slot and extending IBKR's server-side
+  zombie timer, so 5 retries compounded the lockout we were trying to
+  clear (24h of stuck state across both live and paper accounts;
+  operator had to log out of Client Portal sessions manually).
+  Halt-by-default prevents the controller from participating in the
+  slot-stranding feedback loop. v0.5.6's clean UI logout reduced how
+  often a teardown ends in SIGKILL, but didn't help in the post-CCP
+  disposed-shell state where the main window isn't findable — exactly
+  the state the escalation loop runs in.
+  - New `CCP_LOCKOUT_MAX_JVM_RESTARTS` env var (default 0). Set to a
+    positive integer to restore the pre-v0.5.9 auto-restart loop,
+    capped at that many attempts. Supersedes `JVM_RESTART_MAX_ATTEMPTS`
+    when set.
+  - Existing deployments that depended on auto-recovery must set
+    `CCP_LOCKOUT_MAX_JVM_RESTARTS=5` to keep working without operator
+    intervention on lockout. Recommended default for most operators:
+    leave at 0 and wire `ALERT_CCP_PERSISTENT_HALT` to paging.
+
+### Fixed
+
+- **Pre-MONITORING SIGTERMs no longer strand slots silently.** v0.5.6's
+  `_attempt_clean_logout` only found the main "IB Gateway" window,
+  which doesn't exist in INIT / LAUNCHING / AGENT_WAIT / APP_DISCOVERY /
+  LOGIN states. Signal handlers received in those states fell through
+  to SIGTERM-then-SIGKILL and reported `failed_unreachable` to
+  monitoring — misleading because the agent wasn't unreachable, the
+  window just hadn't been rendered yet. v0.5.9 dispatches by state:
+  - Pre-auth states (no slot held): emit `status=safe_no_session` and
+    proceed directly to SIGTERM. No slot to release; no misleading
+    alert noise.
+  - `POST_LOGIN` (slot in flight, no closable UI yet): emit
+    `status=zombie_slot_cannot_release`. Distinct label so operators
+    can see that a SIGTERM here stranded a slot server-side, rather
+    than mistaking it for a UI-close failure.
+  - `TWO_FA`: try to close the 2FA dialog via the agent before SIGTERM.
+    `status=cancelled_pending_2fa` on success, `status=failed_cancel_2fa`
+    on agent rejection or JVM stall.
+  - `MONITORING` + post-auth pre-monitoring states (`DISCLAIMERS`,
+    `API_WAIT`, `CONFIG`, `READY`, `COMMAND_SERVER`): unchanged — still
+    use the v0.5.6 UI-close path.
+
+### Added
+
+- **`ALERT_CCP_PERSISTENT_HALT`** log token (ERROR-level) emitted when
+  `_escalate_to_jvm_restart` is reached with
+  `CCP_LOCKOUT_MAX_JVM_RESTARTS=0` (the default). Format:
+  `ALERT_CCP_PERSISTENT_HALT mode=<live|paper> reason="..." remediation="..."`.
+  Stability-contract grep token; wire to your operator paging channel.
+  The `remediation` field includes the standard IBKR Client Portal
+  session-clear steps so oncall doesn't need to look up the runbook.
+- **`ALERT_CLEAN_LOGOUT` status value set extended to seven**:
+  `succeeded` / `failed_unreachable` / `failed_timeout` (v0.5.6) plus
+  `safe_no_session` / `zombie_slot_cannot_release` /
+  `cancelled_pending_2fa` / `failed_cancel_2fa` (v0.5.9). All seven
+  are part of the public stability contract.
+- **`CCP_LOCKOUT_MAX_JVM_RESTARTS` env var** (default 0). Caps the
+  number of JVM-teardown cycles `_escalate_to_jvm_restart` will
+  attempt. Default 0 halts immediately.
+- **`_classify_shutdown_for_state(state)` pure-logic helper**
+  returning `(attempt_close, fallback_status, reason)`. Split out so
+  the State → status-label decision table is unit-testable independent
+  of the signal-handler shell.
+- **`_attempt_state_aware_clean_logout(state)`** wrapper. For TWO_FA,
+  closes the 2FA dialog via the agent (`CLOSE_WIN "Second Factor"`)
+  before polling for JVM exit. For all other states, delegates to the
+  v0.5.6 helper unchanged.
+- **22 new unit tests** in `tests/test_pure_logic.py`:
+  `TestCcpPersistentHalt` (4), `TestStateAwareShutdown` (9),
+  `TestClassifyShutdownForState` (4), `TestAttemptStateAwareCleanLogout`
+  (5). Test total: 186 → 208.
+
+### Docs
+
+- `CHANGELOG.md` — this entry.
+- `UPGRADING.md` — v0.5.9 section added (BEHAVIOR CHANGE; explains the
+  restart-loop removal, how to opt back in, and what to watch for
+  post-upgrade).
+
 ## [0.5.8] - 2026-04-19
 
 ### Fixed
