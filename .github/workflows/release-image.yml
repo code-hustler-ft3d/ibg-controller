@@ -11,10 +11,11 @@ name: Release image
 #     i.e. ghcr.io/<owner>/<repo>. Forks publish to their own
 #     namespace automatically, no secrets setup required beyond the
 #     default GITHUB_TOKEN.
-#   - The `platforms` list below controls architectures. Start with
-#     linux/amd64 only because the gnzsnz/ib-gateway upstream base is
-#     validated on amd64; add linux/arm64 once upstream + our ATK
-#     wiring is confirmed on that arch.
+#   - The `platforms` list below controls architectures. We publish
+#     linux/amd64 + linux/arm64: upstream gnzsnz/ib-gateway ships both
+#     (amd64 uses install4j JRE, arm64 uses Zulu), and the Dockerfile's
+#     ATK bridge step handles both JRE layouts. Keep this list in sync
+#     with `docker-compose` consumers that pin --platform.
 #   - If you rename the workflow file, update docs/SECURITY.md's
 #     cosign verification example — the `--certificate-identity`
 #     field includes the workflow file path.
@@ -133,7 +134,7 @@ jobs:
         with:
           context: .
           push: true
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Embed buildx provenance so `docker buildx imagetools inspect`

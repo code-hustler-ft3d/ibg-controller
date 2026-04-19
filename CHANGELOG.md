@@ -4,6 +4,18 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.7] - 2026-04-19
+
+### Changed
+
+- **Release image now ships linux/amd64 + linux/arm64.** Previously
+  `linux/amd64` only, which forced consumers on Apple Silicon to run
+  the image under rosetta emulation with a measurable JVM performance
+  hit. The `Dockerfile`'s ATK-bridge step already handled both JRE
+  layouts (install4j on amd64, Zulu on arm64), and upstream
+  `gnzsnz/ib-gateway:10.45.1c` is multi-arch, so this is a
+  workflow-only change — no source deltas from v0.5.6.
+
 ## [0.5.6] - 2026-04-18
 
 ### Fixed
