@@ -179,6 +179,46 @@ equivalent. Both should be wired to paging.
 **Recommended debounce**: none. Page on first occurrence — the
 controller is already exited.
 
+### `ALERT_IBKR_MAINTENANCE_RECOVERY`
+
+```
+ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds=480 mode=live reason="JVM exited with code 0"
+ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds=480 mode=paper reason="cold start inside IBKR maintenance window"
+```
+
+**When fired**: the JVM exited with code 0 (or the controller cold-
+started) while the wallclock sat inside 23:30-00:30 America/New_York —
+i.e., inside IBKR's daily server-side maintenance window (published
+~23:45-00:15 ET, widened slightly for safety). The controller sleeps
+`CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` (default 480 = 8 min) before
+re-auth so IBKR's auth server can finish draining the cooperatively-
+shutdown session. Emitted once per recovery-path entry.
+
+**What it means**: this is the benign mitigation path, not an error.
+The 2026-04-20/21 incident showed that re-auth ~8 seconds after a
+code-0 exit in this window hits IBKR's still-draining auth server
+and is silently dropped, setting off a CCP-lockout cascade. The
+guard prevents that cascade by waiting the delay first.
+
+**What the operator should do**: nothing. The delay itself is the
+fix. Recovery proceeds automatically after the sleep.
+
+**Log level**: `INFO`. Do NOT page on this. Wire to a low-priority
+channel if you want visibility into how often the guard fires (once
+per mode per day under normal operation; more if IBKR extends or
+shifts the window).
+
+**How to distinguish from a real CCP cascade**: this token fires
+BEFORE any re-auth attempt, not after. If you see
+`ALERT_IBKR_MAINTENANCE_RECOVERY` followed within a few minutes by
+`ALERT_CCP_PERSISTENT` or `ALERT_CCP_PERSISTENT_HALT`, the drain
+took longer than the configured delay — consider tuning
+`CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` upward.
+
+**Recommended debounce**: none needed for paging (don't page). For
+INFO-tier visibility dashboards, no debounce — frequency itself is
+useful signal.
+
 ### `ALERT_JVM_RESTART_EXHAUSTED`
 
 ```

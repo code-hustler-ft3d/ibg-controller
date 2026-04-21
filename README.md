@@ -269,6 +269,12 @@ The token is checked with `hmac.compare_digest` to resist timing
 side-channels. Without the token set, the command server runs in
 IBC-compat no-auth mode and logs a loud WARNING at startup.
 
+### Recovery tunables (v0.5.10)
+| Var | Notes |
+|---|---|
+| `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` | Seconds to sleep after a JVM code-0 exit (or cold start) inside IBKR's daily maintenance window (~23:30-00:30 `America/New_York`) before re-auth. Default `480` (8 min). The delay lets IBKR's auth server drain the cooperatively-shutdown session; re-auth'ing too quickly during this window is silently dropped → CCP LOCKOUT cascade. See [`docs/DISCONNECT_RECOVERY.md`](docs/DISCONNECT_RECOVERY.md#scenario-ibkr-daily-maintenance-window-v0510) for the 2026-04-20/21 incident that motivated this. |
+| `CCP_LOCKOUT_MAX_JVM_RESTARTS` | Cap on CCP-lockout-triggered JVM restart cycles. Default `0` (halt on first persistent lockout — see `ALERT_CCP_PERSISTENT_HALT`). Set to a positive integer (e.g. `5`) to restore the pre-v0.5.9 auto-recovery loop. |
+
 ### Observability (v0.4.9)
 | Var | Notes |
 |---|---|

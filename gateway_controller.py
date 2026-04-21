@@ -42,12 +42,14 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from zoneinfo import ZoneInfo
 
 import gi
 
 
-__version__ = "0.5.9"
+__version__ = "0.5.10"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -2324,6 +2326,24 @@ _CCP_COOLDOWN_SECONDS_DEFAULT = 1200
 _CCP_COOLDOWN_MAX_SECONDS_DEFAULT = 3600
 _CCP_COOLDOWN_MULTIPLIER_DEFAULT = 1.5
 
+# v0.5.10: IBKR runs a daily server-side maintenance window during which
+# every Gateway/TWS session receives a cooperative shutdown (JVM exits
+# with code 0). IBKR's published window is 23:45-00:15 ET; we widen
+# slightly to 23:30-00:30 for safety margin. 2026-04-20/21 production
+# incident: re-auth within ~8s of the cooperative shutdown hits IBKR's
+# still-draining auth server and the request is silently dropped →
+# CCP LOCKOUT cascade across both live and paper. The delay lets IBKR's
+# server-side session teardown propagate before we re-auth. 8 min
+# default is empirical; tune via env var if a deployment sees different
+# drain timing.
+_CCP_MAINTENANCE_WINDOW_TZ = "America/New_York"
+_CCP_MAINTENANCE_WINDOW_START = dtime(23, 30)   # 23:30 ET
+_CCP_MAINTENANCE_WINDOW_END = dtime(0, 30)      # 00:30 ET next day (window crosses midnight)
+_CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS_DEFAULT = 480   # 8 min
+_CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS = int(os.environ.get(
+    "CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS",
+    str(_CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS_DEFAULT)))
+
 
 def _compute_adaptive_cooldown(attempt, base_seconds, multiplier, max_seconds):
     """Pure-logic helper: scale the CCP cool-down by restart-attempt index.
@@ -2381,7 +2401,54 @@ def _apply_ccp_long_cooldown(reason, attempt=1):
     time.sleep(cool_down_s)
 
 
-def _recover_jvm_or_escalate(reason):
+def _is_ibkr_maintenance_window(now=None):
+    """v0.5.10: return True if the current wallclock is inside IBKR's
+    daily server-side maintenance window.
+
+    IBKR publishes 23:45-00:15 ET; we widen to 23:30-00:30 for safety
+    margin around clock skew and near-boundary exits. The window crosses
+    midnight, so membership is ``t >= 23:30 or t < 00:30``.
+
+    TZ is hardcoded to ``America/New_York`` rather than read from the
+    container's ``TIME_ZONE`` env — IBKR's window is ET-anchored
+    regardless of where the container thinks it lives.
+
+    ``now`` is an injection seam for tests (pass a tz-aware datetime);
+    production callers pass nothing and get the live ET clock.
+    """
+    if now is None:
+        now = datetime.now(ZoneInfo(_CCP_MAINTENANCE_WINDOW_TZ))
+    t = now.time()
+    return t >= _CCP_MAINTENANCE_WINDOW_START or t < _CCP_MAINTENANCE_WINDOW_END
+
+
+def _apply_maintenance_recovery_delay(reason):
+    """v0.5.10: sleep ``CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS`` (default
+    480 = 8min) before re-auth so IBKR's auth server has time to drain
+    the cooperatively-shutdown session.
+
+    Emits ``ALERT_IBKR_MAINTENANCE_RECOVERY`` (INFO-level grep contract)
+    so operators can distinguish this benign delay from a genuine CCP
+    cascade. The delay itself is the mitigation — no halt is fired by
+    this path; the caller resumes normal recovery after the sleep.
+    """
+    delay = _CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS
+    # Stable grep token for external monitoring. Fires once per recovery
+    # path entry. See docs/OBSERVABILITY.md for the contract.
+    log.info(
+        f"ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds={delay} "
+        f"mode={TRADING_MODE} reason=\"{reason}\"")
+    log.warning(
+        f"Inside IBKR maintenance window (~23:45-00:15 ET); sleeping "
+        f"{delay}s before re-auth to let IBKR's auth server drain the "
+        f"prior session. Re-auth'ing too quickly during this window "
+        f"hits a still-draining server and is silently dropped — the "
+        f"2026-04-20/21 CCP-cascade pathology.")
+    time.sleep(delay)
+    log.info("Maintenance-window delay complete; proceeding with recovery")
+
+
+def _recover_jvm_or_escalate(reason, *, exit_code=None):
     """v0.4.7: Attempt a fast in-place JVM restart; on failure fall
     through to ``_escalate_to_jvm_restart`` (long CCP cool-down).
 
@@ -2403,7 +2470,20 @@ def _recover_jvm_or_escalate(reason):
     Never returns False. Returns True on recovery; if everything fails,
     ``_escalate_to_jvm_restart`` calls ``sys.exit(1)`` after exhausting
     ``_JVM_RESTART_MAX_ATTEMPTS``.
+
+    v0.5.10: maintenance-window guard. When ``exit_code == 0`` AND
+    wallclock is inside IBKR's daily maintenance window (23:30-00:30 ET),
+    sleep ``CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS`` (default 480)
+    before attempting the fast restart. The 2026-04-20/21 incident
+    showed that re-auth ~8s after a code-0 exit in this window hits
+    IBKR's still-draining auth server and is silently dropped, setting
+    off a CCP-lockout cascade on both modes. Non-zero exits bypass the
+    guard — they're crashes, not maintenance shutdowns, and should
+    recover fast.
     """
+    if exit_code == 0 and _is_ibkr_maintenance_window():
+        _apply_maintenance_recovery_delay(reason)
+
     log.warning(f"Recovery: {reason}. Trying fast in-place restart first.")
     try:
         if do_restart_in_place():
@@ -3207,6 +3287,18 @@ def main():
         sys.exit(1)
     CURRENT_APP = app
     log.info(f"App registered: {app.get_name()!r} (pid={JVM_PID})")
+
+    # v0.5.10: cold-start maintenance-window guard. A container booting
+    # inside IBKR's daily server-side maintenance window (23:30-00:30 ET)
+    # will drive Log In into a still-draining auth server; the click is
+    # silently dropped → CCP LOCKOUT. Delay before the Log In click so
+    # IBKR's teardown of any prior session on these credentials has time
+    # to propagate. Same semantics as the mid-run recovery guard; see
+    # docs/DISCONNECT_RECOVERY.md for the 2026-04-20/21 incident that
+    # motivated this.
+    if _is_ibkr_maintenance_window():
+        _apply_maintenance_recovery_delay(
+            "cold start inside IBKR maintenance window")
 
     _set_state(State.LOGIN)
     # 3. Drive the login dialog
@@ -4017,7 +4109,10 @@ def monitor_loop(app):
             # for the CCP paths. _recover_jvm_or_escalate tries a fast
             # restart first (cheap if IBKR just kicked the session) and
             # falls through to long cool-down if CCP is actually locked.
-            _recover_jvm_or_escalate(f"JVM exited with code {rc}")
+            # v0.5.10: pass exit_code so the recovery path can apply the
+            # IBKR maintenance-window guard when rc==0.
+            _recover_jvm_or_escalate(
+                f"JVM exited with code {rc}", exit_code=rc)
             consecutive_failures = 0
             wedged_failures = 0
             last_heartbeat = time.monotonic()

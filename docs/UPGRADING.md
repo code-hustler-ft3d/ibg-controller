@@ -76,6 +76,65 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.10
+
+**No breaking changes.** Additive bugfix for the IBKR daily-maintenance
+CCP cascade. 2026-04-20/21 production incident: at 23:45:12 ET both
+live and paper Gateway JVMs exited cleanly (code 0) when IBKR's
+server-side maintenance window (~23:45-00:15 ET) forcibly shut down
+every session. The existing recovery path re-auth'd ~8 seconds later
+into a still-draining IBKR auth server, every re-auth was silently
+dropped, and a CCP LOCKOUT cascade fired `ALERT_CCP_PERSISTENT_HALT`
+on both modes before paper recovered ~35 min later (live was still
+halted 60 min later when the operator intervened).
+
+v0.5.10 adds a wallclock-driven maintenance-window guard:
+
+- When the JVM exits with code 0 AND the current time is inside
+  23:30-00:30 `America/New_York` (widened slightly around IBKR's
+  published window), sleep `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS`
+  (default 480 = 8 min) before touching IBKR's auth server.
+- Same guard on cold start — a container booting inside the window
+  delays before clicking Log In. `on-failure` restart policies
+  otherwise drive a fresh container straight into the same landmine.
+- Non-zero exits (crashes, SIGTERM, SIGKILL) bypass the guard —
+  they're not maintenance shutdowns and still get the fast-restart
+  path.
+
+No operator action required beyond the redeploy. No config change.
+The TZ is hardcoded to `America/New_York` inside the guard and is
+*not* read from the container's `TIME_ZONE` env — IBKR's window is
+ET-anchored regardless of where the container thinks it lives, so
+setting `TIME_ZONE=Europe/London` won't shift the guard off of ET.
+
+New env var (optional; default is 8 min):
+
+| Var | Default | When to tune |
+|---|---|---|
+| `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` | `480` (8 min) | Tune upward if empirical data shows IBKR's server-side drain takes longer in your region. Tune downward only if you have strong evidence the drain finishes faster — otherwise you're giving up the mitigation. |
+
+New grep-contract token (INFO-level, emitted once per recovery-path
+entry when the guard fires):
+
+```
+ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds=480 mode=live reason="JVM exited with code 0"
+```
+
+What to watch after upgrading:
+
+- If your containers previously fired `ALERT_CCP_PERSISTENT_HALT` in
+  the 23:45-00:15 ET band, you should now see
+  `ALERT_IBKR_MAINTENANCE_RECOVERY` in its place and a clean re-auth
+  ~8 min later. The halt should still fire for genuine CCP lockouts
+  outside the window (IBKR Mobile-kick remediation unchanged).
+- `ALERT_IBKR_MAINTENANCE_RECOVERY` is expected and benign — the
+  delay itself is the mitigation, not an error. Don't page on it.
+  Wire it to a low-priority INFO channel if you want visibility into
+  how often the guard fires.
+- Dual-mode deployments (`TRADING_MODE=both`) emit the token
+  independently per mode — expect live and paper each to fire once
+  per maintenance cycle.
+
 ### v0.5.9
 
 **BEHAVIOR CHANGE — read this before upgrading.** The automatic

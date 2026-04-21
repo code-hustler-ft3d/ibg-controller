@@ -4,6 +4,72 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.10] - 2026-04-21
+
+### Fixed
+
+- **IBKR daily-maintenance CCP cascade.** 2026-04-20/21 production
+  incident: at 23:45:12 ET both live and paper JVMs exited cleanly
+  (code 0) under IBKR's daily server-side maintenance window
+  (published 23:45-00:15 ET, during which every Gateway/TWS session
+  receives a cooperative shutdown). The existing
+  `_recover_jvm_or_escalate` "Trying fast in-place restart first" path
+  re-auth'd ~8 seconds after each exit. IBKR's auth server had not
+  finished draining the prior session, so every re-auth was silently
+  dropped — CCP LOCKOUT detected 21 seconds later on both sides.
+  The subsequent cascade piled retries onto the still-draining server
+  and fired multiple `ALERT_CCP_PERSISTENT_HALT` on both modes; paper
+  eventually recovered after ~35 min, live was still halted 60 min
+  later. v0.5.10 adds a maintenance-window guard:
+  - When the JVM exits with code 0 AND wallclock is inside
+    23:30-00:30 `America/New_York` (slightly widened around IBKR's
+    published window), sleep `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS`
+    (default 480 = 8 min) before touching IBKR's auth server. The
+    delay lets IBKR's server-side session teardown propagate before we
+    re-auth.
+  - Same guard on cold start — a container booting inside the window
+    delays before clicking Log In. `on-failure` restart policies
+    otherwise drive a fresh container straight into the same
+    cooperative-shutdown landmine.
+  - Non-zero exits (crashes, SIGTERM, SIGKILL) bypass the guard —
+    they're not maintenance shutdowns and still benefit from the
+    fast-restart path.
+
+### Added
+
+- **`ALERT_IBKR_MAINTENANCE_RECOVERY`** log token (INFO-level,
+  grep-contract). Emitted once per recovery-path entry when the
+  maintenance guard fires. Format:
+  `ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds=<int> mode=<live|paper> reason="..."`.
+  Operators can distinguish this benign delay from a real CCP cascade
+  (`ALERT_CCP_PERSISTENT` / `ALERT_CCP_PERSISTENT_HALT`).
+- **`CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` env var** (default 480).
+  Seconds to sleep after a code-0 exit inside IBKR's maintenance
+  window before re-auth. Tune upward if empirical data shows IBKR's
+  server-side drain takes longer in your region.
+- **`_is_ibkr_maintenance_window(now=None)`** and
+  **`_apply_maintenance_recovery_delay(reason)`** helpers. Split out
+  so the window predicate is unit-testable without a wall clock.
+- **16 new unit tests** in `tests/test_pure_logic.py`:
+  `TestIBKRMaintenanceWindow` (9, including midnight-cross boundaries
+  and the 23:46 incident timestamp), `TestMaintenanceRecoveryDelay`
+  (3), `TestRecoverJvmMaintenanceGuard` (4 — covering code-0 in
+  window, code-0 outside, non-zero in window, no exit_code).
+  Test total: 208 → 224.
+
+### Docs
+
+- `CHANGELOG.md` — this entry.
+- `UPGRADING.md` — v0.5.10 section added (additive bugfix; no ops
+  intervention required beyond redeploy).
+- `OBSERVABILITY.md` — `ALERT_IBKR_MAINTENANCE_RECOVERY` token
+  documented under the ALERT_* grep contract.
+- `DISCONNECT_RECOVERY.md` — new scenario covering the
+  daily-maintenance cooperative-shutdown pattern and how to recognize
+  it in logs.
+- `README.md` — `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` listed in a
+  new "Recovery tunables" subsection.
+
 ## [0.5.9] - 2026-04-19
 
 ### Changed (BEHAVIOR CHANGE — see UPGRADING.md)

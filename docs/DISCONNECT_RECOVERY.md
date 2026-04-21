@@ -329,12 +329,85 @@ Operator action is only needed if the exhausted token fires.
 
 ---
 
+## Scenario: IBKR daily maintenance window (v0.5.10+)
+
+**TL;DR**: IBKR runs a server-side maintenance window at ~23:45-00:15
+ET during which every Gateway/TWS session receives a cooperative
+shutdown (JVM exit code 0). The controller detects this via wallclock
+and delays the next auth attempt 8 minutes so IBKR's auth server can
+drain the prior session. No operator action needed.
+
+### Symptoms
+
+- Monitor logs show `Gateway JVM exited with code 0` at ~23:45 ET
+  (live and paper typically within seconds of each other if you run
+  `TRADING_MODE=both`).
+- Immediately followed by:
+  ```
+  ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds=480 mode=live reason="JVM exited with code 0"
+  Inside IBKR maintenance window (~23:45-00:15 ET); sleeping 480s before re-auth ...
+  ```
+- ~8 min later: controller re-auths cleanly and API port reopens.
+- `/health` flips to `unhealthy` during the delay (`jvm_alive: false`)
+  and back to `healthy` after the re-auth succeeds.
+
+### Root cause
+
+IBKR's daily server-side maintenance. Gateway's cooperative exit
+on this path is a clean shutdown — not a crash, not a session kick,
+not CCP rate limiting. But IBKR's auth server doesn't finish
+draining the prior session for tens of seconds to minutes, and any
+re-auth during that drain is **silently dropped** (no error, no
+dialog, no log line from Gateway's side). Pre-v0.5.10, the
+controller re-auth'd within ~8 seconds of the exit and tripped this
+silent-drop repeatedly — cascading into CCP LOCKOUT on both modes,
+multiple `ALERT_CCP_PERSISTENT_HALT` fires, and hours of stuck
+state (2026-04-20/21 incident).
+
+### Recovery
+
+Automatic. The `_is_ibkr_maintenance_window` check in
+`_recover_jvm_or_escalate` adds the delay before any re-auth when the
+wallclock sits inside 23:30-00:30 ET. Cold starts inside the window
+apply the same guard before the first Log In click.
+
+Tune `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` upward if you see
+`ALERT_CCP_PERSISTENT` firing within a few minutes of
+`ALERT_IBKR_MAINTENANCE_RECOVERY` — the 8-min default wasn't enough
+to outlast the drain in your region.
+
+### Prevention
+
+- Don't `docker restart` an `ibg-controller` container during
+  23:30-00:30 ET. The cold-start guard catches this case but you'll
+  sit with `jvm_alive: false` for 8 min instead of just riding
+  through the maintenance exit cleanly.
+- If your orchestrator's restart policy can force a container recycle
+  inside this window (e.g., health-check timeouts that fire because
+  `/health` is `unhealthy` during the delay), extend the health-check
+  tolerance to > `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` during the
+  23:30-00:30 ET band. Otherwise the orchestrator will recycle the
+  container, the cold-start guard applies again, and you oscillate.
+
+### How this differs from a real CCP lockout
+
+| Signal | Maintenance window | CCP lockout |
+|---|---|---|
+| Wallclock | 23:30-00:30 ET | anytime |
+| JVM exit code preceding it | 0 (cooperative) | any — or no exit at all |
+| First alert emitted | `ALERT_IBKR_MAINTENANCE_RECOVERY` (INFO) | `ALERT_CCP_PERSISTENT` (WARNING) after streak ≥ 3 |
+| Operator action | ❌ not needed | ✅ log into IBKR Mobile |
+| Auto-recovery | ✅ after the configured delay | ❌ |
+
+---
+
 ## Summary: which scenarios are auto-recoverable?
 
 | Scenario | Auto-recovery | Operator action | Detection |
 |---|---|---|---|
 | Short API port flap | ✅ next monitor cycle | ❌ not needed | `/health` flips briefly |
 | Gateway JVM crash | ✅ in-place restart | ❌ not needed | `jvm_alive: false` in `/health` |
+| IBKR daily maintenance window | ✅ 8-min delay + re-auth | ❌ not needed | `ALERT_IBKR_MAINTENANCE_RECOVERY` at ~23:45 ET |
 | CCP rate limiter tripped (genuine) | ✅ silent cool-down | ❌ not needed (wait up to 20 min) | `ccp_backoff_seconds > 0` |
 | **CCP lockout — concurrent/stranded session** | ❌ cannot auto-recover | ✅ log into IBKR Mobile (force-kicks TWS slot; web Portal does NOT) | `ALERT_CCP_PERSISTENT` + `ccp_lockout_streak >= 3` |
 | **2FA automation failed** | ❌ cannot auto-recover | ✅ fix `TWOFACTOR_CODE` or VNC-enter | `ALERT_2FA_FAILED` |

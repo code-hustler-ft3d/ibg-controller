@@ -1894,5 +1894,150 @@ class TestUncleanShutdownAlert(unittest.TestCase):
                          "SIGTERM fallback still runs on clean-logout failure")
 
 
+class TestIBKRMaintenanceWindow(unittest.TestCase):
+    """v0.5.10: IBKR's daily server-side maintenance window (published
+    23:45-00:15 ET) forcibly shuts down every Gateway session with exit
+    code 0. Our recovery logic detects the window (widened to 23:30-00:30
+    ET for safety) via wallclock and delays re-auth so IBKR's auth server
+    can finish draining the prior session before we try again.
+
+    These tests confirm the window predicate is correct across the
+    boundary — including the midnight cross (t >= 23:30 OR t < 00:30) —
+    so both the cold-start guard and the mid-run code-0 recovery path
+    behave consistently.
+    """
+
+    def _et(self, hour, minute=0):
+        """Build a tz-aware datetime at hour:minute America/New_York on
+        an arbitrary date. Date choice is immaterial — the predicate
+        only reads the time-of-day component."""
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(2026, 4, 21, hour, minute,
+                        tzinfo=ZoneInfo("America/New_York"))
+
+    def test_at_23_30_is_in_window_lower_boundary(self):
+        self.assertTrue(gc._is_ibkr_maintenance_window(self._et(23, 30)))
+
+    def test_at_23_29_is_outside_window(self):
+        self.assertFalse(gc._is_ibkr_maintenance_window(self._et(23, 29)))
+
+    def test_at_23_46_is_in_window_matches_incident(self):
+        # 2026-04-20/21 incident: JVM exited code 0 at 23:45 ET and
+        # re-auth'd 8s later → CCP LOCKOUT. This is the canonical case.
+        self.assertTrue(gc._is_ibkr_maintenance_window(self._et(23, 46)))
+
+    def test_at_00_00_is_in_window_crosses_midnight(self):
+        self.assertTrue(gc._is_ibkr_maintenance_window(self._et(0, 0)))
+
+    def test_at_00_15_is_in_window_ibkr_published_end(self):
+        self.assertTrue(gc._is_ibkr_maintenance_window(self._et(0, 15)))
+
+    def test_at_00_29_is_in_window_near_upper_boundary(self):
+        self.assertTrue(gc._is_ibkr_maintenance_window(self._et(0, 29)))
+
+    def test_at_00_30_is_outside_window_upper_boundary_exclusive(self):
+        self.assertFalse(gc._is_ibkr_maintenance_window(self._et(0, 30)))
+
+    def test_at_noon_is_outside_window(self):
+        self.assertFalse(gc._is_ibkr_maintenance_window(self._et(12, 0)))
+
+    def test_at_evening_is_outside_window(self):
+        self.assertFalse(gc._is_ibkr_maintenance_window(self._et(18, 0)))
+
+
+class TestMaintenanceRecoveryDelay(unittest.TestCase):
+    """v0.5.10: the delay itself is the mitigation. Verify the default
+    duration, env-var-driven override (via the module-level constant),
+    and that the delay helper emits the stable ALERT token so operators
+    can distinguish this benign delay from a real CCP cascade."""
+
+    def test_default_is_480_seconds_eight_minutes(self):
+        self.assertEqual(gc._CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS_DEFAULT, 480)
+
+    def test_apply_delay_sleeps_configured_duration(self):
+        with patch("gateway_controller.time.sleep") as mock_sleep:
+            gc._apply_maintenance_recovery_delay("test reason")
+        mock_sleep.assert_called_once_with(
+            gc._CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS)
+
+    def test_apply_delay_emits_alert_token_with_fields(self):
+        with self.assertLogs("controller", level="INFO") as cm:
+            with patch("gateway_controller.time.sleep"):
+                gc._apply_maintenance_recovery_delay("code-0 in window")
+        combined = "\n".join(cm.output)
+        self.assertIn("ALERT_IBKR_MAINTENANCE_RECOVERY", combined)
+        self.assertIn(
+            f"delay_seconds={gc._CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS}",
+            combined)
+        self.assertIn(f"mode={gc.TRADING_MODE}", combined)
+        self.assertIn('reason="code-0 in window"', combined)
+
+
+class TestRecoverJvmMaintenanceGuard(unittest.TestCase):
+    """v0.5.10: ``_recover_jvm_or_escalate`` must call the delay helper
+    BEFORE attempting the fast restart when ``exit_code == 0`` and we're
+    inside the maintenance window. At any other time (non-zero exit, or
+    code 0 outside the window) the guard must not fire — code-0 exits
+    outside the window are typically IBKR session kicks or auto-logoffs
+    and benefit from the fast-restart path.
+
+    We patch ``do_restart_in_place`` to return True so the function
+    returns on the happy path without needing to construct a full JVM
+    recovery environment.
+    """
+
+    def test_code_0_in_window_calls_delay_before_restart(self):
+        call_order = []
+        with patch("gateway_controller._is_ibkr_maintenance_window",
+                   return_value=True), \
+             patch("gateway_controller._apply_maintenance_recovery_delay",
+                   side_effect=lambda r: call_order.append("delay")) as mock_delay, \
+             patch("gateway_controller.do_restart_in_place",
+                   side_effect=lambda: (call_order.append("restart"), True)[1]):
+            result = gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=0)
+        self.assertTrue(result)
+        self.assertEqual(call_order, ["delay", "restart"])
+        mock_delay.assert_called_once()
+
+    def test_code_0_outside_window_skips_delay(self):
+        with patch("gateway_controller._is_ibkr_maintenance_window",
+                   return_value=False), \
+             patch("gateway_controller._apply_maintenance_recovery_delay") as mock_delay, \
+             patch("gateway_controller.do_restart_in_place",
+                   return_value=True):
+            gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=0)
+        mock_delay.assert_not_called()
+
+    def test_non_zero_exit_skips_delay_even_in_window(self):
+        # Non-zero exit codes are crashes, not IBKR cooperative
+        # shutdowns. Even if the wallclock happens to fall inside the
+        # maintenance window, the guard must not apply — fast restart
+        # is still the right response.
+        with patch("gateway_controller._is_ibkr_maintenance_window",
+                   return_value=True), \
+             patch("gateway_controller._apply_maintenance_recovery_delay") as mock_delay, \
+             patch("gateway_controller.do_restart_in_place",
+                   return_value=True):
+            gc._recover_jvm_or_escalate(
+                "JVM exited with code 143", exit_code=143)
+        mock_delay.assert_not_called()
+
+    def test_no_exit_code_preserves_pre_v0_5_10_behaviour(self):
+        # Callers that don't pass exit_code (none exist in the current
+        # code base but the kwarg defaults to None for future-proofing)
+        # should never trigger the guard. Equivalent to "we don't know
+        # if this was a maintenance exit, so don't delay".
+        with patch("gateway_controller._is_ibkr_maintenance_window",
+                   return_value=True), \
+             patch("gateway_controller._apply_maintenance_recovery_delay") as mock_delay, \
+             patch("gateway_controller.do_restart_in_place",
+                   return_value=True):
+            gc._recover_jvm_or_escalate("unspecified")
+        mock_delay.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
