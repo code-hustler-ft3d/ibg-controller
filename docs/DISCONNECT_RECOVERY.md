@@ -19,6 +19,27 @@ See also:
 
 ## Scenario: CCP lockout (concurrent IBKR session)
 
+> **Triage first (v0.5.12+):** the `CCP LOCKOUT DETECTED` warning
+> name is a misnomer. Pre-v0.5.12 the most common cause was an
+> **intra-JVM `AtkWrapper` deadlock** that timed out the
+> `AuthTimeoutMonitor-CCP` 20 s timer locally — IBKR was never
+> reached. Before applying the IBKR-Mobile kick playbook below,
+> confirm the failure is actually broker-side:
+>
+> - **Was Gateway running v0.5.12+?** If not (or if the JVM cmdline
+>   doesn't carry `-Djavax.accessibility.assistive_technologies=`),
+>   your "lockout" was almost certainly the deadlock — recovery is
+>   `docker compose restart`, not an IBKR Mobile login.
+> - **Does `launcher.log` contain `NS_AUTH_START`** for the affected
+>   mode? If yes, IBKR was reached and this is a real broker-side
+>   lockout. Continue with the playbook below.
+> - **Did `JTS-Login-*` ever park in `AtkUtil.invokeInSwing`** in a
+>   SIGQUIT thread dump (`/tmp/jvm_console_${TRADING_MODE}.log` from
+>   v0.5.12+)? If yes, it was the deadlock — upgrade and retry.
+>
+> The rest of this scenario covers genuine broker-side lockouts
+> (concurrent session holding the auth slot).
+
 **TL;DR**: another TWS/Gateway session (or a stranded slot from a
 prior unclean teardown) is holding the auth slot for your account.
 The controller cannot see or clear it. **Log into IBKR Mobile as the

@@ -49,7 +49,7 @@ from zoneinfo import ZoneInfo
 import gi
 
 
-__version__ = "0.5.11"
+__version__ = "0.5.12"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -330,46 +330,77 @@ def find_descendant(node, role=None, name=None, depth=0, max_depth=20):
     return None
 
 
-def find_app(name_substring, timeout=120, match_pid=None):
-    """Poll until an AT-SPI application matching name_substring appears.
+class _StubApp:
+    """Stand-in for an AT-SPI Accessible when the bridge is disabled.
 
-    `name_substring` can be a single string or a list of candidate
-    substrings (Phase 2.3: TWS exposes multiple possible app names
-    depending on version/locale, so we try each in turn per poll tick).
+    v0.5.12: with ``-Djavax.accessibility.assistive_technologies=`` set on
+    the JVM, the AT-SPI desktop tree never sees a Gateway entry — so
+    pyatspi-based discovery (find_app) would always time out. All
+    login-UI code paths now go through the in-JVM gateway-input-agent
+    socket, which doesn't need the AT-SPI tree.
 
-    If `match_pid` is set, only return an app whose process ID matches.
-    This is how dual-mode containers tell their own Gateway JVM apart
-    from the other instance — both appear as 'IBKR Gateway' in the
-    desktop tree, but each has a distinct `get_process_id()`.
-
-    If `match_pid` is None, fall back to the first matching app with
-    any children (Phase 1 behavior, still correct for single-mode).
+    The stub keeps a minimal pyatspi-Accessible-like surface so the
+    handful of remaining callsites that still pass ``app`` around (and
+    occasionally call ``app.get_name()`` / ``get_process_id()`` for
+    logging) keep working without per-callsite branching. Tree-walking
+    callers (find_descendant, get_states, _read_text, click(node))
+    treat a zero-child subtree as "nothing matched" and bail
+    gracefully — same behavior they already had under AT-SPI flake.
     """
-    if isinstance(name_substring, str):
-        candidates = [name_substring]
-    else:
-        candidates = list(name_substring)
-    candidates_lower = [c.lower() for c in candidates]
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        desktop = Atspi.get_desktop(0)
-        n = safe(lambda: desktop.get_child_count(), 0) or 0
-        for i in range(n):
-            app = safe(lambda: desktop.get_child_at_index(i))
-            if app is None:
-                continue
-            app_name = safe(lambda: app.get_name(), "") or ""
-            if not any(c in app_name.lower() for c in candidates_lower):
-                continue
-            if (safe(lambda: app.get_child_count(), 0) or 0) <= 0:
-                continue
-            if match_pid is not None:
-                app_pid = safe(lambda: app.get_process_id(), None)
-                if app_pid != match_pid:
-                    continue
-            return app
-        time.sleep(0.5)
-    return None
+
+    def __init__(self, name="IBKR Gateway", pid=None):
+        self._name = name
+        self._pid = pid
+
+    def get_name(self):
+        return self._name
+
+    def get_process_id(self):
+        return self._pid
+
+    def get_child_count(self):
+        return 0
+
+    def get_child_at_index(self, i):
+        return None
+
+    def get_role_name(self):
+        return "application"
+
+    def get_description(self):
+        return ""
+
+    def get_state_set(self):
+        return None
+
+
+def find_app(name_substring, timeout=120, match_pid=None):
+    """Return a placeholder application accessible.
+
+    Pre-v0.5.12 this polled the AT-SPI desktop tree until an entry
+    matching ``name_substring`` appeared — the legacy way of getting an
+    AT-SPI Accessible to feed wait_for/find_descendant. With the AT-SPI
+    bridge disabled (see ``launch_gateway``) the desktop tree never
+    populates, so polling would always time out. We short-circuit to a
+    ``_StubApp`` carrying the JVM's PID so existing callers (which use
+    the return value only for logging and as a passthrough argument to
+    handle_login / attempt_inplace_relogin / etc.) keep working without
+    every callsite having to know that AT-SPI is gone.
+
+    Returns the stub immediately. The ``timeout`` argument is ignored.
+    Returns ``None`` only if the agent's GET_PID never succeeded
+    (agent_get_pid returned None at controller startup), since in that
+    case dual-mode containers can't safely identify "their own" JVM and
+    the caller should treat that as a genuine launch failure.
+    """
+    pid = match_pid if match_pid is not None else JVM_PID
+    if pid is None:
+        # Agent didn't report a PID — refuse to claim discovery succeeded.
+        # Caller treats None as fatal in main() / do_restart_in_place.
+        return None
+    name = name_substring if isinstance(name_substring, str) else (
+        name_substring[0] if name_substring else "IBKR Gateway")
+    return _StubApp(name=name, pid=pid)
 
 
 def wait_for(app, role, name=None, timeout=60):
@@ -1166,6 +1197,33 @@ def launch_gateway():
         "--add-opens=jdk.management/com.sun.management.internal=ALL-UNNAMED",
     ]
     vm_params = module_access + [
+        # v0.5.12: disable the AT-SPI java-atk-wrapper bridge.
+        #
+        # The bridge ships an AWT property-change listener
+        # (AtkWrapper$5.propertyChange) that fires on every component
+        # property update — including JProgressBar.setValue calls from
+        # IBKR's "Connecting…" welcome screen during login. The listener's
+        # native emitSignal does a JNI re-entry that calls back into
+        # AtkObject.hashCode → AtkUtil.invokeInSwing, which posts a
+        # FutureTask to the AWT EventQueue and parks waiting on it. The
+        # AWT EventQueue itself is meanwhile blocked at
+        # AtkWrapper$6.dispatchEvent waiting for monitor entry — and the
+        # FutureTask never runs. JTS-Login-14 hangs forever holding the
+        # connection-state lock; JTS-CCPListenerS2 can't dispatch the
+        # NS_AUTH_START response from IBKR; the controller times out
+        # after 20 s and emits a misleading CCP LOCKOUT alert.
+        #
+        # Verified by SIGQUIT thread dump 2026-04-27.  Disabling the
+        # assistive_technologies system property prevents the JRE from
+        # instantiating AtkWrapper, so neither listener gets installed.
+        # The bootclasspath jar is left in place so that any code that
+        # imports the class explicitly still resolves.
+        #
+        # All login-UI interaction (set credentials, click Log In, toggle
+        # Live/Paper) goes through the in-JVM gateway-input-agent, which
+        # uses pure Swing/AWT (Window.getWindows + SwingUtilities) and
+        # does NOT depend on AT-SPI for any of its work.
+        "-Djavax.accessibility.assistive_technologies=",
         "-Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar",
         f"-DjtsConfigDir={JTS_CONFIG_DIR}",
     ]
@@ -1198,55 +1256,75 @@ def launch_gateway():
         "-VinstallerType=standalone",
     ]
 
+    # Diagnostic: capture JVM stdout/stderr to a file so SIGQUIT thread dumps
+    # can be read after the fact. Without this, JVM stderr goes to /dev/null
+    # and SIGQUIT-triggered thread dumps are lost.
+    jvm_console_path = f"/tmp/jvm_console_{TRADING_MODE}.log"
+    jvm_console_fd = open(jvm_console_path, "w")
     proc = subprocess.Popen(
         launcher_args,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=jvm_console_fd,
+        stderr=subprocess.STDOUT,
     )
-    log.info(f"Gateway PID: {proc.pid}")
+    log.info(f"Gateway PID: {proc.pid} (JVM console -> {jvm_console_path})")
     return proc
 
 
 # ── Dialog handlers ─────────────────────────────────────────────────────
 
 def handle_login(app):
-    """Drive the login dialog: select trading mode, type credentials, click Log In."""
-    log.info("Waiting for login dialog (password text)")
-    pw_field = wait_for(app, "password text", timeout=120)
-    if pw_field is None:
-        log.error("Login dialog never appeared (no password text role)")
+    """Drive the login dialog: select trading mode, type credentials, click Log In.
+
+    v0.5.12: removed the pyatspi tree-walking path. The AT-SPI bridge is
+    disabled in the JVM (see ``launch_gateway`` — the
+    ``-Djavax.accessibility.assistive_technologies=`` flag) to prevent the
+    AtkWrapper$5.propertyChange + AtkUtil.invokeInSwing deadlock that hung
+    JTS-Login-14 during the welcome-screen JProgressBar update. Without
+    AT-SPI, ``find_app`` / ``find_descendant`` / ``wait_for`` /
+    ``get_states`` / ``click(node)`` / ``_read_text`` no longer have a
+    populated tree to walk, so all login-UI interaction goes through the
+    in-JVM ``gateway-input-agent`` socket — pure Swing/AWT, no AT-SPI
+    callbacks, no JNI re-entrancy, no deadlock.
+
+    The ``app`` argument is now a placeholder kept only for caller
+    compatibility (attempt_inplace_relogin, do_restart_in_place,
+    attempt_reauth all still pass an `app` reference through). The agent
+    discovers the login frame internally via ``findLoginFrame`` (any
+    showing Window containing a JPasswordField).
+    """
+    log.info("Waiting for login dialog (JPasswordField in showing Window)")
+    if not agent_wait_login_frame(timeout_ms=120_000):
+        log.error("Login dialog never appeared (no JPasswordField in any showing Window)")
         return False
     log.info("Login dialog detected")
 
     # Trading mode — must select BEFORE typing credentials, because Gateway
-    # may reset the form when toggling.
+    # may reset the form when toggling. The login frame's title is
+    # "IBKR Gateway" (matched via title-substring); within that window the
+    # agent's JCHECK looks for a JToggleButton named "Live Trading" or
+    # "Paper Trading" and clicks it iff the state needs to change. If the
+    # window match fails (different Gateway version / locale) we log a
+    # warning and continue — the warm-state jts.ini already records the
+    # last-used mode so a missed toggle usually leaves Gateway with the
+    # right selection anyway. If it doesn't, IBKR rejects the credentials
+    # and we recover via the credential-rejection path.
     target = "Paper Trading" if TRADING_MODE == "paper" else "Live Trading"
-    mode_btn = find_descendant(app, role="toggle button", name=target)
-    if mode_btn is None:
-        log.warning(f"Trading mode button {target!r} not found, continuing")
+    if agent_jcheck("IBKR Gateway", target, True):
+        log.info(f"Trading mode set to {target} via agent")
     else:
-        if "checked" not in get_states(mode_btn):
-            log.info(f"Selecting trading mode: {target}")
-            click(mode_btn)
-            time.sleep(0.5)
-        else:
-            log.info(f"Trading mode already {target}")
+        log.warning(f"agent_jcheck for {target!r} did not succeed — relying "
+                    "on warm-state jts.ini for trading-mode selection")
 
-    # Username — v0.4.2: route through in-JVM role-based lookup instead
-    # of AT-SPI name-based find_descendant + set_text. The username
-    # field's accessible name mutates between login attempts (can
-    # become a JComboBox autocomplete editor with null AccessibleName),
-    # breaking the old name-based SETTEXT path on attempt_inplace_relogin
-    # re-drive. The new agent command matches on Swing type (first
-    # editable non-password JTextComponent on the login frame).
+    # Username / password via the in-JVM role-based lookup. SETTEXT_LOGIN_*
+    # commands match on Swing type (first editable non-password / first
+    # JPasswordField on the login frame), so they survive accessible-name
+    # drift across login attempts (JComboBox autocomplete editor with null
+    # AccessibleName, etc).
     user_ok = agent_settext_login_user(USERNAME)
     if not user_ok and not TEST_MODE:
         return False
 
-    # Password — symmetric role-based lookup. JPasswordField Swing type
-    # is stable across Gateway versions, so this is equivalent to the
-    # old name-based path but future-proof against accessible-name drift.
     pw_ok = agent_settext_login_password(PASSWORD)
     if not pw_ok and not TEST_MODE:
         return False
@@ -1257,14 +1335,17 @@ def handle_login(app):
     # Log In button. Gateway renames the button based on trading mode:
     #   Live Trading  → "Log In"
     #   Paper Trading → "Paper Log In"
-    login_btn = (find_descendant(app, role="push button", name="Log In")
-                 or find_descendant(app, role="push button", name="Paper Log In"))
-    if login_btn is None:
-        log.error("Log In / Paper Log In button not found — dumping current tree")
-        _dump_tree(app, max_depth=15)
-        return False
-    log.info(f"Found login button: {login_btn.get_name()!r}")
-    if not click(login_btn):
+    if not (agent_click("Log In") or agent_click("Paper Log In")):
+        log.error("Log In / Paper Log In button click failed via agent")
+        # Diagnostic: dump the login window's component tree via the agent.
+        try:
+            log.error("=== agent_window('IBKR Gateway') dump ===")
+            for line in agent_window("IBKR Gateway").split("\n"):
+                if line and line not in ("OK", "END"):
+                    log.error(f"  {line}")
+            log.error("=== end window dump ===")
+        except Exception as e:
+            log.error(f"  agent_window dump failed: {type(e).__name__}: {e}")
         return False
 
     log.info("Log In clicked successfully")
@@ -3309,11 +3390,15 @@ def main():
                             "be able to disambiguate in dual-mode containers")
 
     _set_state(State.APP_DISCOVERY)
-    # 2b. Wait for the app to register with AT-SPI
-    log.info("Waiting for IBKR Gateway in the AT-SPI desktop tree")
+    # 2b. v0.5.12: AT-SPI desktop tree is no longer populated by Gateway
+    # (the AtkWrapper bridge is disabled — see launch_gateway). find_app
+    # returns a stub Accessible carrying the JVM PID, or None iff the
+    # agent never reported a PID. Treat None as a fatal launch failure.
+    log.info("Resolving Gateway app handle (agent-reported PID)")
     app = find_app(APP_NAME_CANDIDATES, timeout=120, match_pid=JVM_PID)
     if app is None:
-        log.error("IBKR Gateway never appeared in AT-SPI tree within 120s")
+        log.error("Gateway PID unknown (agent never reported one) — "
+                  "cannot proceed without a JVM identity")
         sys.exit(1)
     CURRENT_APP = app
     log.info(f"App registered: {app.get_name()!r} (pid={JVM_PID})")

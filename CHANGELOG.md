@@ -4,6 +4,91 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.12] - 2026-04-27
+
+### Fixed
+
+- **Dual-mode "CCP lockout" was a misnamed intra-JVM deadlock.**
+  SIGQUIT thread dumps on hung live JVMs (PID 1183, 2026-04-27 11:45)
+  showed `JTS-Login-14` parked in `AtkUtil.invokeInSwing.get()` while
+  `AWT-EventQueue-1` was itself stuck in `AtkWrapper$6.dispatchEvent`
+  waiting for a synchronized monitor the same wrapper held
+  reentrantly. `java-atk-wrapper`'s java↔native bridge is not safe
+  for re-entrant Swing event dispatch from `JProgressBar.setValue`
+  (the login progress bar). `JTS-CCPListenerS2` then couldn't
+  acquire the connection-state lock to receive `NS_AUTH_START` from
+  IBKR — and after 20 s `AuthTimeoutMonitor-CCP` fired `Timeout!`
+  locally, which the python misinterpreted as `CCP LOCKOUT
+  DETECTED`. **IBKR was never reached.** Single-mode runs deadlocked
+  too — this is intra-JVM, not cross-JVM.
+- **Fix: disable the AT-SPI bridge entirely.** Added
+  `-Djavax.accessibility.assistive_technologies=` (empty value) to
+  the JVM args in `launch_gateway()`. The empty system property
+  overrides the JRE's `accessibility.properties` file setting;
+  `AtkWrapper` is never instantiated; the deadlock is structurally
+  impossible.
+- **Coupled python changes** (AT-SPI no longer reachable from JVM):
+  - `find_app()` now returns a `_StubApp` carrying the
+    agent-reported JVM PID instead of polling the AT-SPI desktop
+    tree (which a bridge-disabled JVM never populates). The stub
+    keeps a minimal pyatspi-Accessible-like surface so the handful
+    of callsites that still pass `app` around for logging or as a
+    passthrough argument keep working without per-callsite
+    branching.
+  - `handle_login()` uses agent-socket commands exclusively
+    (`SETTEXT_LOGIN_USER`, `SETTEXT_LOGIN_PASSWORD`, `JCHECK`,
+    `CLICK`, `WAIT_LOGIN_FRAME`). `gateway-input-agent.jar` is pure
+    Swing/AWT (`Window.getWindows()` + `SwingUtilities.invokeAndWait`)
+    and is unaffected by the AtkWrapper disable.
+- **JVM stdout/stderr now captured** to
+  `/tmp/jvm_console_${TRADING_MODE}.log` so SIGQUIT thread dumps can
+  be read after the fact. Prior to v0.5.12 the JVM streams went to
+  `/dev/null`.
+
+### Validation
+
+- Two consecutive container restarts (Apple Silicon, Darwin
+  arm64-on-amd64-via-rosetta), both modes reached MONITORING with
+  `ccp_lockout_streak=0`. Live: 31 s `APP_DISCOVERY` → MONITORING.
+  Paper: 32 s. JVM cmdlines confirmed to carry the new flag. Both
+  `/health` endpoints reported
+  `version=0.5.12, state=MONITORING, ccp_lockout_streak=0,
+  ccp_backoff_seconds=0`.
+- One transient paper failure observed on the first restart wave —
+  no `JTS-Login-14` parked in `AtkUtil.invokeInSwing` in the JVM
+  thread dump, just the standard 20-second `AuthTimeoutMonitor-CCP`
+  fire. Looks like an IBKR-side login race rather than a regression
+  of the deadlock. Paper retried automatically and reached
+  MONITORING ~50 s later.
+
+### Superseded
+
+- The earlier hypothesis that two JVMs sharing one
+  `at-spi2-registryd` caused the deadlock was wrong. The deadlock is
+  intra-JVM: `AtkWrapper` holds a monitor reentrantly during a
+  single Swing dispatch. Single-mode runs deadlocked too. The
+  per-controller D-Bus / AT-SPI registry split that had been
+  prototyped during the debugging session was **removed** before
+  this release; the AtkWrapper disable is the only load-bearing fix
+  and adding the registry split would have been moving parts not
+  justified by root cause.
+- v0.5.11's `stop_grace_period: 90s` requirement still applies for
+  clean shutdown but is unrelated to this bug.
+- v0.5.9's `CCP_LOCKOUT_MAX_JVM_RESTARTS=0` halt-by-default behavior
+  remains correct as a safety guard, but is now rarely reached
+  because the underlying deadlock has been removed.
+
+### Known follow-ups (not in this release)
+
+- `ALERT_CCP_PERSISTENT_HALT` text still says "log into IBKR Mobile
+  to force-log-out the held slot" — wrong for this failure mode.
+  Detect: if no `AuthDispatcher.connect` thread spawned in the JVM
+  logs, the hang was ours, not IBKR's. Rewording deferred to a
+  docs-only patch.
+- `CCP LOCKOUT DETECTED` warning name is also misleading; consider
+  renaming or splitting into `JVM_LOGIN_DEADLOCK` vs
+  `CCP_AUTH_TIMEOUT` in a future release.
+
 ## [0.5.11] - 2026-04-27
 
 ### Fixed

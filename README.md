@@ -204,9 +204,18 @@ corresponding product.
   own `JTextField.setText()`, `AbstractButton.doClick()`,
   `JTree.setSelectionPath()`, and `JToggleButton.doClick()` — the only
   things that actually work.
-- **AT-SPI2** drives component discovery and button clicks in the main
-  window. Text input, tree navigation, and config dialog manipulation
-  go through the agent.
+- **AT-SPI2** historically drove component discovery and button clicks
+  in the main window. **As of v0.5.12 the JVM no longer connects to
+  AT-SPI** — the `AtkWrapper` bridge is disabled via
+  `-Djavax.accessibility.assistive_technologies=` to prevent an
+  intra-JVM Swing-dispatch deadlock that surfaced as a misleading
+  `CCP LOCKOUT DETECTED` warning. All login-UI interaction now
+  routes through the agent socket. The diagram above shows the
+  pre-v0.5.12 architecture; post-v0.5.12 the AT-SPI2 line in the
+  Gateway JVM is dormant. See [CHANGELOG.md](CHANGELOG.md) v0.5.12
+  for the deadlock thread-dump evidence and
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) sections 3 and 4
+  for what the JRE-side configuration *would* do if re-enabled.
 
 Full diagnostic history and architectural reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
@@ -433,6 +442,25 @@ ibg-controller-0.5.9/
 
 ### IBKR auth lockouts and the controller's automatic backoff (v0.3.2+)
 
+> **Important triage note (v0.5.12+):** the `CCP LOCKOUT DETECTED`
+> warning name is misleading. Pre-v0.5.12 the most common cause was
+> an **intra-JVM `AtkWrapper` deadlock** that fired the
+> `AuthTimeoutMonitor-CCP` 20-second timer locally without IBKR ever
+> being reached. v0.5.12 disables the AT-SPI bridge in the JVM and
+> the deadlock is gone — so if you're seeing this on v0.5.12+, it's
+> much more likely a real broker-side lockout. Triage:
+>
+> - `launcher.log` contains `NS_AUTH_START` for the affected mode →
+>   real broker-side lockout, follow the backoff playbook below
+>   and/or [DISCONNECT_RECOVERY.md →
+>   CCP lockout](docs/DISCONNECT_RECOVERY.md#scenario-ccp-lockout-concurrent-ibkr-session).
+> - No `NS_AUTH_START` and you're on a pre-v0.5.12 image → it was
+>   the deadlock; upgrade.
+> - No `NS_AUTH_START` on v0.5.12+ → check
+>   `/tmp/jvm_console_${TRADING_MODE}.log` after `kill -3 <jvm_pid>`
+>   for an `AtkUtil.invokeInSwing` parked thread (smoking gun for a
+>   bridge regression — open an issue).
+
 IBKR's auth server occasionally stops responding to fresh password
 logins for several minutes (and occasionally hours) after a burst of
 failed attempts from the same account. There are two visible failure
@@ -504,9 +532,28 @@ stuck-connecting case won't show in `launcher.log`; check the
 controller's own logs for the "stuck in 'connecting to server'"
 warning instead.
 
-### "IBKR Gateway never appeared in AT-SPI desktop tree within 120s"
+### "Gateway PID unknown (agent never reported one) — cannot proceed without a JVM identity" (v0.5.12+)
 
-The ATK bridge didn't load. Check:
+In v0.5.12+ Gateway no longer registers with the AT-SPI desktop
+tree (the bridge is intentionally disabled — see CHANGELOG.md). App
+discovery now relies on the input agent reporting its JVM PID
+through the Unix socket instead. If you see this error, the agent
+itself failed to start. Check:
+
+1. The `-javaagent:/home/ibgateway/gateway-input-agent.jar=...`
+   flag is in the JVM's command line. Inside the container:
+   `cat /proc/$(pgrep -f java)/cmdline | tr '\0' '\n' | grep agent`.
+2. The agent socket exists and is writable:
+   `ls -l /tmp/gateway-input-${TRADING_MODE}.sock` (or
+   `/tmp/gateway-input.sock` in single-mode).
+3. `/tmp/jvm_console_${TRADING_MODE}.log` — added in v0.5.12. Check
+   the JVM console for agent boot errors.
+
+### Pre-v0.5.12: "IBKR Gateway never appeared in AT-SPI desktop tree within 120s"
+
+This message no longer applies in v0.5.12+ (Gateway intentionally
+does not register with AT-SPI). For pre-v0.5.12 deployments, the
+ATK bridge didn't load. Check:
 
 1. `ls $JAVA_HOME/conf/accessibility.properties` inside the container —
    must contain `assistive_technologies=org.GNOME.Accessibility.AtkWrapper`

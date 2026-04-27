@@ -76,6 +76,49 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.12
+
+**No breaking changes.** Image-internal fix for the most common
+cause of `CCP LOCKOUT DETECTED` warnings — they were almost always
+an intra-JVM `AtkWrapper` deadlock, not an IBKR-side rate-limit
+kick. The 20-second `AuthTimeoutMonitor-CCP` timer was firing
+locally because `JTS-Login-*` was parked in `AtkUtil.invokeInSwing`
+waiting on a `FutureTask` that the AWT EventQueue couldn't run
+(itself stuck at `AtkWrapper$6.dispatchEvent`). IBKR was never
+reached. See CHANGELOG.md v0.5.12 for the SIGQUIT thread-dump
+evidence.
+
+v0.5.12 disables the AT-SPI bridge inside the JVM by passing
+`-Djavax.accessibility.assistive_technologies=` (empty value).
+`AtkWrapper` is never instantiated. The deadlock is structurally
+impossible. Login UI work that previously used pyatspi tree-walking
+now goes through the in-JVM `gateway-input-agent` socket — which is
+pure Swing/AWT and unaffected by the disable.
+
+**No operator action required beyond the redeploy.**
+
+- No compose changes.
+- No env var changes.
+- No Dockerfile changes (the JRE's `accessibility.properties` file
+  is left as-is; the runtime JVM flag overrides it).
+
+What you'll notice in the logs:
+
+- The `APP_DISCOVERY` line changed from
+  `Waiting for IBKR Gateway in the AT-SPI desktop tree` to
+  `Resolving Gateway app handle (agent-reported PID)`.
+- Cold-start time is faster — no 2-second AT-SPI-tree poll cycles
+  before login starts.
+- `CCP LOCKOUT DETECTED` should be much rarer. If you still see
+  it, see [DISCONNECT_RECOVERY.md → CCP lockout
+  triage](DISCONNECT_RECOVERY.md#scenario-ccp-lockout-concurrent-ibkr-session)
+  to distinguish a real broker-side lockout from the
+  (now-impossible) deadlock signature.
+- A new diagnostic file:
+  `/tmp/jvm_console_${TRADING_MODE}.log` captures Gateway's JVM
+  stdout/stderr. SIGQUIT (`kill -3 <jvm_pid>`) thread dumps land
+  here. Pre-v0.5.12 the JVM streams were redirected to `/dev/null`.
+
 ### v0.5.10
 
 **No breaking changes.** Additive bugfix for the IBKR daily-maintenance

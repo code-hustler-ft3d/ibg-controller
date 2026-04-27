@@ -1,11 +1,46 @@
 # ADR-001: In-JVM AWTEventListener Dialog Dispatcher
 
-**Status:** Proposed — not executing until trigger conditions are met (see below).
-**Date:** 2026-04-16
+**Status:** Partially superseded by v0.5.12 (see "v0.5.12 update"
+below). The remaining out-of-scope dialogs (post-login config, 2FA
+late-arrival ping-pong) are still candidates for the dispatcher
+pattern if they show up as production failures, but the cold-start
+deadlock that originally motivated this ADR has been resolved by a
+simpler approach: disabling the AT-SPI bridge in the JVM entirely.
+**Date:** 2026-04-16 (original) / 2026-04-27 (v0.5.12 update)
 **Context at time of writing:** v0.4.1 shipped earlier today with in-JVM
 relogin (`attempt_inplace_relogin`) and dual-loop CCP-lockout /
 stuck-connecting detection. This ADR captures the next architectural step
 so it can be executed without re-researching.
+
+## v0.5.12 update (2026-04-27)
+
+The cold-start "stuck at Connecting…" / `CCP LOCKOUT DETECTED`
+failure that motivated the LoginDialogHandler priority of this ADR
+turned out to be an **intra-JVM `AtkWrapper` deadlock**, not a
+pyatspi-tree-walk timing issue. SIGQUIT thread dumps showed
+`JTS-Login-*` parked in `AtkUtil.invokeInSwing.get()` while
+`AWT-EventQueue-1` was itself stuck at `AtkWrapper$6.dispatchEvent`
+holding the same monitor reentrantly. java-atk-wrapper's
+java↔native bridge is not safe for re-entrant Swing event dispatch.
+
+v0.5.12 fixes this by **disabling the AT-SPI bridge** via
+`-Djavax.accessibility.assistive_technologies=` (empty value). The
+`AtkWrapper` class is never instantiated; the deadlock is
+structurally impossible. As a coupled change, `handle_login()` and
+`find_app()` were rewritten to use the existing
+`gateway-input-agent` socket exclusively (it's pure Swing/AWT —
+unaffected by the bridge disable). The pyatspi tree-walk path is no
+longer used in the cold-start hot path.
+
+This means the ADR's headline win — eliminating Python's pyatspi
+dependency for cold-start dialogs — has effectively happened
+already, but via a simpler route than the proposed
+AWTEventListener+DialogHandler infrastructure. The remaining trigger
+conditions (post-login config dialog, 2FA late-arrival, dialog
+internals breaking on Gateway 10.46+) are still valid; the
+dispatcher pattern is the right answer if any of those become
+production blockers. Until then, the agent-socket route used in
+v0.5.12 covers the hot path.
 
 ## Decision
 

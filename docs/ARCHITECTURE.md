@@ -65,6 +65,21 @@ container.
 
 ### 3. AT-SPI2 infrastructure (`at-spi-bus-launcher` + `at-spi2-registryd`)
 
+> **v0.5.12: the JVM no longer connects to AT-SPI.** The
+> `org.GNOME.Accessibility.AtkWrapper` bridge ships an AWT
+> property-change listener whose `emitSignal` JNI re-entry deadlocks
+> on a single Swing dispatch (see CHANGELOG.md v0.5.12). v0.5.12
+> disables the bridge by passing
+> `-Djavax.accessibility.assistive_technologies=` (empty value) to
+> the JVM. The AT-SPI infrastructure described below is **still
+> launched** because matchbox-WM and Xvfb expect it to be present,
+> but the JVM does not register with the desktop tree, and the
+> Python controller's discovery + login-UI code paths route
+> exclusively through the in-JVM `gateway-input-agent` socket
+> (see section 6 below). The `Atspi.get_desktop(0)` path described
+> here remains accurate for *how the bus would be reached*, but
+> Gateway's application no longer appears there.
+
 AT-SPI2 actually uses **two** buses: the normal D-Bus session bus, and
 a **separate accessibility bus** managed by `at-spi-bus-launcher`.
 Applications (like Gateway's JVM) find the accessibility bus via the
@@ -82,6 +97,16 @@ After this, Python's `Atspi.get_desktop(0)` returns something useful
 and Gateway's application appears in the tree.
 
 ### 4. Java accessibility configuration in the JRE
+
+> **v0.5.12: this configuration is intentionally inert at runtime.**
+> The Dockerfile still writes `accessibility.properties` and copies
+> `libatk-wrapper.so` into `$JAVA_HOME/lib/` (we keep it for
+> reproducibility against the upstream `gnzsnz/ib-gateway` image),
+> but the controller passes `-Djavax.accessibility.assistive_technologies=`
+> to the JVM, which overrides the file-based setting and skips
+> `AtkWrapper` instantiation. The configuration below is what the
+> JRE *would* load if the override were removed — kept here as
+> reference for anyone restoring the bridge.
 
 Gateway's bundled JRE needs to load `org.GNOME.Accessibility.AtkWrapper`
 as an assistive technology at startup. This requires two things:
