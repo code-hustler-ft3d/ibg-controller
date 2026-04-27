@@ -2546,6 +2546,36 @@ def _escalate_to_jvm_restart(reason):
             "recovery is to halt and let an operator investigate. Set "
             "CCP_LOCKOUT_MAX_JVM_RESTARTS to a positive integer to "
             "restore the pre-v0.5.9 auto-restart loop.")
+        # 2026-04-27: attempt clean logout BEFORE sys.exit so the IBKR
+        # session slot is released cleanly. Without this, the JVM is
+        # orphan-killed by docker process-tree teardown on container exit
+        # (SIGKILL), which strands the slot for hours and creates an
+        # infinite restart cascade under restart: on-failure. The disposed-
+        # login-frame state still has a top-level "IBKR Gateway" main
+        # window (see _looks_like_disposed_shell), so WINDOW_CLOSING via
+        # the input agent fires Gateway's WindowListener and triggers a
+        # proper CCP session-close.
+        if GATEWAY_PROC is not None and GATEWAY_PROC.poll() is None:
+            pid = GATEWAY_PROC.pid
+            clean_success, clean_status, clean_reason = _attempt_clean_logout()
+            log.info(
+                f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
+                f"status={clean_status} reason=\"{clean_reason}\"")
+            if not clean_success:
+                # Fallback: SIGTERM the JVM directly so it gets a chance
+                # to run its shutdown hook (which sends an IBKR-protocol
+                # session-close) before docker SIGKILLs it on container
+                # exit. 30s grace matches _teardown_jvm_for_restart.
+                log.warning(
+                    "Clean logout failed; falling back to JVM SIGTERM "
+                    "with 30s grace before sys.exit")
+                try:
+                    GATEWAY_PROC.terminate()
+                    GATEWAY_PROC.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    log.error(
+                        "JVM did not exit within 30s of SIGTERM; "
+                        "docker will SIGKILL it after we sys.exit")
         # Stable grep token for external monitoring. Emitted exactly once
         # per terminal halt. See docs/OBSERVABILITY.md for the grep-contract.
         log.error(
@@ -3743,7 +3773,13 @@ _JVM_TEARDOWN_GRACE_SECONDS = int(os.environ.get("JVM_TEARDOWN_GRACE_SECONDS", "
 # versions observed in testing ("IB Gateway", "IBKR IB Gateway").
 # The agent's findWindowByTitleSubstring() takes a substring match,
 # so any stable fragment works.
-_GATEWAY_MAIN_WINDOW_TITLE_SUBSTR = "IB Gateway"
+# 2026-04-27: widened from "IB Gateway" to "Gateway" — observed window
+# title in 10.45.1c is "IBKR Gateway" (no space after IB), so the prior
+# substring missed it and clean logout fell through to SIGTERM. "Gateway"
+# is the stable fragment across all known title variants and is not a
+# substring of any other top-level window title (auth dialogs are
+# "Authenticating...", "Second Factor Authentication", etc.).
+_GATEWAY_MAIN_WINDOW_TITLE_SUBSTR = "Gateway"
 
 # v0.5.6: How long to wait for the JVM to exit cleanly after driving a
 # WINDOW_CLOSING event to Gateway's main frame. Gateway's registered
