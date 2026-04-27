@@ -49,7 +49,7 @@ from zoneinfo import ZoneInfo
 import gi
 
 
-__version__ = "0.5.10"
+__version__ = "0.5.11"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
