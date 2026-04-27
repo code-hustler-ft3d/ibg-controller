@@ -40,6 +40,26 @@ for the verification recipe. For reproducible deployments, pin to a
 digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
 digest is printed in each release's CI log.
 
+> **IMPORTANT: required consumer config (v0.5.11+).** If you run
+> ibg-controller under `docker compose`, you **must** set
+> `stop_grace_period: 90s` on the `ib-gateway` service. Docker's
+> default of 10s is too short for the clean-logout chain to complete
+> and you will strand IBKR session slots on every container restart.
+> See [`docs/MIGRATION.md`](docs/MIGRATION.md#shutdown-grace-period)
+> for the timing math.
+>
+> ```yaml
+> services:
+>   ib-gateway:
+>     image: ghcr.io/code-hustler-ft3d/ibg-controller:latest
+>     stop_grace_period: 90s   # required — see MIGRATION.md
+>     environment:
+>       TRADING_MODE: paper
+>       TWS_SERVER_PAPER: cdc1.ibllc.com
+>       USE_PYATSPI2_CONTROLLER: "yes"
+>       # ... your other env vars
+> ```
+
 If you'd rather build the image yourself (or compose ibg-controller
 into a larger image of your own):
 

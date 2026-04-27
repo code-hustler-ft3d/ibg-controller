@@ -4,6 +4,66 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.11] - 2026-04-27
+
+### Fixed
+
+- **The v0.5.6 clean-logout pipeline never actually worked
+  end-to-end before this release.** Two latent bugs masked it:
+  - **`docker/run.sh` shutdown sequence was upside-down.**
+    `stop_ibc()` killed Xvfb / AT-SPI / socat / x11vnc *before*
+    SIGTERMing the gateway controllers. By the time the controller's
+    shutdown handler tried to drive a clean logout via
+    `_attempt_clean_logout`, AWT's `WINDOW_CLOSING` dispatch had no
+    live X11 connection to deliver to Gateway's `WindowListener` and
+    the JVM hung on the dead AWT EventQueue until docker SIGKILLed it.
+    Reordered: SIGTERM controllers FIRST, wait up to 60s for clean
+    logout + JVM exit, then tear down X11 / AT-SPI / socat / x11vnc.
+  - **`_GATEWAY_MAIN_WINDOW_TITLE_SUBSTR` was too narrow.** Was
+    `"IB Gateway"` (with a space), but Gateway 10.45.1c's actual main
+    window title is `"IBKR Gateway"` (no space after IB), so the
+    `findWindowByTitleSubstring` lookup missed every time and clean
+    logout fell through to SIGTERM. Widened to `"Gateway"` — the
+    stable fragment across all observed variants, and not a substring
+    of any other top-level window title (auth dialogs are
+    `Authenticating...`, `Second Factor Authentication`, etc.).
+- **`_escalate_to_jvm_restart` halt path now drives clean logout
+  before `sys.exit(1)`.** Under the v0.5.9 halt-by-default behavior
+  (`CCP_LOCKOUT_MAX_JVM_RESTARTS=0`), the controller exited without
+  closing Gateway, so docker SIGKILLed the JVM as part of the
+  container process-tree teardown. That stranded the IBKR session
+  slot for hours and produced a restart-cascade under
+  `restart: on-failure`. Now: call `_attempt_clean_logout` first (the
+  disposed-login-frame state still carries a top-level Gateway main
+  window, so `WINDOW_CLOSING` reaches Gateway's `WindowListener` and
+  triggers a real CCP session-close); if that fails, fall back to
+  `GATEWAY_PROC.terminate()` with a 30s wait so the JVM at least gets
+  to run its shutdown hook before docker SIGKILLs it.
+
+### Added
+
+- **First observed clean shutdown — validation evidence.** Today's
+  shutdown produced:
+  ```
+  ALERT_CLEAN_LOGOUT mode=live pid=36 status=succeeded
+    reason="JVM exited cleanly within 15s of WINDOW_CLOSING"
+  ALERT_SHUTDOWN     mode=live signal=SIGTERM graceful=true
+  ```
+  Prior to v0.5.11 the `ALERT_CLEAN_LOGOUT` token only emitted with
+  `status=failed_timeout` or `status=failed_unreachable` — every
+  other shutdown left a stranded session.
+
+### Docs
+
+- **README quickstart**: new "IMPORTANT: required consumer config"
+  callout. Compose users must set `stop_grace_period: 90s` on the
+  `ib-gateway` service. Docker's default of 10s is too short for the
+  clean-logout chain (60s controller wait + 15s × 2 instances of
+  `_CLEAN_LOGOUT_TIMEOUT_SECONDS` + JVM shutdown hook + IBKR
+  FIN-ACK margin).
+- **`docs/MIGRATION.md`**: new "Shutdown grace period" section with
+  the full timing math and a worked compose snippet.
+
 ## [0.5.10] - 2026-04-21
 
 ### Fixed

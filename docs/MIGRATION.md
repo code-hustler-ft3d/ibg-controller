@@ -207,6 +207,64 @@ If you need these, keep IBC for now.
   `TWOFACTOR_CODE`. IB Key push device support is impossible from a
   headless container.
 
+## Shutdown grace period
+
+**Required for v0.5.11 and later.** If you run ibg-controller under
+`docker compose`, set `stop_grace_period: 90s` on the `ib-gateway`
+service. The default of 10s is too short — docker will SIGKILL the
+container before the clean-logout chain finishes, and IBKR will hold
+the brokerage session slot open for hours after every restart.
+
+```yaml
+services:
+  ib-gateway:
+    image: ghcr.io/code-hustler-ft3d/ibg-controller:latest
+    stop_grace_period: 90s
+    environment:
+      TRADING_MODE: both
+      USE_PYATSPI2_CONTROLLER: "yes"
+      # ... rest of your config
+```
+
+### Why 90 seconds
+
+When docker sends SIGTERM, `run.sh`'s `stop_ibc()` walks this
+sequence (v0.5.11+):
+
+| Step | Budget | What happens |
+|---|---|---|
+| 1. SIGTERM controllers | up to 60s | Each controller calls `_attempt_clean_logout()`, which uses the in-JVM input agent to dispatch a `WINDOW_CLOSING` AWT event to Gateway's main window. Gateway's `WindowListener` runs a real CCP session-close handshake and the JVM exits. Per-controller timeout `_CLEAN_LOGOUT_TIMEOUT_SECONDS = 15s` per instance — in dual mode (`TRADING_MODE=both`) two instances run sequentially, so 30s of clean-logout is normal. The 60s outer budget covers JVM shutdown-hook work that runs after the WindowListener returns. |
+| 2. Tear down x11vnc / Xvfb / AT-SPI / socat | a few seconds | Only after controllers have exited (or 60s elapsed). |
+| 3. IBKR FIN-ACK margin | a few seconds | Server-side acknowledgement of the session-close TCP teardown. |
+
+**Total budget: ~90s.** Setting `stop_grace_period: 90s` matches that
+budget. Setting it lower means docker SIGKILLs the container partway
+through step 1, the WindowListener never gets to run, and IBKR
+treats the session as a network drop rather than a clean logout —
+holding the slot open until the server-side timeout (>15 min).
+
+If you're running single-mode (`TRADING_MODE=live` *or*
+`TRADING_MODE=paper`, not both), 60s would technically suffice, but
+we recommend keeping 90s for symmetry with dual-mode and for the
+FIN-ACK margin.
+
+### How to verify clean shutdown is working
+
+After running `docker compose stop` (or sending SIGTERM directly),
+your container logs should include:
+
+```
+ALERT_CLEAN_LOGOUT mode=<live|paper> pid=<n> status=succeeded
+  reason="JVM exited cleanly within 15s of WINDOW_CLOSING"
+ALERT_SHUTDOWN     mode=<live|paper> signal=SIGTERM graceful=true
+```
+
+If you see `status=failed_timeout`, `status=failed_unreachable`, or
+no `ALERT_CLEAN_LOGOUT` line at all, the slot probably leaked. Check
+that `stop_grace_period: 90s` is set and that you're running
+v0.5.11+ (the underlying clean-logout pipeline didn't actually work
+end-to-end before that release — see CHANGELOG.md).
+
 ## Testing the migration
 
 1. Build your Docker image with the new Dockerfile.
