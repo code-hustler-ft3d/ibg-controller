@@ -15,6 +15,36 @@ source "${SCRIPT_PATH}/common.sh"
 stop_ibc() {
 	echo ".> 😘 Received SIGINT or SIGTERM. Shutting down IB Gateway."
 
+	# 2026-04-27 fix: SIGTERM the controllers FIRST so they can drive
+	# clean logout via the AT-SPI input agent BEFORE we tear down the
+	# X server / AT-SPI / socat infrastructure they depend on. The old
+	# order (Xvfb killed first, controllers signalled last) made the
+	# v0.5.6 clean-logout pipeline impossible: AWT's WINDOW_CLOSING
+	# dispatch needs a live X11 connection to fire Gateway's
+	# WindowListener, so by the time the controller's shutdown handler
+	# tried clean logout, AWT EventQueue was blocked on a dead X11
+	# socket and the JVM hung until SIGKILL — stranding the IBKR slot
+	# every container restart.
+	echo ".> Stopping IBC / controller (clean logout phase)."
+	kill -SIGTERM "${pid[@]}" 2>/dev/null || true
+	# Wait up to 60s for controllers to do clean logout + JVM exit.
+	# Per-controller _CLEAN_LOGOUT_TIMEOUT_SECONDS defaults to 15s,
+	# plus JVM shutdown-hook grace; allow margin for both modes.
+	for _i in $(seq 1 60); do
+		_all_done=true
+		for _p in "${pid[@]}"; do
+			if kill -0 "$_p" 2>/dev/null; then
+				_all_done=false
+				break
+			fi
+		done
+		$_all_done && break
+		sleep 1
+	done
+	if ! $_all_done; then
+		echo ".> Controllers did not exit within 60s; proceeding to teardown anyway."
+	fi
+
 	#
 	if pgrep x11vnc >/dev/null; then
 		echo ".> Stopping x11vnc."
@@ -45,11 +75,6 @@ stop_ibc() {
 		# Clean up readiness file
 		rm -f /tmp/gateway_ready
 	fi
-	# Set TERM
-	echo ".> Stopping IBC / controller."
-	kill -SIGTERM "${pid[@]}"
-	# Wait for exit
-	wait "${pid[@]}"
 	# All done.
 	echo ".> Done... $?"
 }
