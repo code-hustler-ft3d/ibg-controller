@@ -88,9 +88,14 @@ jobs:
   smoke-test-image:
     runs-on: ubuntu-24.04
     needs: build-and-test
-    # Smoke-test in a Docker container that mirrors the target
-    # runtime: Python 3 + pyatspi2 + ATK bridge. Verifies the module
-    # loads with the real gi stack (not just mocked sys.modules).
+    # Smoke-test in an environment that matches the shipped image's
+    # runtime layer: python3 plus the gi/Atspi typelib stack the
+    # controller still imports at module load (the AT-SPI runtime path
+    # was retired in v0.5.12 and the bridge install steps in v0.5.13,
+    # but `from gi.repository import Atspi` still happens during
+    # gateway_controller.py import). This catches `import` regressions
+    # against the real gi stack rather than the sys.modules mock the
+    # unit tests use.
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -117,7 +122,7 @@ jobs:
       - name: make
         run: make
 
-      - name: Real-pyatspi2 module-load smoke test
+      - name: Real-gi module-load smoke test
         env:
           TWS_USERID: x
           TWS_PASSWORD: x
@@ -128,6 +133,7 @@ jobs:
           sys.path.insert(0, ".")
           import gateway_controller as gc
           print("module loaded, version check OK")
+          print(f"  version={gc.__version__}")
           print(f"  TRADING_MODE={gc.TRADING_MODE}")
           print(f"  APP_NAME_CANDIDATES={gc.APP_NAME_CANDIDATES}")
           print(f"  SAFE_DISMISS_BUTTONS has {len(gc.SAFE_DISMISS_BUTTONS)} entries")
@@ -175,10 +181,10 @@ jobs:
             -t ibg-controller:matrix-test .
 
       - name: Container-level module-load smoke test
-        # Verify gateway_controller.py imports cleanly against the JRE +
-        # AT-SPI + ATK-bridge wiring inside the built image. Catches
-        # upstream base-image drift (missing libs, changed paths) at CI
-        # time rather than at runtime on a user's host.
+        # Verify gateway_controller.py imports cleanly inside the
+        # built image (python3 + gi + Atspi typelib). Catches upstream
+        # base-image drift (missing libs, changed paths) at CI time
+        # rather than at runtime on a user's host.
         env:
           TWS_USERID: x
           TWS_PASSWORD: x
@@ -190,10 +196,23 @@ jobs:
             ibg-controller:matrix-test \
             -c 'import sys; sys.path.insert(0, "/home/ibgateway/scripts"); import gateway_controller as gc; print(f"OK upstream={gc.__version__} TRADING_MODE={gc.TRADING_MODE}")'
 
-      - name: Verify ATK bridge wiring inside image
-        # accessibility.properties must be present in the Gateway JRE
-        # conf dir, and libatk-wrapper.so must live in the JRE lib dir.
-        # Checks both without starting Gateway itself.
+      - name: Verify AT-SPI bridge stays absent (regression guard)
+        # v0.5.13 removed the JRE accessibility.properties write and
+        # the libatk-wrapper.so copy into JAVA_HOME/lib (and the apt
+        # install of libatk-wrapper-java*). v0.5.12 disabled the
+        # bridge in the JVM after a thread-dump-confirmed deadlock —
+        # see CHANGELOG.md v0.5.12.
+        #
+        # This step guards against three regressions:
+        #   1. A future Dockerfile edit accidentally restoring the
+        #      accessibility.properties write or the .so copy.
+        #   2. The upstream gnzsnz/ib-gateway base image starting to
+        #      ship libatk-wrapper-java pre-installed (which would let
+        #      AtkWrapper load if the Java flag override were ever
+        #      removed).
+        #   3. The JVM-args-level disable
+        #      (-Djavax.accessibility.assistive_technologies=) being
+        #      stripped from gateway_controller.py.
         run: |
           docker run --rm --entrypoint bash ibg-controller:matrix-test -c '
             set -e
@@ -203,8 +222,45 @@ jobs:
             fi
             JAVA_HOME=$(dirname $(dirname "$GW_JAVA"))
             echo "JAVA_HOME=$JAVA_HOME"
-            test -f "$JAVA_HOME/conf/accessibility.properties" \
-              && echo "OK accessibility.properties present"
-            ls "$JAVA_HOME/lib/" | grep -q libatk-wrapper \
-              && echo "OK libatk-wrapper.so in JRE lib dir"
+
+            # 1. accessibility.properties must NOT have been written.
+            if [ -f "$JAVA_HOME/conf/accessibility.properties" ]; then
+              echo "REGRESSION: $JAVA_HOME/conf/accessibility.properties present —"
+              echo "v0.5.13 dropped this write. If the upstream base image now"
+              echo "ships its own copy, audit it before relaxing this guard."
+              cat "$JAVA_HOME/conf/accessibility.properties"
+              exit 1
+            fi
+            echo "OK accessibility.properties absent from JRE conf dir"
+
+            # 2. libatk-wrapper.so must NOT be in the JRE lib dir.
+            if ls "$JAVA_HOME/lib/" 2>/dev/null | grep -q libatk-wrapper; then
+              echo "REGRESSION: libatk-wrapper.so present in $JAVA_HOME/lib/ —"
+              echo "v0.5.13 dropped the JNI copy step. If the upstream base"
+              echo "now ships it, the AT-SPI bridge could load on a JVM that"
+              echo "does not have the assistive_technologies override."
+              exit 1
+            fi
+            echo "OK libatk-wrapper.so absent from JRE lib dir"
+
+            # 3. The JVM-args-level disable must still be in the controller.
+            #    (Belt-and-suspenders against base-image-shipped JARs.)
+            if ! grep -q -- "-Djavax.accessibility.assistive_technologies=" \
+                 /home/ibgateway/scripts/gateway_controller.py; then
+              echo "REGRESSION: gateway_controller.py no longer passes the"
+              echo "assistive_technologies disable flag — see v0.5.12 CHANGELOG"
+              echo "for the deadlock that motivated it."
+              exit 1
+            fi
+            echo "OK assistive_technologies disable flag still in controller"
+
+            # 4. Sanity: the things v0.5.13 KEPT must still be present.
+            test -f /home/ibgateway/gateway-input-agent.jar \
+              && echo "OK input agent jar in place"
+            test -f /home/ibgateway/scripts/gateway_controller.py \
+              && echo "OK controller python in place"
+            test -x /home/ibgateway/scripts/run.sh \
+              && echo "OK run.sh executable in place"
+            command -v matchbox-window-manager >/dev/null \
+              && echo "OK matchbox-window-manager installed"
           '
