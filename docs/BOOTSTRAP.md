@@ -33,7 +33,7 @@ through the first-run wizard, log in successfully, then grab the generated
 
 ```bash
 docker run --rm --platform linux/arm64 \
-    -e USE_PYATSPI2_CONTROLLER=no  \
+    -e USE_IBG_CONTROLLER=no  \
     -e TWS_USERID=... -e TWS_PASSWORD=... \
     -e TRADING_MODE=live \
     -e VNC_SERVER_PASSWORD=changeme \

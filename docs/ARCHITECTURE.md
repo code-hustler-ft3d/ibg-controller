@@ -7,11 +7,12 @@ look here.
 
 ## The core insight
 
-**The IBC replacement has to be in-process with Gateway's JVM for text
-input, and out-of-process for everything else.**
+**The IBC replacement has to be in-process with Gateway's JVM. The
+Python controller is the brain; an in-JVM Java agent is the only path
+that can actually drive Swing.**
 
 IB Gateway's Swing-based login form rejects every external input
-mechanism we tried:
+mechanism we tried during the initial spike:
 
 | Mechanism | Result |
 |---|---|
@@ -28,19 +29,22 @@ Inside the JVM, **`JTextField.setText()` works instantly**. IBC works
 because it runs as the JVM's main class; Lcstyle's `ibctl` works because
 it uses `-javaagent:` to inject a Java agent. We use the same trick.
 
-**But** everything else — component discovery, button clicks, state
-observation, dialog detection, monitoring for re-auth — works perfectly
-from outside the JVM via AT-SPI2, using the public Swing accessibility
-API.
+We originally drove component discovery and button clicks from the
+Python side via AT-SPI2. v0.5.12 retired that path after the
+java-atk-wrapper bridge was found to deadlock on `JProgressBar.setValue`
+calls during login (intra-JVM, manifest as `CCP LOCKOUT DETECTED`
+warnings — see CHANGELOG.md v0.5.12 for the SIGQUIT thread-dump
+evidence). v0.5.13 removed the AT-SPI install steps and JRE
+configuration from the image entirely.
 
 So the architecture splits:
 - **Python controller, out-of-process**: state machine, monitoring,
-  discovery, button clicks via `Atspi.Action.do_action`. All the logic
-  and the bulk of the code.
-- **Tiny Java agent, in-process**: loaded via `-javaagent:`, exposes
-  a Unix-socket protocol with two operations: "type text into component
-  named X" and "click button named X". ~750 lines of Java, rarely
-  touched.
+  re-auth loop, IBC-compat command server. All the logic and the bulk
+  of the code.
+- **Java agent, in-process**: loaded via `-javaagent:`, exposes a
+  Unix-socket protocol for window discovery, text input, button
+  clicks, JTree navigation, and clean-logout dispatch. ~750 lines of
+  Java.
 
 ## The pieces and why each one is necessary
 
@@ -56,93 +60,30 @@ When we tried to inject events without a WM, they went nowhere. With
 `matchbox-window-manager` (chosen for being tiny and not adding titlebars:
 `matchbox-window-manager -use_titlebar no`), focus routing works.
 
-### 2. D-Bus session bus
+### 2. AT-SPI / ATK / D-Bus — all gone as of v0.5.13
 
-AT-SPI2 uses a D-Bus session bus to publish the `org.a11y.Bus` service
-name. Without a session bus, there's no place for the bus to publish
-itself. `dbus-launch --sh-syntax` produces a fresh session bus for the
-container.
+> **Historical context.** Pre-v0.5.12 the controller drove component
+> discovery and button clicks via Python's `pyatspi2` against
+> Gateway's `org.GNOME.Accessibility.AtkWrapper` Java bridge. That
+> required a D-Bus session bus, the `at-spi-bus-launcher` /
+> `at-spi2-registryd` daemons, the `libatk-wrapper-java*` packages,
+> and a build-time write of `accessibility.properties` + a copy of
+> `libatk-wrapper.so` into `$JAVA_HOME/lib/`.
+>
+> v0.5.12 disabled the bridge in the JVM after a SIGQUIT thread dump
+> showed `AtkWrapper$5.propertyChange` deadlocking on
+> `JProgressBar.setValue` during login (`CCP LOCKOUT DETECTED` was a
+> misnomer — IBKR was never reached). v0.5.13 removed the install
+> steps, the bus daemons, and the JRE accessibility configuration
+> from the image. All component discovery, text input, and clicks
+> now route through the in-JVM agent (see section 4 below). The JVM
+> is still launched with
+> `-Djavax.accessibility.assistive_technologies=` as
+> defense-in-depth in case a base image ships the JAR pre-installed.
+>
+> The full thread-dump and rationale lives in CHANGELOG.md v0.5.12.
 
-### 3. AT-SPI2 infrastructure (`at-spi-bus-launcher` + `at-spi2-registryd`)
-
-> **v0.5.12: the JVM no longer connects to AT-SPI.** The
-> `org.GNOME.Accessibility.AtkWrapper` bridge ships an AWT
-> property-change listener whose `emitSignal` JNI re-entry deadlocks
-> on a single Swing dispatch (see CHANGELOG.md v0.5.12). v0.5.12
-> disables the bridge by passing
-> `-Djavax.accessibility.assistive_technologies=` (empty value) to
-> the JVM. The AT-SPI infrastructure described below is **still
-> launched** because matchbox-WM and Xvfb expect it to be present,
-> but the JVM does not register with the desktop tree, and the
-> Python controller's discovery + login-UI code paths route
-> exclusively through the in-JVM `gateway-input-agent` socket
-> (see section 6 below). The `Atspi.get_desktop(0)` path described
-> here remains accurate for *how the bus would be reached*, but
-> Gateway's application no longer appears there.
-
-AT-SPI2 actually uses **two** buses: the normal D-Bus session bus, and
-a **separate accessibility bus** managed by `at-spi-bus-launcher`.
-Applications (like Gateway's JVM) find the accessibility bus via the
-`org.a11y.Bus.GetAddress` method call on the session bus, which
-`at-spi-bus-launcher` services.
-
-**Don't start `at-spi2-registryd` directly on the session bus** — we
-tried that early in the spike and it silently failed. You need to start
-`at-spi-bus-launcher --launch-immediately`, which will:
-1. Claim `org.a11y.Bus` on the session bus
-2. Spawn a fresh `dbus-daemon` for the accessibility bus
-3. Start `at-spi2-registryd` on the accessibility bus (via D-Bus activation)
-
-After this, Python's `Atspi.get_desktop(0)` returns something useful
-and Gateway's application appears in the tree.
-
-### 4. Java accessibility configuration in the JRE
-
-> **v0.5.12: this configuration is intentionally inert at runtime.**
-> The Dockerfile still writes `accessibility.properties` and copies
-> `libatk-wrapper.so` into `$JAVA_HOME/lib/` (we keep it for
-> reproducibility against the upstream `gnzsnz/ib-gateway` image),
-> but the controller passes `-Djavax.accessibility.assistive_technologies=`
-> to the JVM, which overrides the file-based setting and skips
-> `AtkWrapper` instantiation. The configuration below is what the
-> JRE *would* load if the override were removed — kept here as
-> reference for anyone restoring the bridge.
-
-Gateway's bundled JRE needs to load `org.GNOME.Accessibility.AtkWrapper`
-as an assistive technology at startup. This requires two things:
-
-**a)** A file at `$JAVA_HOME/conf/accessibility.properties` containing:
-```
-assistive_technologies=org.GNOME.Accessibility.AtkWrapper
-```
-
-**b)** The native `libatk-wrapper.so` placed at `$JAVA_HOME/lib/libatk-wrapper.so`
-(not just on `LD_LIBRARY_PATH`). This is because the Java wrapper jar
-is loaded via `-Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar`,
-and `System.loadLibrary("atk-wrapper")` from a boot-classpath class
-searches `sun.boot.library.path` (which is `$JAVA_HOME/lib`) — NOT
-`java.library.path`.
-
-The `libatk-wrapper-java-jni` Ubuntu package ships the .so at
-`/usr/lib/<arch>-linux-gnu/jni/libatk-wrapper.so`. We copy it to
-`$JAVA_HOME/lib/` at build time.
-
-#### JRE path discovery
-
-IB Gateway's JRE lives in different places depending on architecture:
-- **amd64**: install4j-bundled at `/usr/local/i4j_jres/<install-id>/<version>-zulu/`
-  (the install ID is random per-install)
-- **arm64**: system Zulu at `/usr/local/zulu17.<full-version>/`
-  (downloaded as a tarball during the Docker build — no install4j)
-
-The Dockerfile build-time step does:
-```bash
-GW_JAVA=$(find /usr/local/i4j_jres -name java -type f 2>/dev/null | head -1)
-[ -z "$GW_JAVA" ] && GW_JAVA=$(find /usr/local -path "*/zulu*/bin/java" -type f 2>/dev/null | head -1)
-JAVA_HOME=$(dirname $(dirname "$GW_JAVA"))
-```
-
-### 5. Gateway launch via install4j launcher
+### 3. Gateway launch via install4j launcher
 
 The controller launches Gateway via its bundled launcher script at
 `$TWS_PATH/ibgateway/<version>/ibgateway`. That script is generated by
@@ -169,7 +110,7 @@ persistent auth-timeout bug found during initial deployment.
 --add-opens=java.base/java.util=ALL-UNNAMED
 --add-opens=java.desktop/javax.swing=ALL-UNNAMED
 ... (19 module-access flags total)
--Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar
+-Djavax.accessibility.assistive_technologies=
 -DjtsConfigDir=/home/ibgateway/Jts
 -javaagent:/home/ibgateway/gateway-input-agent.jar=/tmp/gateway-input.sock
 ```
@@ -179,9 +120,11 @@ persistent auth-timeout bug found during initial deployment.
   system blocks this by default. These are the same 19 flags IBC's
   `ibcstart.sh` passes; the install4j launcher's `.vmoptions` file
   does not include them.
-- **`-Xbootclasspath/a:`** puts the AT-SPI Java wrapper jar on the boot
-  classpath so the JVM can find `org.GNOME.Accessibility.AtkWrapper`
-  referenced in `accessibility.properties`.
+- **`-Djavax.accessibility.assistive_technologies=`** (empty value)
+  prevents the JRE from instantiating any AT-SPI assistive technology
+  even on a base image that has `libatk-wrapper-java` pre-installed
+  (the controller's own image dropped that package in v0.5.13). See
+  the historical-context block above for why.
 - **`-DjtsConfigDir=`** is also set here as a belt-and-suspenders
   backup to the `-V` flag (in case the install4j launcher doesn't
   support `-V` on some platform).
@@ -189,7 +132,7 @@ persistent auth-timeout bug found during initial deployment.
   after `=` is passed to the agent as its `agentArgs` — we use it to
   pass the Unix socket path.
 
-### 6. The input agent (`gateway-input-agent.jar`)
+### 4. The input agent (`gateway-input-agent.jar`)
 
 ~750 lines of Java. Three core responsibilities (extended with additional commands in v0.2):
 
@@ -197,8 +140,8 @@ persistent auth-timeout bug found during initial deployment.
    client at a time, line-protocol, no concurrency.
 2. **Walk `Window.getWindows()`** recursively via `Container.getComponents()`
    to find Swing components. Search by `AccessibleContext.getAccessibleName()`
-   (matches what Python sees via AT-SPI) OR by window title (for
-   components that have no accessible name — see the 2FA dialog section).
+   OR by window title (for components that have no accessible name — see
+   the 2FA dialog section).
 3. **Dispatch operations on the EDT**: `SwingUtilities.invokeAndWait`
    for `SETTEXT`/`GETTEXT` (synchronous), `SwingUtilities.invokeLater`
    + `Thread.sleep(50)` for `CLICK`. We use `invokeLater` for clicks
@@ -234,16 +177,15 @@ Why each was added:
 
 - **`GET_PID`** — returns `ProcessHandle.current().pid()`. Used by the
   Python controller to disambiguate its own Gateway JVM from any other
-  Gateway JVM in the same container. Dual mode (`TRADING_MODE=both`)
-  runs two Gateway JVMs that both register as "IBKR Gateway" in AT-SPI;
-  `find_app(match_pid=...)` filters to the right one.
+  Gateway JVM in the same container. Critical for dual mode
+  (`TRADING_MODE=both`), where two Gateway JVMs run in parallel.
 - **`JTREE_SELECT_PATH`** — navigates a `JTree` to a slash-separated
   path by matching `node.toString()` at each level, expanding parents
   as it walks. Gateway's ConfigurationTree renders cells on demand via
   a `CellRendererPane` — the cell components aren't real `Container`
-  children, so AT-SPI traversal + `Atspi.Action.do_action` can't reach
-  them. The only way to drive the tree is through the `JTree` model
-  API directly from inside the JVM.
+  children, so external traversal + click can't reach them. The only
+  way to drive the tree is through the `JTree` model API directly from
+  inside the JVM.
 - **`JCHECK`** — idempotent toggle of any `JToggleButton` (covers
   `JCheckBox`, `JRadioButton`, and install4j subclasses) matched by
   accessible name or button text. Reads the current selected state
@@ -257,7 +199,7 @@ Why each was added:
   calls `commitEdit()` on `JFormattedTextField` editors so spinner
   values actually propagate to the underlying model.
 
-### 7. The Python controller (`gateway_controller.py`)
+### 5. The Python controller (`gateway_controller.py`)
 
 ~2000 lines. The state machine, in rough order:
 
@@ -268,16 +210,16 @@ Why each was added:
 2. **Wait for agent**: `agent_wait_ready()` — poll the Unix socket
    until `PING` returns `OK pong`. Then call `GET_PID` and store the
    JVM PID in the `JVM_PID` global.
-3. **Wait for AT-SPI app**: `find_app(APP_NAME_CANDIDATES, timeout=120,
-   match_pid=JVM_PID)` — poll `Atspi.get_desktop(0)` until an
-   application registers with a matching name *and* process ID. The
-   app-name candidate list is `["IBKR Gateway"]` by default, or
-   `["Trader Workstation", "IB Trader Workstation", "TWS"]` when
-   `GATEWAY_OR_TWS=tws`.
-4. **Login**: `handle_login(app)` — find the `password text` role via
-   AT-SPI, detect the login form, select trading mode (via toggle
-   button click), type credentials via the agent, click Log In via
-   `Atspi.Action.do_action`.
+3. **Resolve app handle**: `find_app(APP_NAME_CANDIDATES, timeout=120,
+   match_pid=JVM_PID)` — returns a stub Accessible carrying the
+   agent-reported JVM PID. Pre-v0.5.12 this polled the AT-SPI desktop
+   tree; post-v0.5.12 the JVM doesn't register there, so the function
+   short-circuits to a stub immediately. The handle is just used as a
+   passthrough argument and for logging.
+4. **Login**: `handle_login(app)` — wait for the login frame via
+   `WAIT_LOGIN_FRAME`, select trading mode via `JCHECK`, type
+   credentials via `SETTEXT_LOGIN_USER`/`SETTEXT_LOGIN_PASSWORD`,
+   click Log In via `CLICK`. Entirely agent-driven.
 5. **Post-login dialogs**: `handle_post_login_dialogs(app)` — polls
    up to 6s for any modal to appear, dumps each via `WINDOW`,
    recognizes `Existing session detected` by body text, clicks
@@ -316,9 +258,9 @@ Why each was added:
     after three consecutive port-closed heartbeats + a visible login
     dialog.
 
-### 8. Dual mode (`TRADING_MODE=both`) dispatch (v0.2)
+### 6. Dual mode (`TRADING_MODE=both`) dispatch (v0.2)
 
-When `TRADING_MODE=both` and `USE_PYATSPI2_CONTROLLER=yes`, `run.sh`
+When `TRADING_MODE=both` and `USE_IBG_CONTROLLER=yes`, `run.sh`
 spawns `start_process` twice in sequence — once with live env, then
 with paper env. Each invocation exports distinct per-instance values:
 
@@ -333,8 +275,8 @@ with paper env. Each invocation exports distinct per-instance values:
 Each controller launches its own Gateway JVM in its own
 `JTS_CONFIG_DIR` (`Jts_live` / `Jts_paper`) so both can write to
 `jts.ini`, encrypted state, and `launcher.log` without stepping on
-each other. `find_app(match_pid=...)` uses the per-instance JVM PID
-to pick the right AT-SPI app when both JVMs are registered.
+each other. The agent's `GET_PID` reply lets the Python controller
+identify its own JVM unambiguously.
 
 The legacy `wait_for_controller_ready` behavior (return non-zero
 under `set -Eeo pipefail`) was changed to always return 0 on

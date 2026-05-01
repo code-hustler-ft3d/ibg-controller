@@ -1,4 +1,4 @@
-# Build and package the IB Gateway pyatspi2 controller.
+# Build and package the IB Gateway controller.
 #
 # Targets:
 #   make              — build the agent jar + stage the controller in dist/
@@ -13,7 +13,7 @@
 # Version is overridable on the command line:
 #   make release VERSION=0.2.0
 
-VERSION          ?= 0.5.9
+VERSION          ?= 0.5.13
 NAME             := ibg-controller
 DIST             := dist
 AGENT_SRC        := agent/GatewayInputAgent.java

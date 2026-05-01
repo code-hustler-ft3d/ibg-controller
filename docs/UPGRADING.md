@@ -76,6 +76,45 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.13
+
+**No breaking changes for image consumers.** Image cleanup — drops
+the AT-SPI / ATK install steps and JRE accessibility-bridge
+configuration that v0.5.12 made dead weight. Specifically:
+
+- `Dockerfile` no longer installs `gir1.2-atspi-2.0`-related-only
+  packages (`libatk-wrapper-java`, `libatk-wrapper-java-jni`,
+  `dbus-x11`) or writes `accessibility.properties` /
+  `libatk-wrapper.so` into the JRE. The bridge they served was
+  disabled in v0.5.12 and there are no consumers.
+- `docker/run.sh` no longer starts a D-Bus session bus or
+  `at-spi-bus-launcher` / `at-spi2-registryd`. The `stop_ibc`
+  shutdown sequence drops the matching teardown.
+- `-Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar` is
+  removed from the JVM args (the JAR is no longer in the image).
+  `-Djavax.accessibility.assistive_technologies=` stays in place
+  as defense-in-depth.
+- All user-facing docs (README, MIGRATION, ARCHITECTURE, CONTRIBUTING)
+  now reflect the post-v0.5.12 reality.
+
+**Env-var rename — backwards compatible.** The historical
+`USE_PYATSPI2_CONTROLLER=yes` toggle is renamed to
+`USE_IBG_CONTROLLER=yes`. The old name is honored as a deprecated
+alias and `run.sh` prints a one-line warning at startup so existing
+compose files keep working. Update at your leisure.
+
+**If you build your own image** based on the Dockerfile in this
+repo: the runtime apt-install line shrinks to
+`python3 matchbox-window-manager curl` and the JRE-config `RUN`
+block is gone. Pull the new `Dockerfile` and rebuild. If you've
+forked the Dockerfile, drop the AT-SPI packages and the
+accessibility.properties write yourself when you bring the fork
+forward.
+
+**No operator action required for the prebuilt GHCR image** beyond
+the redeploy. Image size shrinks slightly; nothing changes at
+runtime.
+
 ### v0.5.12
 
 **No breaking changes.** Image-internal fix for the most common

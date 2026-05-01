@@ -12,7 +12,7 @@ make
 make install DESTDIR=/home/ibgateway
 
 # Create a release tarball
-make release VERSION=0.2.1
+make release VERSION=0.5.13
 ```
 
 Requires JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
@@ -22,15 +22,17 @@ Requires JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 See `docs/ARCHITECTURE.md` for the full list and why each is needed.
 The short version:
 
-- `python3 python3-gi gir1.2-atspi-2.0` — Python AT-SPI2 bindings
-- `at-spi2-core` — provides `at-spi-bus-launcher` and `at-spi2-registryd`
-- `libatk-wrapper-java libatk-wrapper-java-jni` — bridges Swing ↔ AT-SPI
-- `dbus-x11` — for `dbus-launch`
-- `matchbox-window-manager` — Xvfb has no WM by default; synthetic
-  input routing needs a focus owner
-- The JRE needs `$JAVA_HOME/conf/accessibility.properties` pointing at
-  `org.GNOME.Accessibility.AtkWrapper`, and `libatk-wrapper.so` placed
-  at `$JAVA_HOME/lib/libatk-wrapper.so` (NOT on `LD_LIBRARY_PATH`)
+- `python3` — runs `gateway_controller.py`
+- `matchbox-window-manager` — Xvfb has no WM by default; Gateway's
+  input routing depends on a focused window
+
+Pre-v0.5.13 the image also installed `python3-gi gir1.2-atspi-2.0
+at-spi2-core libatk-wrapper-java libatk-wrapper-java-jni dbus-x11` and
+configured `$JAVA_HOME/conf/accessibility.properties`. v0.5.12 disabled
+the AT-SPI bridge in the JVM (it was deadlocking on Swing dispatch);
+v0.5.13 removed the install steps. If you're rebasing from an older
+fork, drop those packages and the JRE accessibility.properties write
+when you bring your image forward.
 
 ## Code layout
 
@@ -96,8 +98,9 @@ What this tool is NOT:
 - A trading framework
 
 If you want to use this outside Docker, it should mostly work — but
-the ATK bridge setup in your JRE and the AT-SPI session bus are the
-main things you'd need to replicate manually. See `docs/ARCHITECTURE.md`.
+you'll need an X display (Xvfb is the easy answer) and a window
+manager (matchbox is what the shipped image uses). See
+`docs/ARCHITECTURE.md`.
 
 ## Questions
 

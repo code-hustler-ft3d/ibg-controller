@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
-IB Gateway Controller — pyatspi2-based replacement for IBC.
+IB Gateway Controller — Python + in-JVM Java agent replacement for IBC.
 
 Single-file controller that:
-  1. Launches IB Gateway directly via its install4j launcher with the
-     ATK accessibility bridge enabled.
-  2. Walks Gateway's Swing component tree via AT-SPI2 to drive the
-     login dialog, 2FA dialog, and configuration dialogs.
-  3. Verifies every action by reading state back through the same tree.
+  1. Launches IB Gateway directly via its install4j launcher.
+  2. Drives the login dialog, 2FA dialog, and configuration dialogs via
+     an in-JVM Java agent (loaded with -javaagent:) that exposes Swing
+     operations over a Unix domain socket.
+  3. Verifies every action by reading state back through the same agent.
   4. Signals readiness via /tmp/gateway_ready so socat starts only AFTER
      login succeeds and the main window is up.
   5. Stays alive monitoring the JVM and watching for re-auth events.
 
-Why pyatspi2 and not xdotool: xdotool synthesizes X events but can't
-verify components actually received them. AT-SPI2 exposes the live Swing
-component tree (same approach IBC uses internally), so every action can
-be verified by reading state back. No pixel coordinates, no screen
-scraping.
+Why an in-JVM agent and not xdotool: xdotool synthesizes X events but
+Swing's AWT subsystem filters them. AT-SPI2 (the original approach) was
+abandoned in v0.5.12 after the java-atk-wrapper bridge was found to
+deadlock on JProgressBar.setValue calls during login. The agent uses
+Swing's own JTextField.setText() / AbstractButton.doClick() and reads
+state back via the same APIs — the only mechanisms that actually work
+against Gateway's hardened login form.
 
 Why a single Python file: the upstream maintainer (gnzsnz) doesn't write
 Java or Rust, and wants something he can read, debug, and patch when IB
-ships a new dialog on a Friday night. Python with stdlib + pyatspi2 hits
-that bar.
+ships a new dialog on a Friday night. Python stdlib + a small in-JVM
+agent hits that bar.
 
 Reference material: Lcstyle's ibctl (https://github.com/Lcstyle/ibctl)
 for dialog catalog and edge cases. Original work by @rlktradewright (IBC).
@@ -49,7 +51,7 @@ from zoneinfo import ZoneInfo
 import gi
 
 
-__version__ = "0.5.12"
+__version__ = "0.5.13"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -1197,9 +1199,14 @@ def launch_gateway():
         "--add-opens=jdk.management/com.sun.management.internal=ALL-UNNAMED",
     ]
     vm_params = module_access + [
-        # v0.5.12: disable the AT-SPI java-atk-wrapper bridge.
+        # v0.5.12: disable the AT-SPI java-atk-wrapper bridge as
+        # defense-in-depth. v0.5.13 removed the bridge JAR from the
+        # image entirely (so AtkWrapper has no class to load anyway),
+        # but we still set the property to an empty value so the JRE's
+        # own accessibility-property-file lookup never tries to
+        # instantiate it on a base image that ships the JAR pre-installed.
         #
-        # The bridge ships an AWT property-change listener
+        # Background: the bridge ships an AWT property-change listener
         # (AtkWrapper$5.propertyChange) that fires on every component
         # property update — including JProgressBar.setValue calls from
         # IBKR's "Connecting…" welcome screen during login. The listener's
@@ -1212,19 +1219,13 @@ def launch_gateway():
         # connection-state lock; JTS-CCPListenerS2 can't dispatch the
         # NS_AUTH_START response from IBKR; the controller times out
         # after 20 s and emits a misleading CCP LOCKOUT alert.
-        #
-        # Verified by SIGQUIT thread dump 2026-04-27.  Disabling the
-        # assistive_technologies system property prevents the JRE from
-        # instantiating AtkWrapper, so neither listener gets installed.
-        # The bootclasspath jar is left in place so that any code that
-        # imports the class explicitly still resolves.
+        # Verified by SIGQUIT thread dump 2026-04-27.
         #
         # All login-UI interaction (set credentials, click Log In, toggle
         # Live/Paper) goes through the in-JVM gateway-input-agent, which
         # uses pure Swing/AWT (Window.getWindows + SwingUtilities) and
         # does NOT depend on AT-SPI for any of its work.
         "-Djavax.accessibility.assistive_technologies=",
-        "-Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar",
         f"-DjtsConfigDir={JTS_CONFIG_DIR}",
     ]
     if os.path.exists(AGENT_JAR):

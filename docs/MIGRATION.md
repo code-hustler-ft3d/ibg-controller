@@ -4,11 +4,11 @@ This document covers swapping IBC for `ibg-controller` inside a
 [gnzsnz/ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker)-style
 image. If you're running vanilla IBC today, the swap requires:
 
-- Adding a few runtime packages to your Docker image
+- Adding a couple of runtime packages to your Docker image
 - Compiling and installing the controller in your Dockerfile (or
   downloading a release)
 - Setting one new env var (`TWS_SERVER`) for the bootstrap
-- Flipping one flag (`USE_PYATSPI2_CONTROLLER=yes`) at runtime
+- Flipping one flag (`USE_IBG_CONTROLLER=yes`) at runtime
 
 Existing env vars (`TWS_USERID`, `TWS_PASSWORD`, `TRADING_MODE`,
 `TWOFACTOR_CODE`, `EXISTING_SESSION_DETECTED_ACTION`, etc.) work
@@ -49,70 +49,46 @@ RUN apt-get update -y && \
   apt-get upgrade -y && \
   apt-get install --no-install-recommends --yes \
   gettext-base socat xvfb x11vnc sshpass openssh-client sudo telnet \
-  python3 python3-gi gir1.2-atspi-2.0 at-spi2-core \
-  libatk-wrapper-java libatk-wrapper-java-jni dbus-x11 \
-  matchbox-window-manager && \
+  python3 matchbox-window-manager && \
   ...
 ```
 
 The new runtime packages:
-- `python3` + `python3-gi` + `gir1.2-atspi-2.0` — Python AT-SPI bindings
-- `at-spi2-core` — provides `at-spi-bus-launcher` and `at-spi2-registryd`
-- `libatk-wrapper-java` + `libatk-wrapper-java-jni` — bridges Swing to AT-SPI
-- `dbus-x11` — the `dbus-launch` utility
-- `matchbox-window-manager` — a minimal window manager (Xvfb has no WM
-  by default, and synthetic input handling needs a focus owner)
+- `python3` — runs `gateway_controller.py`
+- `matchbox-window-manager` — a minimal window manager (Xvfb has no
+  WM by default and Gateway's input routing depends on a focus owner)
 
-### JRE configuration at build time
-
-```dockerfile
-# Configure the Java accessibility bridge into Gateway's JRE.
-# Handles both amd64 (install4j-bundled JRE at /usr/local/i4j_jres/...)
-# and arm64 (system Zulu JRE at /usr/local/zulu17.*).
-RUN GW_JAVA=$(find /usr/local/i4j_jres -name java -type f 2>/dev/null | head -1); \
-  if [ -z "$GW_JAVA" ]; then \
-    GW_JAVA=$(find /usr/local -path "*/zulu*/bin/java" -type f 2>/dev/null | head -1); \
-  fi; \
-  if [ -z "$GW_JAVA" ]; then \
-    echo "ERROR: no Gateway JRE found"; exit 1; \
-  fi; \
-  JAVA_HOME=$(dirname $(dirname "$GW_JAVA")); \
-  echo "assistive_technologies=org.GNOME.Accessibility.AtkWrapper" \
-    > "$JAVA_HOME/conf/accessibility.properties"; \
-  JNI_SO=$(find /usr -name "libatk-wrapper.so*" -type f 2>/dev/null | head -1); \
-  cp "$JNI_SO" "$JAVA_HOME/lib/"
-```
-
-Writes `accessibility.properties` into the JRE's `conf/` directory and
-copies `libatk-wrapper.so` into the JRE's `lib/` directory. Both are
-required for Gateway's JVM to load the AT-SPI bridge at startup. See
-[ARCHITECTURE.md](ARCHITECTURE.md) for why the .so has to live in the
-JRE lib (and not just on `LD_LIBRARY_PATH`).
+> **No JRE accessibility-bridge setup is required.** Pre-v0.5.13 the
+> image installed `python3-gi gir1.2-atspi-2.0 at-spi2-core
+> libatk-wrapper-java libatk-wrapper-java-jni dbus-x11` and wrote
+> `$JAVA_HOME/conf/accessibility.properties` so the JVM could load
+> the AT-SPI `AtkWrapper` bridge for component discovery. v0.5.12
+> disabled the bridge after it was found to deadlock on
+> `JProgressBar.setValue` calls during login (intra-JVM, not
+> broker-side); v0.5.13 removed the install steps entirely. All UI
+> work now goes through the in-JVM agent socket. If you're rebasing
+> from a fork that has the old install block, drop it.
 
 ## What changes in `run.sh`
 
-The gnzsnz `run.sh` gains a branch: when `USE_PYATSPI2_CONTROLLER=yes`,
-start the AT-SPI infrastructure and launch the controller instead of IBC.
+The gnzsnz `run.sh` gains a branch: when `USE_IBG_CONTROLLER=yes`,
+start the window manager and launch the controller instead of IBC.
 When unset, fall through to the IBC path unchanged. Full diff:
 
 ```bash
 # New helper functions
-start_dbus_session() { ... }    # dbus-launch + export
-start_atspi() { ... }            # at-spi-bus-launcher + at-spi2-registryd
-start_window_manager() { ... }   # matchbox-window-manager
-start_controller() { ... }       # python3 gateway_controller.py
-wait_for_controller_ready() { ... } # block on /tmp/gateway_ready
+start_window_manager() { ... }       # matchbox-window-manager
+start_controller() { ... }           # python3 gateway_controller.py
+wait_for_controller_ready() { ... }  # block on /tmp/gateway_ready
 
 # In the Common Start section, after start_xvfb:
-if [ "$USE_PYATSPI2_CONTROLLER" = "yes" ]; then
+if [ "$USE_IBG_CONTROLLER" = "yes" ]; then
     wait_x_socket
     start_window_manager
-    start_dbus_session
-    start_atspi
 fi
 
 # In start_process(), replace the unconditional start_IBC with:
-if [ "$USE_PYATSPI2_CONTROLLER" = "yes" ]; then
+if [ "$USE_IBG_CONTROLLER" = "yes" ]; then
     start_controller
     wait_for_controller_ready
     port_forwarding                 # socat starts AFTER readiness
@@ -127,12 +103,20 @@ which fixes a long-standing issue in the IBC path where socat races the
 Gateway login and the first few API client connection attempts hit a
 closed port.
 
+> **Backwards compatibility.** The historical env-var name was
+> `USE_PYATSPI2_CONTROLLER` (the controller used to walk the AT-SPI
+> desktop tree via pyatspi). `run.sh` honors the old name as a
+> deprecated alias and prints a one-line warning at startup so
+> existing compose files keep working. Rename to `USE_IBG_CONTROLLER`
+> at your leisure.
+
 ## What changes at runtime
 
 ### New env vars
 
-- **`USE_PYATSPI2_CONTROLLER=yes`** — opts into the new path. Default
-  (unset) uses IBC as before.
+- **`USE_IBG_CONTROLLER=yes`** — opts into the new path. Default
+  (unset) uses IBC as before. The historical name
+  `USE_PYATSPI2_CONTROLLER=yes` is still honored as a deprecated alias.
 - **`TWS_SERVER`** / **`TWS_SERVER_PAPER`** — your IBKR regional server.
   See [BOOTSTRAP.md](BOOTSTRAP.md) for how to find it.
 
@@ -187,8 +171,8 @@ Reconnect Data menu item) and dispatches against TWS.
 ### Honored by v0.2 — product selector
 
 - **`GATEWAY_OR_TWS`** — `gateway` (default) or `tws`. Switches
-  launcher discovery and AT-SPI app-name search. TWS live validation
-  is pending a TWS-with-controller Dockerfile variant.
+  launcher discovery and the agent's window-title match. TWS live
+  validation is pending a TWS-with-controller Dockerfile variant.
 
 ### Env vars NOT honored (still not implemented)
 
@@ -222,7 +206,7 @@ services:
     stop_grace_period: 90s
     environment:
       TRADING_MODE: both
-      USE_PYATSPI2_CONTROLLER: "yes"
+      USE_IBG_CONTROLLER: "yes"
       # ... rest of your config
 ```
 
@@ -234,7 +218,7 @@ sequence (v0.5.11+):
 | Step | Budget | What happens |
 |---|---|---|
 | 1. SIGTERM controllers | up to 60s | Each controller calls `_attempt_clean_logout()`, which uses the in-JVM input agent to dispatch a `WINDOW_CLOSING` AWT event to Gateway's main window. Gateway's `WindowListener` runs a real CCP session-close handshake and the JVM exits. Per-controller timeout `_CLEAN_LOGOUT_TIMEOUT_SECONDS = 15s` per instance — in dual mode (`TRADING_MODE=both`) two instances run sequentially, so 30s of clean-logout is normal. The 60s outer budget covers JVM shutdown-hook work that runs after the WindowListener returns. |
-| 2. Tear down x11vnc / Xvfb / AT-SPI / socat | a few seconds | Only after controllers have exited (or 60s elapsed). |
+| 2. Tear down x11vnc / Xvfb / matchbox / socat | a few seconds | Only after controllers have exited (or 60s elapsed). |
 | 3. IBKR FIN-ACK margin | a few seconds | Server-side acknowledgement of the session-close TCP teardown. |
 
 **Total budget: ~90s.** Setting `stop_grace_period: 90s` matches that
@@ -269,7 +253,7 @@ end-to-end before that release — see CHANGELOG.md).
 
 1. Build your Docker image with the new Dockerfile.
 2. Keep your existing `docker-compose.yml` — add
-   `USE_PYATSPI2_CONTROLLER: yes` and `TWS_SERVER: <your-server>` to the
+   `USE_IBG_CONTROLLER: yes` and `TWS_SERVER: <your-server>` to the
    environment section.
 3. Leave all existing env vars as-is.
 4. `docker compose up -d` and watch logs.
@@ -320,7 +304,7 @@ end-to-end before that release — see CHANGELOG.md).
 
 ## Rolling back
 
-If the controller fails for you, flip `USE_PYATSPI2_CONTROLLER` back to
+If the controller fails for you, flip `USE_IBG_CONTROLLER` back to
 unset (or `no`). The image still contains IBC and all its dependencies.
 `run.sh`'s default branch uses IBC unchanged.
 
