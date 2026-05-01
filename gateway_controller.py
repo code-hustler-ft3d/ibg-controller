@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.6.1"
+__version__ = "0.6.2"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -1818,32 +1818,101 @@ def _config_open():
     """Open the Configure → Settings dialog. Idempotent — returns True
     whether it's newly opened or was already open. Returns False if the
     dialog couldn't be opened (e.g. main window not in a state to
-    accept menu input)."""
+    accept menu input).
+
+    v0.6.2: hardened against a dual-mode-only race that surfaced after
+    v0.6.1's diagnostic logging revealed it. Live mode transitions
+    API_WAIT → CONFIG within ~3 s of the API port opening, with the
+    EDT still processing post-2FA tear-down (modal=true 2FA dialog
+    being disposed, "Authenticating..." overlay being torn down).
+    Paper mode, which skips 2FA, hits the same code path with a
+    quiescent EDT.
+
+    Symptoms (pre-v0.6.2): agent CLICK 'Configure' returns OK (the
+    JMenu's selected property flips), but the JPopupMenu's heavyweight
+    peer window hasn't been realized by the time the follow-up
+    CLICK 'Settings' walks Window.getWindows(). The agent reports
+    ``ERR not_found type=button name=Settings`` and post-login config
+    silently fails on live but works on paper.
+
+    Three changes:
+
+    1. Wait for the post-login window stack to settle before clicking
+       Configure — no modal dialogs visible, no "Authenticating..."
+       window present. Bounded so we eventually proceed even on
+       Gateway showing a transitional window we haven't explicitly
+       named.
+    2. Inter-click delay between Configure and Settings raised from
+       0.3 s to 1.0 s. That's the time the EDT needs to realize the
+       JPopupMenu's heavyweight peer window when it's coming out of
+       a busy state. Empirically 0.3 s was enough on a quiescent EDT
+       (paper) and not enough on a busy one (live post-2FA).
+    3. Outer retry: up to 3 attempts to open the dialog, with a 1 s
+       gap between attempts. Backstop for any other transient.
+    """
     # Check if it's already open
     windows = agent_windows() or []
     if any(CONFIG_WINDOW_TITLE_SUBSTR in title for _, title, _ in windows):
         return True
 
-    # Click the Configure menu first. In the post-login main window
-    # this is a JMenu in a JMenuBar. Clicking it via doClick() in the
-    # agent exposes its child JMenuItems as findable AbstractButtons
-    # even though the popup isn't shown on screen.
-    if not agent_click("Configure"):
-        log.warning("Could not click Configure menu")
-        return False
-    time.sleep(0.3)
-    # Now click Settings inside the (conceptually open) Configure menu.
-    # This opens the Trader Workstation Configuration dialog.
-    if not agent_click("Settings"):
-        log.warning("Could not click Settings menu item")
-        return False
-    # Give Gateway a moment to render the dialog.
-    for _ in range(20):  # up to 4s
+    # Wait for the post-login window stack to settle. Targets the live
+    # post-2FA transitional state that lingers a second or two past
+    # API-port-open. Returns immediately if already settled.
+    settle_deadline = time.monotonic() + 5.0
+    while time.monotonic() < settle_deadline:
         windows = agent_windows() or []
-        if any(CONFIG_WINDOW_TITLE_SUBSTR in title for _, title, _ in windows):
-            return True
-        time.sleep(0.2)
-    log.warning("Settings dialog did not appear after clicking Configure → Settings")
+        modal_present = any(modal for _, _, modal in windows)
+        authenticating_present = any(
+            "Authenticating" in title for _, title, _ in windows)
+        if not modal_present and not authenticating_present:
+            break
+        time.sleep(0.3)
+    else:
+        log.info(
+            "_config_open: window stack did not fully settle within 5 s; "
+            "attempting Configure → Settings anyway")
+
+    last_failure = "no attempt made"
+    for attempt in range(1, 4):
+        # Click the Configure menu. In the post-login main window this
+        # is a JMenu in a JMenuBar. Clicking it via doClick() in the
+        # agent flips the JMenu's selected property and the EDT
+        # subsequently realizes a JPopupMenu (heavyweight window on
+        # Linux Swing) holding the child JMenuItems.
+        if not agent_click("Configure"):
+            last_failure = "Configure click failed"
+            log.info(
+                f"_config_open: {last_failure} "
+                f"(attempt {attempt}/3) — retrying after 1 s")
+            time.sleep(1.0)
+            continue
+        # Let the JPopupMenu's heavyweight peer window be realized
+        # before we walk Window.getWindows() looking for "Settings".
+        # 1.0 s is empirically enough even on a busy EDT post-2FA.
+        time.sleep(1.0)
+        if not agent_click("Settings"):
+            last_failure = "Settings JMenuItem not findable"
+            log.info(
+                f"_config_open: {last_failure} "
+                f"(attempt {attempt}/3) — retrying after 1 s")
+            time.sleep(1.0)
+            continue
+        # Wait for the Configuration dialog itself to render.
+        for _ in range(20):  # up to 4 s
+            windows = agent_windows() or []
+            if any(CONFIG_WINDOW_TITLE_SUBSTR in title
+                   for _, title, _ in windows):
+                return True
+            time.sleep(0.2)
+        last_failure = "dialog did not render after Settings click"
+        log.info(
+            f"_config_open: {last_failure} "
+            f"(attempt {attempt}/3) — retrying after 1 s")
+        time.sleep(1.0)
+
+    log.warning(
+        f"_config_open: failed to open Configure → Settings after "
+        f"3 attempts; last failure: {last_failure}")
     return False
 
 

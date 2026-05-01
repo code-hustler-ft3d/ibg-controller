@@ -76,6 +76,47 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.6.2
+
+**No breaking changes.** Real fix for the dual-mode post-login config
+bug that v0.6.1's diagnostic logging surfaced.
+
+Symptom (pre-v0.6.2 in dual mode): paper applied `READ_ONLY_API` /
+`TWS_MASTER_CLIENT_ID` / etc. correctly; live silently failed at the
+"open Configure → Settings dialog" step with `agent CLICK 'Settings':
+ERR not_found type=button name=Settings` in the v0.6.1 logs.
+
+Root cause: live mode emerges from 2FA + Authenticating overlays
+into the CONFIG state with the EDT still processing window
+tear-down. `_config_open()`'s 0.3 s sleep between the Configure
+click and the Settings click was enough on a quiescent EDT (paper,
+which skips 2FA) but not on a busy one (live), so the Settings
+JMenuItem wasn't yet findable in `Window.getWindows()` when the
+agent looked for it.
+
+Fix: wait for the window stack to settle (no modal dialogs, no
+Authenticating overlay), raise the inter-click delay to 1.0 s,
+and add an outer 3-attempt retry as a backstop. Cost on the success
+path is ~1 s of additional wait per CONFIG transition.
+
+**No operator action required for the redeploy** beyond pulling the
+new image. Anyone who was hitting the bug should see the live-mode
+post-login config knobs (`READ_ONLY_API`, `TWS_MASTER_CLIENT_ID`,
+`AUTO_LOGOFF_TIME`, `AUTO_RESTART_TIME`) actually apply this
+release.
+
+What you'll notice in the logs:
+
+```
+HH:MM:SS [INFO] [live] Post-login config env: ... READ_ONLY_API='no' (coerced=False) ...
+HH:MM:SS [INFO] [live] Applying post-login configuration from env vars
+HH:MM:SS [INFO] [live]   Navigating to API → Settings
+HH:MM:SS [INFO] [live]   Setting Read-Only API = False
+```
+
+— with `[live]` prefixes that v0.6.1 introduced and the apply path
+that v0.6.2 unblocks.
+
 ### v0.6.1
 
 **No breaking changes.** Operational improvement for dual-mode

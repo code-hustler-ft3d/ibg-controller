@@ -4,6 +4,57 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-05-01
+
+### Fixed
+
+- **Dual-mode `_config_open()` race that silently broke post-login
+  config on live but not paper.** v0.6.1's diagnostic logging
+  revealed the actual failure mode (neither scenario (a)
+  env-transmission nor scenario (b) log-attribution from the
+  original report — a third scenario (c)): live mode transitions
+  `API_WAIT → CONFIG` within ~3 s of the API port opening, with the
+  EDT still processing post-2FA tear-down. The `agent CLICK
+  'Configure'` succeeded (the JMenu's selected property flipped) but
+  by the time the follow-up `agent CLICK 'Settings'` walked
+  `Window.getWindows()`, the `JPopupMenu`'s heavyweight peer window
+  hadn't been realized yet. The agent reported
+  `ERR not_found type=button name=Settings` and post-login config
+  silently failed for live (not paper, which skips 2FA and hits the
+  same code path with a quiescent EDT).
+
+  Three changes in `_config_open()`:
+
+  1. **Wait for the post-login window stack to settle** before
+     clicking `Configure` — no modal dialogs visible, no
+     `Authenticating...` window present. Bounded at 5 s; logs and
+     proceeds anyway if Gateway is showing a different transitional
+     window we haven't explicitly named.
+  2. **Inter-click delay between Configure and Settings raised
+     from 0.3 s to 1.0 s.** That's the time the EDT needs to
+     realize the `JPopupMenu`'s heavyweight peer window when it's
+     coming out of a busy state. Empirically 0.3 s was enough on a
+     quiescent EDT (paper) and not enough on a busy one (live
+     post-2FA).
+  3. **Outer retry loop** — up to 3 attempts to open the dialog,
+     1 s between attempts. Backstop for any other transient that
+     hasn't shown up in the logs yet.
+
+  Net cost on the success path is ~1 s (the longer inter-click
+  delay; the window-settle wait returns immediately when already
+  settled). For the failing case, post-login config now applies on
+  live in dual-mode runs.
+
+### Validation
+
+- 224 unit tests pass (no test changes — the `_config_open` retry
+  logic is at the agent-socket boundary, exercised by integration
+  not unit tests).
+- `python3 -m py_compile gateway_controller.py`: OK.
+- The repro setup from the original bug report
+  (`TWS_USERID + TWS_USERID_PAPER + READ_ONLY_API=no` in dual mode)
+  is the spike target for confirming the live-mode fix lands.
+
 ## [0.6.1] - 2026-05-01
 
 ### Fixed (diagnostic)
