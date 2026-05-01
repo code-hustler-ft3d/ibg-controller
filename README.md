@@ -34,7 +34,7 @@ docker run -d --name ibkr \
 ```
 
 Tags published: `:latest`, `:<major>.<minor>` (e.g. `:0.5`), and
-`:v<major>.<minor>.<patch>` (e.g. `:v0.6.1`). Every tag is signed with
+`:v<major>.<minor>.<patch>` (e.g. `:v0.6.2`). Every tag is signed with
 cosign via Sigstore keyless signing — see [`SECURITY.md`](SECURITY.md)
 for the verification recipe. For reproducible deployments, pin to a
 digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
@@ -127,7 +127,7 @@ Quick start above instead.
 | **Python 3.10+** | For f-strings with `=` and type hints. |
 | **JDK 17+** | Only at *build* time, for the agent. Runtime uses Gateway's bundled Zulu JRE. |
 | **Ubuntu packages** | `python3 matchbox-window-manager` (matchbox provides focus routing for Xvfb; Xvfb itself ships in the upstream `gnzsnz/ib-gateway` image) |
-| **JRE config** | None. Pre-v0.6.1 the image wrote `accessibility.properties` and copied `libatk-wrapper.so` into the JRE; both were dropped after v0.5.12 disabled the AT-SPI bridge in the JVM. |
+| **JRE config** | None. Pre-v0.6.2 the image wrote `accessibility.properties` and copied `libatk-wrapper.so` into the JRE; both were dropped after v0.5.12 disabled the AT-SPI bridge in the JVM. |
 
 ## Compatibility table
 
@@ -205,9 +205,9 @@ corresponding product.
   clicks. v0.5.12 disabled the bridge in the JVM after a thread-dump
   showed `AtkWrapper$5.propertyChange` deadlocking on
   `JProgressBar.setValue` calls during login (surfaced as a misleading
-  `CCP LOCKOUT DETECTED` warning); v0.6.1 removed the install-time
+  `CCP LOCKOUT DETECTED` warning); v0.6.2 removed the install-time
   ATK packages and JRE configuration entirely. See
-  [CHANGELOG.md](CHANGELOG.md) v0.5.12 / v0.6.1 for the full record.
+  [CHANGELOG.md](CHANGELOG.md) v0.5.12 / v0.6.2 for the full record.
 
 Full diagnostic history and architectural reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
@@ -391,8 +391,8 @@ make
 # Syntax-check the Python controller + validate the agent jar manifest
 make test
 
-# Create a release tarball (dist/ibg-controller-0.6.1.tar.gz)
-make release VERSION=0.6.1
+# Create a release tarball (dist/ibg-controller-0.6.2.tar.gz)
+make release VERSION=0.6.2
 
 # Install directly into a running ibgateway home (for dev on host, or
 # as called by the Docker image's setup stage)
@@ -404,7 +404,7 @@ Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 ### Installing from a release tarball (for consumers who don't build)
 
 ```bash
-VER=0.6.1
+VER=0.6.2
 curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
 tar -xzf ibg-controller-${VER}.tar.gz
 cd ibg-controller-${VER}
@@ -413,7 +413,7 @@ DESTDIR=/home/ibgateway ./install.sh
 
 The tarball layout is flat:
 ```
-ibg-controller-0.6.1/
+ibg-controller-0.6.2/
 ├── gateway-input-agent.jar   ← installed to $DESTDIR/gateway-input-agent.jar
 ├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
 ├── ibc_config_to_env.py       ← one-shot IBC config.ini → env migration tool
@@ -542,7 +542,7 @@ start. Check:
 > **Pre-v0.5.12 deployments only:** if you're still on a release that
 > used the AT-SPI desktop tree for app discovery and you see "IBKR
 > Gateway never appeared in AT-SPI desktop tree within 120s",
-> upgrade. v0.5.12+ doesn't use AT-SPI at all and v0.6.1 removed the
+> upgrade. v0.5.12+ doesn't use AT-SPI at all and v0.6.2 removed the
 > ATK install steps from the image; both error modes are gone.
 
 ### "Existing session detected" dialog keeps appearing in a loop
