@@ -12,7 +12,7 @@ make
 make install DESTDIR=/home/ibgateway
 
 # Create a release tarball
-make release VERSION=0.6.0
+make release VERSION=0.6.1
 ```
 
 Requires JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.

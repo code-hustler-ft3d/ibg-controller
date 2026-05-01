@@ -4,6 +4,72 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-05-01
+
+### Fixed (diagnostic)
+
+- **Dual-mode log attribution.** Pre-v0.6.1 the controller's log
+  format was `<time> [<LEVEL>] <message>` with no mode marker. In
+  dual mode (`TRADING_MODE=both`) two controller processes — one
+  `live`, one `paper` — both write to the same container stdout,
+  so `docker logs <container>` interleaved their lines with no way
+  to tell them apart. Reports like 2026-05-01's "post-login config
+  ran for paper but not live" were impossible to confirm or refute
+  from logs alone. The format is now
+  `<time> [<LEVEL>] [<mode>] <message>`. The mode is fixed at
+  controller-process startup (TRADING_MODE doesn't change for the
+  life of a controller), so this is a per-process baked prefix —
+  no per-call overhead.
+
+  In single-mode runs the prefix is `[live]` or `[paper]` —
+  informative but non-noisy. In dual-mode it makes log streams
+  decisively attributable.
+
+  Note for monitoring consumers: any log-grep that anchors strictly
+  on `^<timestamp> [<LEVEL>] <token>` (the regex starts at the
+  level bracket and expects the token immediately after) will need
+  to accommodate the new `[<mode>] ` segment between them. Greps
+  that match on `ALERT_*` tokens elsewhere in the line are
+  unaffected — the ALERT tokens themselves already include
+  `mode=<value>` per `OBSERVABILITY.md`'s grep-contract.
+
+- **`handle_post_login_config()` now logs the env-var values it
+  observed, on both the apply and the skip paths.** Pre-v0.6.1
+  the function emitted only `"Post-login config: no supported
+  env vars set, skipping"` on the early-return — silent on
+  exactly which env vars were empty. With dual-mode log
+  attribution above, a single new diagnostic line tells you
+  precisely what the controller saw:
+
+  ```
+  HH:MM:SS [INFO] [live] Post-login config env:
+    TWS_MASTER_CLIENT_ID='', READ_ONLY_API='no' (coerced=False),
+    AUTO_LOGOFF_TIME='', AUTO_RESTART_TIME=''
+  ```
+
+  These knobs are not secrets (they're IBC-equivalent post-login
+  API settings) so logging the values is safe.
+
+### Why a diagnostic-only patch and not a fix
+
+The 2026-05-01 bug report ("paper sets Read-Only API = False but
+live silently skips") fits two scenarios that pre-v0.6.1 logs
+couldn't distinguish: (a) a real env-var transmission failure to
+the live controller, or (b) misattribution of two interleaved
+dual-mode log streams. v0.6.1's mode prefix + env-var dump
+discriminates between them on the next reproduction. If (a) is
+real, the next dual-mode log will show
+`[live] Post-login config env: ... READ_ONLY_API='' ...` —
+smoking gun. If (b), both `[live]` and `[paper]` lines will show
+the same env values and the report dissolves.
+
+### Validation
+
+- 224 unit tests pass (no test changes).
+- `python3 -m py_compile gateway_controller.py`: OK.
+- Module-load smoke test: format string interpolates TRADING_MODE
+  cleanly at startup; no per-message overhead.
+
 ## [0.6.0] - 2026-05-01
 
 ### Removed (breaking)

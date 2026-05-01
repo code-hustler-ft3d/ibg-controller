@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -255,10 +255,22 @@ else:
 
 
 # ── Logging ─────────────────────────────────────────────────────────────
+#
+# v0.6.1: include TRADING_MODE as a fixed prefix on every log line. In
+# dual mode (TRADING_MODE=both, which run.sh splits into two parallel
+# controller processes — one "live", one "paper") both controllers'
+# stdout interleaves into the same `docker logs <container>` stream
+# with no way to tell their lines apart. That made bug reports like
+# 2026-05-01's "post-login config skipped for live but ran for paper"
+# impossible to diagnose from logs alone (pre-v0.6.1 the reporter had
+# to pair `[STATE: CONFIG]` lines with subsequent context to guess
+# which controller emitted them). The mode prefix is fixed at module
+# load — TRADING_MODE doesn't change for the life of a controller
+# process, so f-string interpolation here is correct.
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("CONTROLLER_DEBUG") else logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format=f"%(asctime)s [%(levelname)s] [{TRADING_MODE}] %(message)s",
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("controller")
@@ -1885,7 +1897,8 @@ def handle_post_login_config():
     a working API port even if one setting couldn't be applied.
     """
     master_client_id = os.environ.get("TWS_MASTER_CLIENT_ID", "").strip()
-    read_only_api = _coerce_yes_no(os.environ.get("READ_ONLY_API", ""))
+    read_only_api_raw = os.environ.get("READ_ONLY_API", "")
+    read_only_api = _coerce_yes_no(read_only_api_raw)
     auto_logoff_time = os.environ.get("AUTO_LOGOFF_TIME", "").strip()
     auto_restart_time = os.environ.get("AUTO_RESTART_TIME", "").strip()
     # Truly TWS-only — not present in any Gateway config state we've observed
@@ -1907,6 +1920,20 @@ def handle_post_login_config():
                     f"Gateway's config dialog and are being ignored: "
                     f"{', '.join(tws_only_set)}. They're TWS-specific. "
                     "See controller/docs/MIGRATION.md for details.")
+
+    # v0.6.1: dump exactly what we observed in os.environ on both the
+    # apply and the skip paths. Pre-v0.6.1 a "no supported env vars
+    # set, skipping" line gave no clue whether the user had genuinely
+    # set nothing or whether the env transmission chain (Docker
+    # --env-file → run.sh → start_controller → python3 fork) had
+    # dropped a value somewhere along the way. The values logged here
+    # are not secrets — IBC-equivalent post-login config knobs only.
+    log.info(
+        f"Post-login config env: TWS_MASTER_CLIENT_ID={master_client_id!r}, "
+        f"READ_ONLY_API={read_only_api_raw!r} (coerced={read_only_api!r}), "
+        f"AUTO_LOGOFF_TIME={auto_logoff_time!r}, "
+        f"AUTO_RESTART_TIME={auto_restart_time!r}"
+    )
 
     if not wanted_anything:
         log.info("Post-login config: no supported env vars set, skipping")

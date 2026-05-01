@@ -76,6 +76,38 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.6.1
+
+**No breaking changes.** Operational improvement for dual-mode
+deployments: every log line now carries a `[live]` or `[paper]`
+prefix so dual-mode containers' interleaved stdout in
+`docker logs <container>` is finally attributable.
+
+The new format is:
+
+```
+<timestamp> [<LEVEL>] [<mode>] <message>
+```
+
+In single-mode (`TRADING_MODE=live` or `TRADING_MODE=paper`) the
+prefix is informative but non-noisy. In dual-mode
+(`TRADING_MODE=both`) it lets you tell `[live]` and `[paper]` lines
+apart at a glance.
+
+`handle_post_login_config()` also logs the env-var values it
+observed (on both the apply and the skip paths) so it's now
+explicit which knobs each controller saw vs. perceived as empty.
+Useful for diagnosing env-transmission bugs in compose / Docker
+secrets / orchestrator setups.
+
+**Action for monitoring consumers:** any log-grep that anchors
+strictly on the level bracket plus the next token (e.g.
+`^[0-9:]+ \[INFO\] (Applying|Post-login)`) needs to accommodate the
+new `[<mode>] ` segment between them. Greps that match
+`ALERT_*` tokens elsewhere in the line are unaffected — the
+ALERT tokens already include `mode=<value>` per
+[OBSERVABILITY.md](OBSERVABILITY.md)'s grep-contract.
+
 ### v0.6.0
 
 **Breaking change for anyone still on the `USE_PYATSPI2_CONTROLLER`
