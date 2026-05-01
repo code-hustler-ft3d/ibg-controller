@@ -1,9 +1,9 @@
 #!/bin/bash
-# Install the IB Gateway pyatspi2 controller from a release tarball
-# into a running ibgateway container's filesystem.
+# Install the IB Gateway controller from a release tarball into a
+# running ibgateway container's filesystem.
 #
 # Usage (from the docker image's setup stage):
-#   ARG IBG_CONTROLLER_VERSION=0.2.0
+#   ARG IBG_CONTROLLER_VERSION=0.5.13
 #   RUN curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${IBG_CONTROLLER_VERSION}/ibg-controller-${IBG_CONTROLLER_VERSION}.tar.gz && \
 #       tar -xzf ibg-controller-${IBG_CONTROLLER_VERSION}.tar.gz && \
 #       cd ibg-controller-${IBG_CONTROLLER_VERSION} && \

@@ -35,7 +35,7 @@ import javax.swing.tree.TreeModel;
 import javax.swing.tree.TreePath;
 
 /**
- * In-JVM helper for the pyatspi2 gateway controller.
+ * In-JVM helper for the ibg-controller Python process.
  *
  * Provides the operations that can't be done from outside the JVM.
  * Loaded via -javaagent:gateway-input-agent.jar in
@@ -63,9 +63,8 @@ import javax.swing.tree.TreePath;
  *   CLOSE_WIN <title_substr>              → OK | ERR not_found window_title_substring=...
  *
  * Component lookup is by AccessibleContext.getAccessibleName() or by
- * setText()/AbstractButton.getText(), matching what AT-SPI exposes.
- * The Python controller's selectors map 1:1 to what this agent looks
- * up.
+ * setText()/AbstractButton.getText(). The Python controller's selectors
+ * map 1:1 to what this agent looks up.
  *
  * Threading rules borrowed from Lcstyle's ibctl agent:
  *   - SETTEXT/GETTEXT/JTREE_SELECT_PATH/SETTEXT_BY_LABEL use
@@ -259,13 +258,12 @@ public class GatewayInputAgent {
             }
             case "WAIT_LOGIN_FRAME": {
                 // v0.4.3: block until the Gateway login frame is showing
-                // AND no modal dialog is overlaying it. Replaces
-                // attempt_inplace_relogin's pyatspi
-                // `wait_for(app, "password text")` wait, which times out
-                // while Gateway's "Attempt N: connecting to server" modal
-                // is up because AT-SPI filters the role. Swing's
-                // isShowing() is truthful regardless of modal overlay, so
-                // the JVM-side lookup sees the frame correctly.
+                // AND no modal dialog is overlaying it. Replaces an
+                // earlier pyatspi-based wait that timed out while
+                // Gateway's "Attempt N: connecting to server" modal was
+                // up (AT-SPI filtered the role). Swing's isShowing() is
+                // truthful regardless of modal overlay, so the JVM-side
+                // lookup sees the frame correctly.
                 return doWaitLoginFrame(rest);
             }
             case "CLOSE_WIN": {

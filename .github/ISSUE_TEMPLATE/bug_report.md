@@ -26,7 +26,8 @@ Environment:
 - Architecture: amd64 / arm64
 - Trading mode: live / paper / both
 - Container image: (your image name + tag)
-- `USE_PYATSPI2_CONTROLLER`: yes
+- `USE_IBG_CONTROLLER`: yes  <!-- or USE_PYATSPI2_CONTROLLER if you're still on the deprecated alias -->
+
 - Other relevant env vars (redact credentials!):
 
 **Steps to reproduce**

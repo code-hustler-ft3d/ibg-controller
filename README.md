@@ -34,7 +34,7 @@ docker run -d --name ibkr \
 ```
 
 Tags published: `:latest`, `:<major>.<minor>` (e.g. `:0.5`), and
-`:v<major>.<minor>.<patch>` (e.g. `:v0.5.9`). Every tag is signed with
+`:v<major>.<minor>.<patch>` (e.g. `:v0.5.13`). Every tag is signed with
 cosign via Sigstore keyless signing — see [`SECURITY.md`](SECURITY.md)
 for the verification recipe. For reproducible deployments, pin to a
 digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
@@ -56,7 +56,7 @@ digest is printed in each release's CI log.
 >     environment:
 >       TRADING_MODE: paper
 >       TWS_SERVER_PAPER: cdc1.ibllc.com
->       USE_PYATSPI2_CONTROLLER: "yes"
+>       USE_IBG_CONTROLLER: "yes"
 >       # ... your other env vars
 > ```
 
@@ -71,11 +71,8 @@ RUN cd /root/ibg-controller && \
     cd / && rm -rf /root/ibg-controller /root/build
 
 # In the production stage, add these packages:
-#   python3 python3-gi gir1.2-atspi-2.0 at-spi2-core
-#   libatk-wrapper-java libatk-wrapper-java-jni
-#   dbus-x11 matchbox-window-manager
-# and follow docs/MIGRATION.md for the JRE accessibility bridge
-# configuration.
+#   python3 matchbox-window-manager
+# and follow docs/MIGRATION.md for the rest.
 ```
 
 Then at `docker run` time:
@@ -84,7 +81,7 @@ Then at `docker run` time:
 docker run -d --name ibkr \
   --env-file /path/to/your/.env \
   -e TRADING_MODE=paper \
-  -e USE_PYATSPI2_CONTROLLER=yes \
+  -e USE_IBG_CONTROLLER=yes \
   -e TWS_SERVER_PAPER=cdc1.ibllc.com \
   -e TWOFACTOR_CODE=<your TOTP secret> \
   -p 127.0.0.1:4002:4004 \
@@ -101,9 +98,9 @@ Why each piece is necessary: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 A ready-to-use `Dockerfile` is shipped at the repo root. It extends
 [`gnzsnz/ib-gateway-docker`](https://github.com/gnzsnz/ib-gateway-docker),
-installs the AT-SPI stack, configures the Java accessibility bridge
-into Gateway's JRE, and drops the controller artifacts from `dist/`
-into `/home/ibgateway/`:
+adds the small set of runtime packages the controller needs (`python3`
++ `matchbox-window-manager`), and drops the controller artifacts from
+`dist/` into `/home/ibgateway/`:
 
 ```bash
 # Build the agent jar and stage the controller
@@ -129,8 +126,8 @@ Quick start above instead.
 | **IB Gateway** | Tested on **10.45.1c**. Should work on any 10.x with a compatible install4j launcher and a Zulu JRE 17+. |
 | **Python 3.10+** | For f-strings with `=` and type hints. |
 | **JDK 17+** | Only at *build* time, for the agent. Runtime uses Gateway's bundled Zulu JRE. |
-| **Ubuntu packages** | `python3 python3-gi gir1.2-atspi-2.0 at-spi2-core libatk-wrapper-java libatk-wrapper-java-jni dbus-x11 matchbox-window-manager` |
-| **JRE config** | `$JAVA_HOME/conf/accessibility.properties` with `assistive_technologies=org.GNOME.Accessibility.AtkWrapper`, and `libatk-wrapper.so` copied into `$JAVA_HOME/lib/` |
+| **Ubuntu packages** | `python3 matchbox-window-manager` (matchbox provides focus routing for Xvfb; Xvfb itself ships in the upstream `gnzsnz/ib-gateway` image) |
+| **JRE config** | None. Pre-v0.5.13 the image wrote `accessibility.properties` and copied `libatk-wrapper.so` into the JRE; both were dropped after v0.5.12 disabled the AT-SPI bridge in the JVM. |
 
 ## Compatibility table
 
@@ -171,22 +168,19 @@ corresponding product.
                    ┌────────────────────────────────────────┐
                    │  Docker container (headless)           │
                    │                                        │
-                   │  Xvfb :1  ← matchbox WM               │
+                   │  Xvfb :1  ← matchbox WM                │
                    │     │                                  │
                    │     ↓                                  │
                    │  IB Gateway JVM                        │
-                   │  ├─ -javaagent:gateway-input-agent.jar │
-                   │  │      │                              │
-                   │  │      ↓                              │
-                   │  │   Unix socket (/tmp/gateway-input-{mode}.sock)
-                   │  │      ↑                              │
-                   │  └─ AT-SPI2 (org.GNOME.Accessibility.AtkWrapper)
-                   │         │                              │
-                   │         ↓                              │
+                   │  └─ -javaagent:gateway-input-agent.jar │
+                   │            │                           │
+                   │            ↓                           │
+                   │     Unix socket (/tmp/gateway-input-{mode}.sock)
+                   │            ↑                           │
                    │  gateway_controller.py (Python)        │
-                   │    ├─ pyatspi2: find components, click │
-                   │    ├─ agent socket: type text, set     │
-                   │    │    config, navigate JTree         │
+                   │    ├─ agent socket: discover windows,  │
+                   │    │    type text, click, navigate     │
+                   │    │    JTree                          │
                    │    ├─ state machine: login → 2FA →     │
                    │    │    config → ready → monitor       │
                    │    ├─ IBC-compat command server (TCP)  │
@@ -195,27 +189,25 @@ corresponding product.
                    └────────────────────────────────────────┘
 ```
 
-- **Python controller** does component discovery, clicks, state observation,
-  the re-auth monitor loop, and the IBC-compat command server.
+- **Python controller** runs the state machine, the re-auth monitor
+  loop, and the IBC-compat command server. All UI work is delegated
+  to the in-JVM agent over the Unix socket.
 - **Java agent** (~750 lines) loaded via `-javaagent:` into Gateway's JVM
   exists because Gateway's Swing fields reject every external input
-  mechanism (AT-SPI `EditableText` writes return `false`, synthetic X11
-  events get filtered by Swing's AWT subsystem). The agent uses Swing's
-  own `JTextField.setText()`, `AbstractButton.doClick()`,
+  mechanism (synthetic X11 events get filtered by Swing's AWT
+  subsystem; AT-SPI `EditableText` writes return `false`). The agent
+  uses Swing's own `JTextField.setText()`, `AbstractButton.doClick()`,
   `JTree.setSelectionPath()`, and `JToggleButton.doClick()` — the only
-  things that actually work.
-- **AT-SPI2** historically drove component discovery and button clicks
-  in the main window. **As of v0.5.12 the JVM no longer connects to
-  AT-SPI** — the `AtkWrapper` bridge is disabled via
-  `-Djavax.accessibility.assistive_technologies=` to prevent an
-  intra-JVM Swing-dispatch deadlock that surfaced as a misleading
-  `CCP LOCKOUT DETECTED` warning. All login-UI interaction now
-  routes through the agent socket. The diagram above shows the
-  pre-v0.5.12 architecture; post-v0.5.12 the AT-SPI2 line in the
-  Gateway JVM is dormant. See [CHANGELOG.md](CHANGELOG.md) v0.5.12
-  for the deadlock thread-dump evidence and
-  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) sections 3 and 4
-  for what the JRE-side configuration *would* do if re-enabled.
+  things that actually work — plus `Window.getWindows()` for component
+  discovery.
+- **No AT-SPI / ATK in the runtime path.** Earlier versions used the
+  AT-SPI2 `AtkWrapper` bridge for component discovery and button
+  clicks. v0.5.12 disabled the bridge in the JVM after a thread-dump
+  showed `AtkWrapper$5.propertyChange` deadlocking on
+  `JProgressBar.setValue` calls during login (surfaced as a misleading
+  `CCP LOCKOUT DETECTED` warning); v0.5.13 removed the install-time
+  ATK packages and JRE configuration entirely. See
+  [CHANGELOG.md](CHANGELOG.md) v0.5.12 / v0.5.13 for the full record.
 
 Full diagnostic history and architectural reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
@@ -349,7 +341,7 @@ JVM restart exhaustion, Gateway JVM crash): [`docs/DISCONNECT_RECOVERY.md`](docs
 ### Product selector (v0.2)
 | Var | Notes |
 |---|---|
-| `GATEWAY_OR_TWS` | `gateway` (default) or `tws`. Switches launcher discovery (`$TWS_PATH/ibgateway/...` vs `$TWS_PATH/tws/...`) and AT-SPI app name search between IB Gateway and Trader Workstation. Code path unit-tested; live validation pending a TWS-with-controller Dockerfile variant. |
+| `GATEWAY_OR_TWS` | `gateway` (default) or `tws`. Switches launcher discovery (`$TWS_PATH/ibgateway/...` vs `$TWS_PATH/tws/...`) and the agent's window-title match between IB Gateway and Trader Workstation. Code path unit-tested; live validation pending a TWS-with-controller Dockerfile variant. |
 
 ### Dual-mode per-instance (v0.2.1)
 | Var | Notes |
@@ -399,8 +391,8 @@ make
 # Syntax-check the Python controller + validate the agent jar manifest
 make test
 
-# Create a release tarball (dist/ibg-controller-0.5.9.tar.gz)
-make release VERSION=0.5.9
+# Create a release tarball (dist/ibg-controller-0.5.13.tar.gz)
+make release VERSION=0.5.13
 
 # Install directly into a running ibgateway home (for dev on host, or
 # as called by the Docker image's setup stage)
@@ -412,7 +404,7 @@ Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 ### Installing from a release tarball (for consumers who don't build)
 
 ```bash
-VER=0.5.9
+VER=0.5.13
 curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
 tar -xzf ibg-controller-${VER}.tar.gz
 cd ibg-controller-${VER}
@@ -421,8 +413,8 @@ DESTDIR=/home/ibgateway ./install.sh
 
 The tarball layout is flat:
 ```
-ibg-controller-0.5.9/
-├── gateway-input-agent.jar    ← installed to $DESTDIR/gateway-input-agent.jar
+ibg-controller-0.5.13/
+├── gateway-input-agent.jar   ← installed to $DESTDIR/gateway-input-agent.jar
 ├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
 ├── ibc_config_to_env.py       ← one-shot IBC config.ini → env migration tool
 ├── install.sh
@@ -532,13 +524,11 @@ stuck-connecting case won't show in `launcher.log`; check the
 controller's own logs for the "stuck in 'connecting to server'"
 warning instead.
 
-### "Gateway PID unknown (agent never reported one) — cannot proceed without a JVM identity" (v0.5.12+)
+### "Gateway PID unknown (agent never reported one) — cannot proceed without a JVM identity"
 
-In v0.5.12+ Gateway no longer registers with the AT-SPI desktop
-tree (the bridge is intentionally disabled — see CHANGELOG.md). App
-discovery now relies on the input agent reporting its JVM PID
-through the Unix socket instead. If you see this error, the agent
-itself failed to start. Check:
+App discovery relies on the input agent reporting its JVM PID through
+the Unix socket. If you see this error, the agent itself failed to
+start. Check:
 
 1. The `-javaagent:/home/ibgateway/gateway-input-agent.jar=...`
    flag is in the JVM's command line. Inside the container:
@@ -549,19 +539,11 @@ itself failed to start. Check:
 3. `/tmp/jvm_console_${TRADING_MODE}.log` — added in v0.5.12. Check
    the JVM console for agent boot errors.
 
-### Pre-v0.5.12: "IBKR Gateway never appeared in AT-SPI desktop tree within 120s"
-
-This message no longer applies in v0.5.12+ (Gateway intentionally
-does not register with AT-SPI). For pre-v0.5.12 deployments, the
-ATK bridge didn't load. Check:
-
-1. `ls $JAVA_HOME/conf/accessibility.properties` inside the container —
-   must contain `assistive_technologies=org.GNOME.Accessibility.AtkWrapper`
-2. `ls $JAVA_HOME/lib/libatk-wrapper.so` — must exist (copied from
-   `/usr/lib/*/jni/libatk-wrapper.so` at image build time)
-3. `at-spi-bus-launcher --launch-immediately` was started BEFORE
-   Gateway. If the accessibility bus isn't up when Gateway's JVM
-   initializes, the ATK wrapper silently skips itself.
+> **Pre-v0.5.12 deployments only:** if you're still on a release that
+> used the AT-SPI desktop tree for app discovery and you see "IBKR
+> Gateway never appeared in AT-SPI desktop tree within 120s",
+> upgrade. v0.5.12+ doesn't use AT-SPI at all and v0.5.13 removed the
+> ATK install steps from the image; both error modes are gone.
 
 ### "Existing session detected" dialog keeps appearing in a loop
 

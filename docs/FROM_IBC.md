@@ -310,10 +310,11 @@ forwarder or the ports your trading code connects to. The swap is
 transparent to the client side.
 
 **What about the `run.sh`?** The shipped `Dockerfile` swaps in an
-ibg-controller-aware `run.sh` that sets `USE_PYATSPI2_CONTROLLER=yes`
-and dispatches to the controller instead of IBC's jar. If you're
-building a custom image, pick up `docker/run.sh` from the release
-tarball.
+ibg-controller-aware `run.sh` that, when `USE_IBG_CONTROLLER=yes`,
+dispatches to the controller instead of IBC's jar. (The historical
+`USE_PYATSPI2_CONTROLLER=yes` is still honored as a deprecated alias
+so existing compose files keep working.) If you're building a custom
+image, pick up `docker/run.sh` from the release tarball.
 
 **Where's the `.env`? Can I commit it?** Keep credentials out of git.
 Use Docker secrets (`TWS_PASSWORD_FILE=/run/secrets/tws_password`),

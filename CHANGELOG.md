@@ -4,6 +4,76 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.13] - 2026-04-28
+
+### Removed
+
+- **AT-SPI / ATK install steps and JRE accessibility-bridge
+  configuration.** v0.5.12 disabled the bridge in the JVM after a
+  thread-dump-confirmed deadlock; v0.5.13 removes the now-vestigial
+  install steps the README and MIGRATION docs were still telling
+  users to add to their images.
+  - `Dockerfile`: drop `libatk-wrapper-java`, `libatk-wrapper-java-jni`,
+    `dbus-x11` from apt install. Drop the `RUN` block that writes
+    `$JAVA_HOME/conf/accessibility.properties` and copies
+    `libatk-wrapper.so` into `$JAVA_HOME/lib/`.
+  - `docker/run.sh`: drop `start_dbus_session` and `start_atspi`.
+    Drop the AT-SPI teardown branch in `stop_ibc`. The controller
+    still needs `start_window_manager` (matchbox) for Xvfb focus
+    routing — that stays.
+  - `gateway_controller.py`: drop the
+    `-Xbootclasspath/a:/usr/share/java/java-atk-wrapper.jar` JVM
+    arg (the JAR is no longer in the image).
+    `-Djavax.accessibility.assistive_technologies=` stays as
+    defense-in-depth in case a base image ships the JAR
+    pre-installed.
+- Image surface area for AT-SPI runtime infrastructure
+  (`at-spi-bus-launcher`, `at-spi2-registryd`, the `org.a11y.Bus`
+  D-Bus services) is no longer started. `python3-gi`,
+  `gir1.2-atspi-2.0`, and `at-spi2-core` remain installed because
+  `gateway_controller.py` still does
+  `from gi.repository import Atspi` at module load (the helper
+  functions that reference `Atspi.StateType.*` / `Atspi.Text.*` /
+  `Atspi.Action.*` have no live callers post-v0.5.12 but were not
+  physically removed in this release; that's a future cleanup).
+
+### Changed
+
+- **Env var rename, backwards compatible.**
+  `USE_PYATSPI2_CONTROLLER=yes` is renamed to `USE_IBG_CONTROLLER=yes`.
+  The old name is honored as a deprecated alias — `run.sh` checks for
+  it at startup and copies the value across, printing a one-line
+  warning. Existing `docker-compose.yml` files keep working without
+  modification. Rename at your leisure.
+- README, `docs/MIGRATION.md`, `docs/ARCHITECTURE.md`,
+  `docs/CONTRIBUTING.md`, `docs/UPGRADING.md`,
+  `docs/BOOTSTRAP.md`, `docs/FROM_IBC.md`, `scripts/install.sh`,
+  `Makefile`, and the `agent/GatewayInputAgent.java` javadoc were
+  rewritten to reflect post-v0.5.12 reality. Historical context
+  (the AT-SPI deadlock that motivated the change, the v0.5.12
+  triage signature, the spike findings about why external input
+  mechanisms fail) is preserved as labeled history.
+- `docs/ARCHITECTURE.md` collapses the four-section AT-SPI / D-Bus /
+  JRE-config block into a single historical-context callout. The
+  remaining "things that surprised us" entries about AT-SPI tree
+  staleness and the on-screen-keyboard `Action` interface are
+  retained as record of the 2026-Q1 spike.
+
+### Validation
+
+- `python3 -m py_compile gateway_controller.py` — OK.
+- `bash -n docker/run.sh` — OK.
+- Greps for `at.spi`, `atspi`, `ATK`, `atk-wrapper`, `pyatspi`,
+  `libatk`, `AtkWrapper`, `USE_PYATSPI2` across the repo show only
+  intentional historical mentions (CHANGELOG, post-mortem callouts)
+  or the deprecated-alias plumbing in `run.sh`.
+
+### Issue resolved
+
+- [#1](https://github.com/code-hustler-ft3d/ibg-controller/issues/1) —
+  README should no longer mention AT-SPI / ATK approach for the sake
+  of clarity.
+
 ## [0.5.12] - 2026-04-27
 
 ### Fixed

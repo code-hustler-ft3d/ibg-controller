@@ -11,20 +11,31 @@ echo "*************************************************************************"
 # shellcheck disable=SC1091
 source "${SCRIPT_PATH}/common.sh"
 
+# Backward compatibility: USE_PYATSPI2_CONTROLLER is the historical name
+# for the controller toggle (the controller used to walk the AT-SPI
+# desktop tree via pyatspi). v0.5.12+ no longer registers Gateway with
+# AT-SPI at all; the env var is now just the IBC-vs-controller switch.
+# USE_IBG_CONTROLLER is the preferred name. Honor the old name for
+# existing compose files but warn so users migrate.
+if [ -z "${USE_IBG_CONTROLLER:-}" ] && [ -n "${USE_PYATSPI2_CONTROLLER:-}" ]; then
+	USE_IBG_CONTROLLER="$USE_PYATSPI2_CONTROLLER"
+	echo ".> WARNING: USE_PYATSPI2_CONTROLLER is deprecated; rename to USE_IBG_CONTROLLER"
+fi
+export USE_IBG_CONTROLLER
+
 # shellcheck disable=SC2329
 stop_ibc() {
 	echo ".> 😘 Received SIGINT or SIGTERM. Shutting down IB Gateway."
 
 	# 2026-04-27 fix: SIGTERM the controllers FIRST so they can drive
-	# clean logout via the AT-SPI input agent BEFORE we tear down the
-	# X server / AT-SPI / socat infrastructure they depend on. The old
-	# order (Xvfb killed first, controllers signalled last) made the
-	# v0.5.6 clean-logout pipeline impossible: AWT's WINDOW_CLOSING
-	# dispatch needs a live X11 connection to fire Gateway's
-	# WindowListener, so by the time the controller's shutdown handler
-	# tried clean logout, AWT EventQueue was blocked on a dead X11
-	# socket and the JVM hung until SIGKILL — stranding the IBKR slot
-	# every container restart.
+	# clean logout via the input agent BEFORE we tear down the X server
+	# / socat infrastructure they depend on. The old order (Xvfb killed
+	# first, controllers signalled last) made the v0.5.6 clean-logout
+	# pipeline impossible: AWT's WINDOW_CLOSING dispatch needs a live
+	# X11 connection to fire Gateway's WindowListener, so by the time
+	# the controller's shutdown handler tried clean logout, AWT
+	# EventQueue was blocked on a dead X11 socket and the JVM hung
+	# until SIGKILL — stranding the IBKR slot every container restart.
 	echo ".> Stopping IBC / controller (clean logout phase)."
 	kill -SIGTERM "${pid[@]}" 2>/dev/null || true
 	# Wait up to 60s for controllers to do clean logout + JVM exit.
@@ -67,10 +78,8 @@ stop_ibc() {
 		pkill socat
 	fi
 	#
-	if [ "$USE_PYATSPI2_CONTROLLER" = "yes" ]; then
-		echo ".> Stopping AT-SPI infrastructure."
-		pkill -f at-spi2-registryd 2>/dev/null
-		pkill -f at-spi-bus-launcher 2>/dev/null
+	if [ "$USE_IBG_CONTROLLER" = "yes" ]; then
+		echo ".> Stopping window manager."
 		pkill -f matchbox-window-manager 2>/dev/null
 		# Clean up readiness file
 		rm -f /tmp/gateway_ready
@@ -124,55 +133,9 @@ start_IBC() {
 	echo "$_p" >"/tmp/pid_${TRADING_MODE}"
 }
 
-# ── pyatspi2 controller path ────────────────────────────────────────────
-# Opt-in via USE_PYATSPI2_CONTROLLER=yes. Default falls back to IBC.
-
-start_dbus_session() {
-	# Start a per-container D-Bus session bus. AT-SPI's accessibility bus
-	# uses this to publish the org.a11y.Bus name.
-	if [ -n "$DBUS_SESSION_BUS_ADDRESS" ]; then
-		echo ".> D-Bus session bus already set: $DBUS_SESSION_BUS_ADDRESS"
-		return 0
-	fi
-	echo ".> Starting D-Bus session bus."
-	eval "$(dbus-launch --sh-syntax)"
-	export DBUS_SESSION_BUS_ADDRESS DBUS_SESSION_BUS_PID
-	echo ".>		D-Bus: $DBUS_SESSION_BUS_ADDRESS"
-}
-
-start_atspi() {
-	# Start at-spi-bus-launcher (claims org.a11y.Bus on the session bus,
-	# spawns a separate dbus-daemon for the accessibility bus, and
-	# auto-starts at-spi2-registryd on it). Critical for the JVM to find
-	# the accessibility registry via org.a11y.Bus.GetAddress.
-	echo ".> Starting AT-SPI infrastructure."
-	local launcher=""
-	for p in /usr/libexec/at-spi-bus-launcher /usr/lib/at-spi2-core/at-spi-bus-launcher; do
-		if [ -x "$p" ]; then
-			launcher="$p"
-			break
-		fi
-	done
-	if [ -z "$launcher" ]; then
-		echo ".> ERROR: at-spi-bus-launcher not found"
-		return 1
-	fi
-	"$launcher" --launch-immediately &
-	sleep 2
-	# at-spi-bus-launcher should auto-start the registryd via D-Bus
-	# activation, but start it explicitly too in case activation is slow.
-	local registryd=""
-	for p in /usr/libexec/at-spi2-registryd /usr/lib/at-spi2-core/at-spi2-registryd; do
-		if [ -x "$p" ]; then
-			registryd="$p"
-			break
-		fi
-	done
-	if [ -n "$registryd" ]; then
-		"$registryd" &
-		sleep 1
-	fi
-}
+# ── ibg-controller path ─────────────────────────────────────────────────
+# Opt-in via USE_IBG_CONTROLLER=yes (historically USE_PYATSPI2_CONTROLLER;
+# alias handled at the top of this script). Default falls back to IBC.
 
 start_window_manager() {
 	# Xvfb has no window manager by default, which leaves no focused
@@ -297,7 +260,7 @@ start_process() {
 	# apply settings
 	apply_settings
 
-	if [ "$USE_PYATSPI2_CONTROLLER" = "yes" ]; then
+	if [ "$USE_IBG_CONTROLLER" = "yes" ]; then
 		# Controller path: launch the controller first, wait for it to
 		# signal readiness, THEN start port forwarding. This fixes the
 		# long-standing issue where socat starts before Gateway is logged
@@ -325,15 +288,13 @@ fi
 # start Xvfb
 start_xvfb
 
-# AT-SPI infrastructure (only when using the pyatspi2 controller).
-# Must come AFTER start_xvfb (Xvfb provides DISPLAY) but BEFORE the
-# controller launches Gateway, because the JVM needs to find the
-# accessibility bus during static initialization.
-if [ "$USE_PYATSPI2_CONTROLLER" = "yes" ]; then
+# Window manager (only when using the ibg-controller path). Xvfb has no
+# concept of focused window without a WM and Gateway's input routing
+# depends on focus. Must come AFTER start_xvfb so DISPLAY is set, and
+# BEFORE the controller launches Gateway.
+if [ "$USE_IBG_CONTROLLER" = "yes" ]; then
 	wait_x_socket
 	start_window_manager
-	start_dbus_session
-	start_atspi
 fi
 
 # setup SSH Tunnel
@@ -419,11 +380,11 @@ if [ -n "$IBC_SCRIPTS" ]; then
 fi
 
 # Controller-path analog: CONTROLLER_SCRIPTS runs user scripts after
-# the pyatspi2 controller has signalled readiness (and in dual mode
-# after BOTH instances have signalled). Users who previously used
-# IBC_SCRIPTS for post-login hooks can use this with the same
-# directory-of-shell-scripts semantics.
-if [ "$USE_PYATSPI2_CONTROLLER" = "yes" ] && [ -n "${CONTROLLER_SCRIPTS:-}" ]; then
+# the controller has signalled readiness (and in dual mode after BOTH
+# instances have signalled). Users who previously used IBC_SCRIPTS for
+# post-login hooks can use this with the same directory-of-shell-scripts
+# semantics.
+if [ "$USE_IBG_CONTROLLER" = "yes" ] && [ -n "${CONTROLLER_SCRIPTS:-}" ]; then
 	run_scripts "$HOME/$CONTROLLER_SCRIPTS"
 fi
 
