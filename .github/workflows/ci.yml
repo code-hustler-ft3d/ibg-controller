@@ -44,7 +44,14 @@ jobs:
         run: make test
 
       - name: make release (build tarball)
-        run: make release VERSION=${GITHUB_REF_NAME#v}
+        # On tag pushes GITHUB_REF_NAME is e.g. "v0.5.13" → "0.5.13".
+        # On main pushes it's "main". On pull_request events it's
+        # "<num>/merge" — the slash leaks into the tarball path and
+        # breaks the glob in the next step, so squash any "/" to "-".
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          VERSION=${VERSION//\//-}
+          make release VERSION="$VERSION"
 
       - name: Verify tarball layout
         run: |
