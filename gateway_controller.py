@@ -48,10 +48,8 @@ from datetime import datetime, time as dtime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
-import gi
 
-
-__version__ = "0.5.13"
+__version__ = "0.5.14"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -101,8 +99,6 @@ def _set_state(new_state):
     old = _current_state
     _current_state = new_state
     log.info(f"[STATE: {new_state.value}]")
-gi.require_version("Atspi", "2.0")
-from gi.repository import Atspi  # noqa: E402
 
 
 # ── Config from environment ─────────────────────────────────────────────
@@ -292,62 +288,18 @@ def safe(fn, default=None):
     return default
 
 
-def find_descendant(node, role=None, name=None, depth=0, max_depth=20):
-    """Walk a subtree DFS looking for the first node matching role and/or name.
+class _AppHandle:
+    """Lightweight handle representing the controller's identified Gateway JVM.
 
-    Match semantics:
-      - role: exact match against get_role_name()
-      - name: exact match against get_name() OR get_description()
-        (Gateway uses description for icon-only buttons like Close/Min/Max)
-    """
-    if depth > max_depth:
-        return None
-    try:
-        n_role = node.get_role_name()
-    except Exception:
-        n_role = None
-    try:
-        n_name = node.get_name() or ""
-    except Exception:
-        n_name = ""
-    try:
-        n_desc = node.get_description() or ""
-    except Exception:
-        n_desc = ""
-
-    role_ok = role is None or n_role == role
-    name_ok = name is None or n_name == name or n_desc == name
-    if role_ok and name_ok:
-        return node
-
-    n_children = safe(lambda: node.get_child_count(), 0) or 0
-    for i in range(n_children):
-        child = safe(lambda: node.get_child_at_index(i))
-        if child is None:
-            continue
-        hit = find_descendant(child, role=role, name=name,
-                              depth=depth + 1, max_depth=max_depth)
-        if hit is not None:
-            return hit
-    return None
-
-
-class _StubApp:
-    """Stand-in for an AT-SPI Accessible when the bridge is disabled.
-
-    v0.5.12: with ``-Djavax.accessibility.assistive_technologies=`` set on
-    the JVM, the AT-SPI desktop tree never sees a Gateway entry — so
-    pyatspi-based discovery (find_app) would always time out. All
-    login-UI code paths now go through the in-JVM gateway-input-agent
-    socket, which doesn't need the AT-SPI tree.
-
-    The stub keeps a minimal pyatspi-Accessible-like surface so the
-    handful of remaining callsites that still pass ``app`` around (and
-    occasionally call ``app.get_name()`` / ``get_process_id()`` for
-    logging) keep working without per-callsite branching. Tree-walking
-    callers (find_descendant, get_states, _read_text, click(node))
-    treat a zero-child subtree as "nothing matched" and bail
-    gracefully — same behavior they already had under AT-SPI flake.
+    The class predates v0.5.12 — it used to expose a pyatspi-Accessible-like
+    surface (get_role_name/get_state_set/get_child_count/...) so callers
+    could walk the AT-SPI tree off it. v0.5.12 disabled the AT-SPI bridge
+    in the JVM, and v0.5.14 removed the dead tree-walking helpers
+    (find_descendant / wait_for / get_states / _read_text / click(node) /
+    set_text(node, ...) / _dump_tree). The handle now carries only the
+    name + PID — what surviving callers actually use, plus a passthrough
+    argument for legacy signatures (handle_login(app), attempt_reauth(app),
+    do_restart_in_place(app), monitor_loop(app)).
     """
 
     def __init__(self, name="IBKR Gateway", pid=None):
@@ -360,40 +312,27 @@ class _StubApp:
     def get_process_id(self):
         return self._pid
 
-    def get_child_count(self):
-        return 0
-
-    def get_child_at_index(self, i):
-        return None
-
-    def get_role_name(self):
-        return "application"
-
-    def get_description(self):
-        return ""
-
-    def get_state_set(self):
-        return None
-
 
 def find_app(name_substring, timeout=120, match_pid=None):
-    """Return a placeholder application accessible.
+    """Return an app handle carrying the JVM PID reported by the agent.
 
     Pre-v0.5.12 this polled the AT-SPI desktop tree until an entry
-    matching ``name_substring`` appeared — the legacy way of getting an
-    AT-SPI Accessible to feed wait_for/find_descendant. With the AT-SPI
-    bridge disabled (see ``launch_gateway``) the desktop tree never
-    populates, so polling would always time out. We short-circuit to a
-    ``_StubApp`` carrying the JVM's PID so existing callers (which use
-    the return value only for logging and as a passthrough argument to
-    handle_login / attempt_inplace_relogin / etc.) keep working without
-    every callsite having to know that AT-SPI is gone.
+    matching ``name_substring`` appeared. v0.5.12 disabled the AT-SPI
+    bridge in the JVM (``launch_gateway`` passes
+    ``-Djavax.accessibility.assistive_technologies=``), so the desktop
+    tree never populates — polling would always time out. We
+    short-circuit to an ``_AppHandle`` carrying the agent-reported JVM
+    PID so existing callers (which use the return value only for
+    logging and as a passthrough argument to handle_login /
+    attempt_inplace_relogin / etc.) keep working without every callsite
+    having to know that AT-SPI is gone.
 
-    Returns the stub immediately. The ``timeout`` argument is ignored.
-    Returns ``None`` only if the agent's GET_PID never succeeded
-    (agent_get_pid returned None at controller startup), since in that
-    case dual-mode containers can't safely identify "their own" JVM and
-    the caller should treat that as a genuine launch failure.
+    Returns the handle immediately. The ``timeout`` argument is
+    ignored. Returns ``None`` only if the agent's ``GET_PID`` never
+    succeeded (``agent_get_pid`` returned ``None`` at controller
+    startup), since in that case dual-mode containers can't safely
+    identify "their own" JVM and the caller should treat that as a
+    genuine launch failure.
     """
     pid = match_pid if match_pid is not None else JVM_PID
     if pid is None:
@@ -402,46 +341,7 @@ def find_app(name_substring, timeout=120, match_pid=None):
         return None
     name = name_substring if isinstance(name_substring, str) else (
         name_substring[0] if name_substring else "IBKR Gateway")
-    return _StubApp(name=name, pid=pid)
-
-
-def wait_for(app, role, name=None, timeout=60):
-    """Poll the app subtree until a node with role (and optional name) appears."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        node = find_descendant(app, role=role, name=name)
-        if node is not None:
-            return node
-        time.sleep(0.3)
-    return None
-
-
-def get_states(node):
-    """Return the set of state names on a node, e.g. {'focusable', 'checked'}."""
-    state_set = safe(lambda: node.get_state_set())
-    if state_set is None:
-        return set()
-    states = set()
-    # AT-SPI state enum values are 0..N. We probe a known range.
-    state_map = {
-        Atspi.StateType.FOCUSABLE: "focusable",
-        Atspi.StateType.FOCUSED: "focused",
-        Atspi.StateType.EDITABLE: "editable",
-        Atspi.StateType.SHOWING: "showing",
-        Atspi.StateType.VISIBLE: "visible",
-        Atspi.StateType.ENABLED: "enabled",
-        Atspi.StateType.SENSITIVE: "sensitive",
-        Atspi.StateType.SELECTED: "selected",
-        Atspi.StateType.CHECKED: "checked",
-        Atspi.StateType.PRESSED: "pressed",
-    }
-    for st, label in state_map.items():
-        try:
-            if state_set.contains(st):
-                states.add(label)
-        except Exception:
-            pass
-    return states
+    return _AppHandle(name=name, pid=pid)
 
 
 # ── In-JVM agent client ─────────────────────────────────────────────────
@@ -830,93 +730,6 @@ def agent_window(title_substring=""):
     return _agent_multiline(f"WINDOW {title_substring}", timeout=10)
 
 
-def _dump_tree(node, depth=0, max_depth=15):
-    """Diagnostic-only — dump a subtree to the log."""
-    if depth > max_depth * 2:
-        return
-    role = safe(lambda: node.get_role_name(), "?")
-    name = safe(lambda: node.get_name(), "") or ""
-    desc = safe(lambda: node.get_description(), "") or ""
-    parts = [role]
-    if name: parts.append(f'name={name!r}')
-    if desc: parts.append(f'desc={desc!r}')
-    txt = _read_text(node)
-    if txt: parts.append(f'text={txt!r}')
-    log.info(" " * depth + " ".join(parts))
-    n = safe(lambda: node.get_child_count(), 0) or 0
-    for i in range(n):
-        c = safe(lambda: node.get_child_at_index(i))
-        if c is not None:
-            _dump_tree(c, depth + 2, max_depth)
-
-
-def _read_text(node):
-    """Read the current contents of a text node via the Text interface."""
-    try:
-        n_chars = Atspi.Text.get_character_count(node)
-        if n_chars <= 0:
-            return ""
-        return Atspi.Text.get_text(node, 0, n_chars) or ""
-    except Exception:
-        return ""
-
-
-def set_text(node, text):
-    """Set text on an editable node by delegating to the in-JVM agent.
-
-    External text input (AT-SPI EditableText, xdotool XTest, XSendEvent)
-    all fail against Gateway's hardened login form. Phase 1 spike proved
-    that only in-JVM JTextField.setText() reaches the field. The agent
-    runs inside Gateway's JVM (loaded via -javaagent:) and exposes the
-    operation over a Unix socket. See spike/PHASE1_FINDINGS.md for the
-    full diagnostic story.
-
-    The agent looks up components by AccessibleContext.getAccessibleName(),
-    which is the same name AT-SPI exposes — so the AT-SPI node we found
-    via Python and the Java component the agent finds are the same object.
-    """
-    role = safe(lambda: node.get_role_name(), "?")
-    is_password = role == "password text"
-    name = safe(lambda: node.get_name(), "") or ""
-
-    if not name:
-        log.error(f"set_text on {role}: node has no accessible name — can't dispatch to agent")
-        return False
-
-    if not agent_settext(name, text):
-        return False
-
-    # Verify (skip for passwords — readback is masked anyway).
-    if is_password:
-        log.info(f"set_text on {role} {name!r}: ok via agent (verify skipped — masked)")
-        return True
-
-    actual = agent_gettext(name)
-    if actual == text:
-        log.info(f"set_text on {role} {name!r}: ok via agent (verified)")
-        return True
-    log.warning(f"set_text on {role} {name!r}: agent reported OK but readback was {actual!r}")
-    # Trust the agent's OK over the readback — the agent is more reliable.
-    return True
-
-
-def click(node):
-    """Perform the default action (action 0) on a node. For buttons this is 'click'."""
-    role = safe(lambda: node.get_role_name(), "?")
-    name = safe(lambda: node.get_name(), "") or ""
-    try:
-        n_actions = safe(lambda: Atspi.Action.get_n_actions(node), 0) or 0
-        if n_actions == 0:
-            log.error(f"click on {role}:{name!r}: no actions exposed")
-            return False
-        ok = Atspi.Action.do_action(node, 0)
-        log.info(f"click on {role}:{name!r}: {'ok' if ok else 'failed'}")
-        return ok
-    except Exception as e:
-        log.error(f"click on {role}:{name!r}: {e}")
-        return False
-
-
 # ── Gateway launch ──────────────────────────────────────────────────────
 
 def find_gateway_launcher():
@@ -1281,12 +1094,12 @@ def handle_login(app):
     disabled in the JVM (see ``launch_gateway`` — the
     ``-Djavax.accessibility.assistive_technologies=`` flag) to prevent the
     AtkWrapper$5.propertyChange + AtkUtil.invokeInSwing deadlock that hung
-    JTS-Login-14 during the welcome-screen JProgressBar update. Without
-    AT-SPI, ``find_app`` / ``find_descendant`` / ``wait_for`` /
-    ``get_states`` / ``click(node)`` / ``_read_text`` no longer have a
-    populated tree to walk, so all login-UI interaction goes through the
-    in-JVM ``gateway-input-agent`` socket — pure Swing/AWT, no AT-SPI
-    callbacks, no JNI re-entrancy, no deadlock.
+    JTS-Login-14 during the welcome-screen JProgressBar update. v0.5.14
+    physically removed the dead helpers (find_descendant / wait_for /
+    get_states / click(node) / _read_text / set_text(node, ...) /
+    _dump_tree) and the gi.repository.Atspi import. All login-UI
+    interaction goes through the in-JVM ``gateway-input-agent`` socket —
+    pure Swing/AWT, no AT-SPI callbacks, no JNI re-entrancy, no deadlock.
 
     The ``app`` argument is now a placeholder kept only for caller
     compatibility (attempt_inplace_relogin, do_restart_in_place,
@@ -3423,10 +3236,15 @@ def main():
         sys.exit(1)
 
     if TEST_MODE:
-        log.info("CONTROLLER_TEST_MODE=1 — waiting 5s for Gateway response then dumping tree")
+        log.info("CONTROLLER_TEST_MODE=1 — waiting 5s for Gateway response then dumping window state")
         time.sleep(5)
-        log.info("=== POST-CLICK TREE DUMP ===")
-        _dump_tree(app, max_depth=15)
+        log.info("=== POST-CLICK WINDOW DUMP (via agent) ===")
+        try:
+            for line in agent_window("").split("\n"):
+                if line and line not in ("OK", "END"):
+                    log.info(f"  {line}")
+        except Exception as e:
+            log.error(f"  agent_window dump failed: {type(e).__name__}: {e}")
         sys.exit(0)
 
     # 3a. Check for CCP lockout BEFORE entering the 2FA wait. Gateway's

@@ -23,19 +23,13 @@ USER root
 # Runtime packages. `gettext-base socat xvfb x11vnc sshpass openssh-client
 # sudo telnet` are already in the upstream image; listed nowhere here
 # because the upstream provides them. We add:
-#   - python3 + python3-gi + gir1.2-atspi-2.0 + at-spi2-core: the Python
-#     controller still does `from gi.repository import Atspi` at module
-#     load. The AT-SPI bridge is disabled in the JVM (see
-#     gateway_controller.py launch_gateway) and the bus daemons are no
-#     longer started, but the typelib + libatspi.so.0 must be installable
-#     for the import to succeed.
+#   - python3: runs gateway_controller.py.
 #   - matchbox-window-manager: Xvfb has no concept of focused window
 #     without a WM, and Gateway's input routing depends on focus.
 #   - curl: used by scripts/healthcheck.sh.
 RUN apt-get update -y \
  && apt-get install --no-install-recommends --yes \
-      python3 python3-gi gir1.2-atspi-2.0 at-spi2-core \
-      matchbox-window-manager curl \
+      python3 matchbox-window-manager curl \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 

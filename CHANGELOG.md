@@ -4,6 +4,60 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.5.14] - 2026-04-28
+
+### Removed
+
+- **Dead AT-SPI tree-walking helpers** in `gateway_controller.py`,
+  along with the `gi.repository.Atspi` import they required.
+  v0.5.12 left these in place as dead code with zero live callers
+  (everything routed through `agent_*`); v0.5.14 deletes them.
+  Specifically:
+  - `find_descendant(node, ...)`, `wait_for(app, role, ...)`,
+    `get_states(node)`, `_dump_tree(node, ...)`, `_read_text(node)`,
+    `set_text(node, text)`, and the `click(node)` AT-SPI overload.
+  - `import gi`, `gi.require_version("Atspi", "2.0")`, and
+    `from gi.repository import Atspi` from the module preamble.
+  - The `_STATE_NAMES`-style `Atspi.StateType.*` mapping inside
+    `get_states` (gone with the function).
+- **The runtime apt install of `python3-gi`, `gir1.2-atspi-2.0`,
+  and `at-spi2-core`** in the `Dockerfile`. These were only kept
+  alive in v0.5.13 because the controller's module-load imports
+  needed the typelib and `libatspi.so.0`. With the imports gone,
+  the runtime layer is now just `python3 matchbox-window-manager
+  curl` on top of the upstream `gnzsnz/ib-gateway` base.
+- The `python3-gi` / `gir1.2-atspi-2.0` / `at-spi2-core` apt install
+  in the `smoke-test-image` CI job. The job's runner is now vanilla
+  python3, and the import succeeding without those packages is the
+  regression guard.
+- The `sys.modules` gi-stack mock in `tests/test_pure_logic.py`
+  (no longer needed; the controller imports cleanly on any host).
+
+### Changed
+
+- `_StubApp` renamed to `_AppHandle`. Old class exposed a full
+  pyatspi-Accessible-like surface (`get_role_name`,
+  `get_state_set`, `get_child_count`, `get_child_at_index`,
+  `get_description`) for the now-deleted tree-walking callers.
+  The new class carries only the two methods callers actually
+  use: `get_name()` and `get_process_id()`. Behavior unchanged.
+- `CONTROLLER_TEST_MODE=1`'s post-Log-In dump switches from
+  `_dump_tree(app)` (which walked the empty AT-SPI tree post-v0.5.12
+  and produced nothing useful) to dumping the live Swing window
+  state via the agent's `WINDOW` command. The dump is finally
+  informative again.
+- `_AppHandle`, `find_app`, `handle_login`, the gateway-version-matrix
+  CI step's comments, and Dockerfile / CONTRIBUTING / MIGRATION /
+  UPGRADING docs all rewritten to reflect post-v0.5.14 reality.
+
+### Validation
+
+- `python3 -m unittest discover -s tests`: 224 tests pass.
+- `python3 -m py_compile gateway_controller.py`: OK.
+- Bash syntax checks pass.
+- Greps confirm zero `Atspi.`, `import gi`, or `gi.require_version`
+  references remain in `gateway_controller.py`.
+
 ## [0.5.13] - 2026-04-28
 
 ### Removed

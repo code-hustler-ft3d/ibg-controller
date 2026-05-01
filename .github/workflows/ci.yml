@@ -88,14 +88,12 @@ jobs:
   smoke-test-image:
     runs-on: ubuntu-24.04
     needs: build-and-test
-    # Smoke-test in an environment that matches the shipped image's
-    # runtime layer: python3 plus the gi/Atspi typelib stack the
-    # controller still imports at module load (the AT-SPI runtime path
-    # was retired in v0.5.12 and the bridge install steps in v0.5.13,
-    # but `from gi.repository import Atspi` still happens during
-    # gateway_controller.py import). This catches `import` regressions
-    # against the real gi stack rather than the sys.modules mock the
-    # unit tests use.
+    # Smoke-test that gateway_controller.py imports cleanly on a
+    # vanilla host with only stdlib python3 — no gi/Atspi/ATK
+    # dependencies. The controller used to require the full pyatspi2
+    # stack (retired by v0.5.12 / v0.5.13 / v0.5.14). If anyone
+    # accidentally re-introduces an `import gi` at module load, this
+    # job fails because we don't install python3-gi here.
     steps:
       - name: Check out
         uses: actions/checkout@v4
@@ -106,18 +104,16 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Install build + runtime deps on the runner
-        # The runner is ubuntu-24.04 — the same distro we previously
-        # docker-run'd into for this smoke test. Running the smoke
-        # directly on the runner drops an unreliable hop (docker's
-        # NAT network couldn't reach archive.ubuntu.com on 2026-04-17,
-        # failing the original docker-apt-install flow even though
-        # the runner's own apt was fine).
+      - name: Install build deps on the runner
+        # The runner is ubuntu-24.04 — same distro the shipped image
+        # is built on. We deliberately do NOT install python3-gi /
+        # gir1.2-atspi-2.0 / at-spi2-core: the import smoke test below
+        # must succeed without them (v0.5.14 dropped the gi imports;
+        # this job is the regression guard).
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            make unzip \
-            python3 python3-gi gir1.2-atspi-2.0 at-spi2-core
+            make unzip python3
 
       - name: make
         run: make
@@ -181,10 +177,11 @@ jobs:
             -t ibg-controller:matrix-test .
 
       - name: Container-level module-load smoke test
-        # Verify gateway_controller.py imports cleanly inside the
-        # built image (python3 + gi + Atspi typelib). Catches upstream
-        # base-image drift (missing libs, changed paths) at CI time
-        # rather than at runtime on a user's host.
+        # Verify gateway_controller.py imports cleanly inside the built
+        # image. v0.5.14 dropped the gi/Atspi import, so this should
+        # succeed with stdlib-only python3. Catches upstream base-image
+        # drift (missing libs, changed paths) at CI time rather than at
+        # runtime on a user's host.
         env:
           TWS_USERID: x
           TWS_PASSWORD: x
@@ -254,7 +251,7 @@ jobs:
             fi
             echo "OK assistive_technologies disable flag still in controller"
 
-            # 4. Sanity: the things v0.5.13 KEPT must still be present.
+            # 4. Sanity: the things v0.5.13/v0.5.14 KEPT must still be present.
             test -f /home/ibgateway/gateway-input-agent.jar \
               && echo "OK input agent jar in place"
             test -f /home/ibgateway/scripts/gateway_controller.py \
@@ -263,4 +260,19 @@ jobs:
               && echo "OK run.sh executable in place"
             command -v matchbox-window-manager >/dev/null \
               && echo "OK matchbox-window-manager installed"
+
+            # 5. v0.5.14: the gi/Atspi stack should not be installed
+            #    by OUR Dockerfile. We log dpkg state informationally —
+            #    upstream may ship its own copy (we tolerate that, since
+            #    nothing imports it anymore). The strict regression
+            #    guard for "controller imports without gi" lives in the
+            #    smoke-test-image job, which runs on a vanilla runner
+            #    with no gi packages installed.
+            for pkg in python3-gi gir1.2-atspi-2.0 at-spi2-core; do
+              if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
+                echo "NOTE: $pkg installed (upstream base — ours does not pull it)"
+              else
+                echo "OK $pkg absent"
+              fi
+            done
           '

@@ -76,6 +76,42 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.5.14
+
+**No breaking changes.** Finishes the v0.5.13 cleanup by removing the
+dead Python helpers in `gateway_controller.py` that referenced
+`gi.repository.Atspi`, then dropping the apt packages those imports
+required.
+
+- `gateway_controller.py` no longer does `import gi` or
+  `from gi.repository import Atspi` at module load. Removed: the
+  `find_descendant`, `wait_for`, `get_states`, `_dump_tree`,
+  `_read_text`, `set_text(node, ...)`, `click(node)` helpers
+  (zero live callers — all UI work routes through `agent_*` calls).
+  `_StubApp` was renamed to `_AppHandle` and slimmed to the two
+  methods callers actually use (`get_name()`, `get_process_id()`).
+  `CONTROLLER_TEST_MODE=1`'s post-Log-In tree dump now uses the
+  agent's `WINDOW` command instead of the (empty) AT-SPI tree.
+- `Dockerfile` drops `python3-gi`, `gir1.2-atspi-2.0`, and
+  `at-spi2-core` from apt install. The runtime layer is now just
+  `python3 matchbox-window-manager curl` on top of the upstream
+  `gnzsnz/ib-gateway` base.
+- `tests/test_pure_logic.py` no longer needs to mock `gi` /
+  `gi.repository` / `gi.repository.Atspi` in `sys.modules` to load
+  the controller — `python3 gateway_controller.py` works on any host
+  with stdlib.
+- `smoke-test-image` CI job no longer installs `python3-gi`/etc.
+  on the runner; the import succeeding without them is now the
+  regression guard.
+
+**No operator action required for the prebuilt GHCR image** beyond
+the redeploy. Image size shrinks by ~5 MB (the gi/Atspi stack and
+its transitive deps).
+
+If you maintain a fork that still imports `gi.repository.Atspi`
+directly from `gateway_controller.py`, those imports won't be there
+on v0.5.14 — pin to your fork's branch, not `:latest`.
+
 ### v0.5.13
 
 **No breaking changes for image consumers.** Image cleanup — drops

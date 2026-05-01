@@ -1,16 +1,10 @@
 """Pure-Python unit tests for gateway_controller.py helpers.
 
-No network, no filesystem side effects, no AT-SPI. Run with:
+No network, no filesystem side effects. Run with:
 
     python3 -m unittest discover -s tests -v
 
 or via `make test` (which gates on unittest discover).
-
-These tests import gateway_controller.py directly with the `gi` and
-`gi.repository.Atspi` modules mocked in sys.modules so the real
-pyatspi2 stack isn't required on the test host. That lets `make test`
-pass in a minimal build container (eclipse-temurin:17-jdk + python3,
-no GTK, no ATK).
 
 What's covered:
   - _validate_hostname: accept DNS-label strings, reject whitespace /
@@ -26,7 +20,6 @@ What's covered:
 What's NOT covered by this file (tracked separately):
   - jts.ini writer (side effects on filesystem — needs tempdir fixture)
   - Agent protocol client (needs a mock socket server)
-  - AT-SPI code paths (need the full gi stack)
   - Live login flow (needs real Gateway + real credentials)
 """
 
@@ -38,17 +31,18 @@ from unittest.mock import MagicMock, patch
 
 
 def _load_module():
-    """Load gateway_controller.py with the pyatspi2 stack stubbed out.
+    """Load gateway_controller.py from the repo root.
 
     Returns the module object, reusable across tests. Called once at
     import time and cached at module level so each TestCase doesn't
     pay the startup cost.
-    """
-    # Stub the gi / gi.repository / gi.repository.Atspi imports.
-    sys.modules.setdefault("gi", MagicMock())
-    sys.modules.setdefault("gi.repository", MagicMock())
-    sys.modules.setdefault("gi.repository.Atspi", MagicMock())
 
+    v0.5.14: the controller no longer imports gi.repository.Atspi at
+    module load (the dead AT-SPI tree-walking helpers were removed
+    along with the package install in the Dockerfile), so this loader
+    no longer needs to stub the gi stack in sys.modules. A bare
+    ``python3 gateway_controller.py`` works on any host with stdlib.
+    """
     # The module does os.environ.get for several vars at load time;
     # most are optional but the controller checks USERNAME/PASSWORD
     # only inside main(), so we don't need to set them.

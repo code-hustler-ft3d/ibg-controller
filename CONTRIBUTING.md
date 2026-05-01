@@ -12,7 +12,7 @@ make
 make install DESTDIR=/home/ibgateway
 
 # Create a release tarball
-make release VERSION=0.5.13
+make release VERSION=0.5.14
 ```
 
 Requires JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
@@ -22,17 +22,21 @@ Requires JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
 See `docs/ARCHITECTURE.md` for the full list and why each is needed.
 The short version:
 
-- `python3` — runs `gateway_controller.py`
+- `python3` — runs `gateway_controller.py` (stdlib-only at module load
+  as of v0.5.14 — no gi/Atspi/PyGObject required)
 - `matchbox-window-manager` — Xvfb has no WM by default; Gateway's
   input routing depends on a focused window
 
 Pre-v0.5.13 the image also installed `python3-gi gir1.2-atspi-2.0
 at-spi2-core libatk-wrapper-java libatk-wrapper-java-jni dbus-x11` and
-configured `$JAVA_HOME/conf/accessibility.properties`. v0.5.12 disabled
-the AT-SPI bridge in the JVM (it was deadlocking on Swing dispatch);
-v0.5.13 removed the install steps. If you're rebasing from an older
-fork, drop those packages and the JRE accessibility.properties write
-when you bring your image forward.
+configured `$JAVA_HOME/conf/accessibility.properties` for the AT-SPI
+bridge. v0.5.12 disabled the bridge in the JVM (it was deadlocking on
+Swing dispatch); v0.5.13 removed the JVM-side bridge install steps;
+v0.5.14 finished the cleanup by removing the dead Python helpers that
+had kept `python3-gi gir1.2-atspi-2.0 at-spi2-core` alive in the
+apt install. If you're rebasing from an older fork, drop those
+packages and the JRE accessibility.properties write when you bring
+your image forward.
 
 ## Code layout
 
