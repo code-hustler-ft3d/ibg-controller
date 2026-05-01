@@ -11,18 +11,6 @@ echo "*************************************************************************"
 # shellcheck disable=SC1091
 source "${SCRIPT_PATH}/common.sh"
 
-# Backward compatibility: USE_PYATSPI2_CONTROLLER is the historical name
-# for the controller toggle (the controller used to walk the AT-SPI
-# desktop tree via pyatspi). v0.5.12+ no longer registers Gateway with
-# AT-SPI at all; the env var is now just the IBC-vs-controller switch.
-# USE_IBG_CONTROLLER is the preferred name. Honor the old name for
-# existing compose files but warn so users migrate.
-if [ -z "${USE_IBG_CONTROLLER:-}" ] && [ -n "${USE_PYATSPI2_CONTROLLER:-}" ]; then
-	USE_IBG_CONTROLLER="$USE_PYATSPI2_CONTROLLER"
-	echo ".> WARNING: USE_PYATSPI2_CONTROLLER is deprecated; rename to USE_IBG_CONTROLLER"
-fi
-export USE_IBG_CONTROLLER
-
 # shellcheck disable=SC2329
 stop_ibc() {
 	echo ".> 😘 Received SIGINT or SIGTERM. Shutting down IB Gateway."
@@ -134,8 +122,7 @@ start_IBC() {
 }
 
 # ── ibg-controller path ─────────────────────────────────────────────────
-# Opt-in via USE_IBG_CONTROLLER=yes (historically USE_PYATSPI2_CONTROLLER;
-# alias handled at the top of this script). Default falls back to IBC.
+# Opt-in via USE_IBG_CONTROLLER=yes. Default falls back to IBC.
 
 start_window_manager() {
 	# Xvfb has no window manager by default, which leaves no focused

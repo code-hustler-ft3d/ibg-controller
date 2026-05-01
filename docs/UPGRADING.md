@@ -76,6 +76,47 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.6.0
+
+**Breaking change for anyone still on the `USE_PYATSPI2_CONTROLLER`
+env-var name.** The toggle was renamed to `USE_IBG_CONTROLLER` in
+v0.5.13, with the old name honored as a deprecated alias and a
+startup warning printed by `run.sh`. v0.6.0 removes the alias.
+
+If your `docker-compose.yml` / `.env` / `docker run -e` invocation
+still says:
+
+```yaml
+USE_PYATSPI2_CONTROLLER: "yes"
+```
+
+rename it to:
+
+```yaml
+USE_IBG_CONTROLLER: "yes"
+```
+
+before pulling v0.6.0. After the upgrade, if `USE_IBG_CONTROLLER` is
+unset (because the old name was the only thing in the env file),
+`run.sh` falls through to the IBC path — same behavior as if the
+toggle had never been set, but probably not what you wanted.
+
+If you don't see the warning `USE_PYATSPI2_CONTROLLER is deprecated;
+rename to USE_IBG_CONTROLLER` in your v0.5.13 / v0.5.14 logs, you've
+already migrated and there is nothing to do.
+
+**Why a v0.6.0 minor bump for one env-var rename:** the project's
+stability contract (in this file, just above the per-version notes)
+calls minor bumps the boundary for breaking changes in pre-1.0. v0.6.0
+is the right shape; v0.5.15 would have been a SemVer violation. The
+change is small in size but has the contract weight of a minor bump.
+
+**Why not keep the alias longer:** the project just started getting
+public attention but has effectively zero deployed consumers outside
+the maintainer's own stack. Removing the alias now while breakage
+cost is low beats letting it linger as cruft for a year of imagined
+backwards compat.
+
 ### v0.5.14
 
 **No breaking changes.** Finishes the v0.5.13 cleanup by removing the

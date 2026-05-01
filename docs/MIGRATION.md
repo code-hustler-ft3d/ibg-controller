@@ -107,20 +107,15 @@ which fixes a long-standing issue in the IBC path where socat races the
 Gateway login and the first few API client connection attempts hit a
 closed port.
 
-> **Backwards compatibility.** The historical env-var name was
-> `USE_PYATSPI2_CONTROLLER` (the controller used to walk the AT-SPI
-> desktop tree via pyatspi). `run.sh` honors the old name as a
-> deprecated alias and prints a one-line warning at startup so
-> existing compose files keep working. Rename to `USE_IBG_CONTROLLER`
-> at your leisure.
-
 ## What changes at runtime
 
 ### New env vars
 
 - **`USE_IBG_CONTROLLER=yes`** — opts into the new path. Default
-  (unset) uses IBC as before. The historical name
-  `USE_PYATSPI2_CONTROLLER=yes` is still honored as a deprecated alias.
+  (unset) uses IBC as before. (Pre-v0.6.0 the toggle was named
+  `USE_PYATSPI2_CONTROLLER`; that alias was removed in v0.6.0 — see
+  [`UPGRADING.md`](UPGRADING.md#v060) if you're migrating from
+  v0.5.x.)
 - **`TWS_SERVER`** / **`TWS_SERVER_PAPER`** — your IBKR regional server.
   See [BOOTSTRAP.md](BOOTSTRAP.md) for how to find it.
 

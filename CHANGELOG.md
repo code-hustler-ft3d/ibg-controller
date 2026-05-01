@@ -4,6 +4,55 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-05-01
+
+### Removed (breaking)
+
+- **`USE_PYATSPI2_CONTROLLER` deprecated alias.** The env var was
+  renamed to `USE_IBG_CONTROLLER` in v0.5.13 with the old name
+  honored as a deprecated alias (with a startup warning). v0.6.0
+  removes the alias entirely. Containers that still set
+  `USE_PYATSPI2_CONTROLLER=yes` without `USE_IBG_CONTROLLER=yes`
+  will fall through to the IBC path (which is the documented
+  default behavior for an unset toggle).
+
+  Why now and not later: the project is pre-1.0 with no
+  production deployments outside the maintainer's own stack, so
+  the cost of a breaking change is at its minimum right now.
+  Letting the alias linger creates "two env vars for the same
+  toggle" cruft that compounds over time. SemVer-wise, removing
+  a public env var is a breaking change and `0.5.x → 0.6.0` is
+  the project's stated boundary for that
+  (per `docs/UPGRADING.md`).
+  Migration: rename `USE_PYATSPI2_CONTROLLER` to
+  `USE_IBG_CONTROLLER` in your `docker-compose.yml` / `.env` /
+  `docker run -e` invocation. v0.5.13 and v0.5.14 both shipped
+  the deprecation warning, so anyone who watched their logs has
+  had two release cycles to migrate.
+
+- The alias-handling block at the top of `docker/run.sh` (the
+  `if [ -z "${USE_IBG_CONTROLLER:-}" ] && [ -n "${USE_PYATSPI2_CONTROLLER:-}" ]; then ... fi`
+  block plus the explanatory comment).
+- The "Backwards compatibility" callout in `docs/MIGRATION.md`.
+- The deprecated-alias parenthetical in `docs/FROM_IBC.md`.
+- The `<!-- or USE_PYATSPI2_CONTROLLER if you're still on the
+  deprecated alias -->` HTML comment in
+  `.github/ISSUE_TEMPLATE/bug_report.md`.
+
+### Changed
+
+- `docs/MIGRATION.md`'s description of the new env var now points
+  forward at `UPGRADING.md#v060` for the rename history rather
+  than carrying the migration text inline.
+
+### Validation
+
+- `python3 -m unittest discover -s tests`: 224 tests pass.
+- `python3 -m py_compile gateway_controller.py`: OK.
+- `bash -n docker/run.sh`: OK.
+- `grep -r USE_PYATSPI2_CONTROLLER`: only matches in
+  CHANGELOG.md and UPGRADING.md (historical record).
+
 ## [0.5.14] - 2026-04-28
 
 ### Removed
