@@ -29,3 +29,6 @@ __pycache__/
 
 # Local drafts (posts, notes — not shipped)
 drafts/
+
+# Claude Code harness state — local-only, never tracked
+.claude/

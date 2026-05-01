@@ -54,7 +54,8 @@ RUN apt-get update -y && \
 ```
 
 The new runtime packages:
-- `python3` — runs `gateway_controller.py`
+- `python3` — runs `gateway_controller.py` (stdlib-only at module
+  load as of v0.5.14 — no PyGObject/gi/Atspi)
 - `matchbox-window-manager` — a minimal window manager (Xvfb has no
   WM by default and Gateway's input routing depends on a focus owner)
 
@@ -65,9 +66,12 @@ The new runtime packages:
 > the AT-SPI `AtkWrapper` bridge for component discovery. v0.5.12
 > disabled the bridge after it was found to deadlock on
 > `JProgressBar.setValue` calls during login (intra-JVM, not
-> broker-side); v0.5.13 removed the install steps entirely. All UI
-> work now goes through the in-JVM agent socket. If you're rebasing
-> from a fork that has the old install block, drop it.
+> broker-side); v0.5.13 removed the JVM-side install steps; v0.5.14
+> removed the residual `python3-gi gir1.2-atspi-2.0 at-spi2-core`
+> install along with the dead Python helpers that referenced
+> `gi.repository.Atspi`. All UI work now goes through the in-JVM
+> agent socket. If you're rebasing from a fork that has the old
+> install block, drop it.
 
 ## What changes in `run.sh`
 
