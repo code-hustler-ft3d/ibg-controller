@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -1164,11 +1164,18 @@ def handle_login(app):
     if not (agent_click("Log In") or agent_click("Paper Log In")):
         log.error("Log In / Paper Log In button click failed via agent")
         # Diagnostic: dump the login window's component tree via the agent.
+        # This is an ERROR-level (always-emitted) dump of the login frame,
+        # which holds the just-typed password. v0.6.3: the agent masks
+        # JPasswordField contents at the source, so the password no longer
+        # reaches this dump. We additionally run every line through
+        # _redact_logs here as defense-in-depth (it strips IBKR DU/U
+        # account numbers that can appear in window titles) and because
+        # this is exactly the dump a user copies into a bug report.
         try:
             log.error("=== agent_window('IBKR Gateway') dump ===")
             for line in agent_window("IBKR Gateway").split("\n"):
                 if line and line not in ("OK", "END"):
-                    log.error(f"  {line}")
+                    log.error(f"  {_redact_logs(line)}")
             log.error("=== end window dump ===")
         except Exception as e:
             log.error(f"  agent_window dump failed: {type(e).__name__}: {e}")
@@ -3335,10 +3342,13 @@ def main():
         log.info("CONTROLLER_TEST_MODE=1 — waiting 5s for Gateway response then dumping window state")
         time.sleep(5)
         log.info("=== POST-CLICK WINDOW DUMP (via agent) ===")
+        # v0.6.3: redact account numbers in titles; password fields are
+        # already masked at the agent. This dump is opt-in (TEST_MODE)
+        # but users still share its output, so keep it clean.
         try:
             for line in agent_window("").split("\n"):
                 if line and line not in ("OK", "END"):
-                    log.info(f"  {line}")
+                    log.info(f"  {_redact_logs(line)}")
         except Exception as e:
             log.error(f"  agent_window dump failed: {type(e).__name__}: {e}")
         sys.exit(0)

@@ -34,7 +34,7 @@ docker run -d --name ibkr \
 ```
 
 Tags published: `:latest`, `:<major>.<minor>` (e.g. `:0.5`), and
-`:v<major>.<minor>.<patch>` (e.g. `:v0.6.2`). Every tag is signed with
+`:v<major>.<minor>.<patch>` (e.g. `:v0.6.3`). Every tag is signed with
 cosign via Sigstore keyless signing — see [`SECURITY.md`](SECURITY.md)
 for the verification recipe. For reproducible deployments, pin to a
 digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
@@ -611,10 +611,16 @@ trading tool. But there are real things to get right.
 
 **Logs and sharing them**:
 
-1. `CONTROLLER_DEBUG=1` dumps modal dialog contents. The controller
-   redacts account numbers matching `DU\d{5,10}` / `U\d{5,10}` (IBKR
-   account format) before logging. Other identifying information
-   like your username may still appear in window titles. **Review
+1. Window/dialog dumps (`CONTROLLER_DEBUG=1`, the `CONTROLLER_TEST_MODE`
+   dump, and the login-failure diagnostic) redact account numbers
+   matching `DU\d{5,10}` / `U\d{5,10}` (IBKR account format), and as of
+   **v0.6.3** the in-JVM agent masks password-field contents at the
+   source — a `JPasswordField` is emitted as `<redacted password
+   len=N>`, never its value. (Before v0.6.3 the login-failure dump
+   could log your IBKR password in plaintext; see CHANGELOG.md v0.6.3.
+   Upgrade, and if you ran an older version, treat any saved
+   login-failure logs as sensitive.) Other identifying information
+   like your username can still appear in window titles. **Review
    logs before posting them publicly**.
 2. Gateway's own `/home/ibgateway/Jts/launcher.log` is NOT
    controlled by us and may include fragments of your session. If
