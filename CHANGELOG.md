@@ -4,6 +4,38 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-05-11
+
+### Fixed
+
+- **Restored the `TWOFA_DEVICE` "not honored" startup warning.** A
+  prior release removed `TWOFA_DEVICE` from `_warn_unsupported_env_vars()`
+  with a comment claiming "the controller handles IB Key push 2FA" —
+  conflating two different things. IB Key *push* on a **single-method**
+  account is handled (the controller polls for the dialog to dismiss
+  after the user approves on their phone). But `TWOFA_DEVICE` as a
+  **device selector** among *multiple* enabled methods was never
+  implemented, so setting it was a silent no-op. Users with both
+  IB Key and Mobile Authenticator enabled (IB Key listed first) set
+  `TWOFA_DEVICE=Mobile Authenticator app`, got no warning, and hit a
+  login failure where the TOTP code is entered into the wrong control
+  (reported in issue #7). The controller now warns clearly at startup
+  that `TWOFA_DEVICE` is set but not yet honored, names the exact
+  failure mode, and links the tracking issue.
+
+  This is the diagnostic half. The actual device-selection feature
+  (driving Gateway's multi-method chooser) is in progress — see
+  issue #7. Single-method TOTP accounts and single-method IB Key push
+  are unaffected by this release either way.
+
+### Validation
+
+- 225 unit tests pass (the `test_twofa_device_no_longer_warned`
+  assertion was flipped to `test_twofa_device_warned_when_set`, and a
+  `test_twofa_device_not_warned_when_unset` companion added to confirm
+  the warning is gated on the var being set).
+- `python3 -m py_compile gateway_controller.py`: OK.
+
 ## [0.6.2] - 2026-05-01
 
 ### Fixed

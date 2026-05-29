@@ -156,12 +156,15 @@ class TestUnsupportedEnvVarsList(unittest.TestCase):
         joined = "\n".join(captured)
         self.assertIn("CUSTOM_CONFIG", joined)
 
-    def test_twofa_device_no_longer_warned(self):
-        # TWOFA_DEVICE was moved OUT of the warning list because the
-        # controller now handles IB Key push 2FA (poll for dialog
-        # dismissal). It should NOT appear in the warning output.
+    def test_twofa_device_warned_when_set(self):
+        # TWOFA_DEVICE is set but not yet honored (the controller can't
+        # select among multiple second-factor devices — see issue #7).
+        # A prior release removed this warning, creating a silent no-op
+        # trap; it must fire so users with multi-method accounts aren't
+        # left debugging a phantom bug. It should also point at the
+        # tracking issue.
         prev = os.environ.get("TWOFA_DEVICE")
-        os.environ["TWOFA_DEVICE"] = "mobile"
+        os.environ["TWOFA_DEVICE"] = "Mobile Authenticator app"
         captured = []
         real_warn = gc.log.warning
         gc.log.warning = lambda m, *a, **k: captured.append(m if not a else m % a)
@@ -172,6 +175,24 @@ class TestUnsupportedEnvVarsList(unittest.TestCase):
             if prev is None:
                 os.environ.pop("TWOFA_DEVICE", None)
             else:
+                os.environ["TWOFA_DEVICE"] = prev
+        joined = "\n".join(captured)
+        self.assertIn("TWOFA_DEVICE", joined)
+        self.assertIn("issues/7", joined)
+
+    def test_twofa_device_not_warned_when_unset(self):
+        # The warning is gated on the var being set — an unset
+        # TWOFA_DEVICE must NOT produce a spurious warning.
+        prev = os.environ.get("TWOFA_DEVICE")
+        os.environ.pop("TWOFA_DEVICE", None)
+        captured = []
+        real_warn = gc.log.warning
+        gc.log.warning = lambda m, *a, **k: captured.append(m if not a else m % a)
+        try:
+            gc._warn_unsupported_env_vars()
+        finally:
+            gc.log.warning = real_warn
+            if prev is not None:
                 os.environ["TWOFA_DEVICE"] = prev
         joined = "\n".join(captured)
         self.assertNotIn("TWOFA_DEVICE", joined)

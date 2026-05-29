@@ -76,6 +76,33 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.6.3
+
+**No breaking changes.** Restores an honest startup warning for
+`TWOFA_DEVICE`.
+
+If your IBKR account has a single second-factor method (just Mobile
+Authenticator / TOTP, or just IB Key push), nothing changes — your
+setup is unaffected and you'll see no new warning unless you have
+`TWOFA_DEVICE` set.
+
+If you have **multiple** 2FA methods enabled (e.g. IB Key *and*
+Mobile Authenticator) and you set `TWOFA_DEVICE` expecting the
+controller to pick one, you'll now see a startup warning that it is
+**not yet honored**. That's the truth — the controller can't yet
+drive Gateway's device chooser, so on a multi-method account
+automated TOTP login can fail (the code lands in the wrong control).
+A prior release silently dropped this warning; v0.6.3 brings it back
+so you're not left debugging a phantom bug. The real device-selection
+feature is tracked in
+[issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7).
+
+**No operator action required** beyond the redeploy. If you're hit by
+the multi-method limitation, the interim options are: (a) disable the
+non-TOTP method on the IBKR account so only Mobile Authenticator
+remains, or (b) stay on a manual/VNC login for that account until the
+fix ships.
+
 ### v0.6.2
 
 **No breaking changes.** Real fix for the dual-mode post-login config

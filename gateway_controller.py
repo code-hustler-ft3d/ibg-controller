@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.6.2"
+__version__ = "0.6.3"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -3231,10 +3231,6 @@ def _warn_unsupported_env_vars():
     #   BYPASS_WARNING  → _resolve_safe_dismiss_buttons() extends the
     #                     disclaimer allowlist at module load
     #   TWS_COLD_RESTART → apply_warm_state() skips when set
-    # TWOFA_DEVICE is no longer in this list: the controller handles
-    # IB Key push 2FA by polling for the dialog to disappear (the user
-    # approves on their phone, the dialog goes away, we proceed). Same
-    # approach as ibctl. Not as hands-free as TOTP but not impossible.
     unsupported = {
         "CUSTOM_CONFIG":
             "not honored; the controller reads env vars directly and "
@@ -3251,6 +3247,36 @@ def _warn_unsupported_env_vars():
                     "for those specific behaviors:")
         for name, reason in hit:
             log.warning(f"  - {name}: {reason}")
+
+    # TWOFA_DEVICE gets a dedicated, more specific warning. It is NOT a
+    # flat "stay on IBC" — it's "set but not yet honored, here's the
+    # exact failure mode." IBC used TWOFA_DEVICE to pick among multiple
+    # enabled second-factor methods (e.g. "IB Key" vs "Mobile
+    # Authenticator app") on accounts that have more than one. The
+    # controller does not yet drive that device chooser: handle_2fa()
+    # assumes the Second Factor Authentication dialog presents a single
+    # code field and types the TOTP into it. On a multi-method account
+    # where Gateway lists the devices (IB Key typically first), the TOTP
+    # lands in the wrong control and login fails — the controller can't
+    # reach the Mobile Authenticator code field. Single-method TOTP
+    # accounts, and IB Key push on a single-method account (handled by
+    # polling for dialog dismissal after the user approves on their
+    # phone), are both unaffected.
+    #
+    # Removing this warning in a prior release created a silent no-op
+    # trap: users set TWOFA_DEVICE, saw nothing, and assumed it worked.
+    # Device-selection support is tracked + in progress in issue #7;
+    # this warning stays until that ships.
+    if os.environ.get("TWOFA_DEVICE"):
+        log.warning(
+            "TWOFA_DEVICE is set but NOT yet honored. The controller "
+            "cannot currently select among multiple second-factor "
+            "devices. If your IBKR account has more than one 2FA method "
+            "enabled (e.g. IB Key + Mobile Authenticator app) and Gateway "
+            "presents a device chooser at login, automated TOTP will "
+            "likely fail (the code is entered in the wrong control). "
+            "Single-method TOTP accounts are unaffected. Tracking: "
+            "https://github.com/code-hustler-ft3d/ibg-controller/issues/7")
 
 
 def main():
