@@ -76,6 +76,35 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.6.3
+
+**Security fix — upgrade recommended.** A plaintext IBKR password
+could be written to the controller's logs.
+
+The in-JVM agent's window dump emitted `JPasswordField` contents
+(`getText()` returns the plaintext password), and the controller's
+login-failure diagnostic logs that dump at ERROR level. So if the
+`Log In` button click failed, your password could appear in
+`docker logs` — the output the bug-report template asks for.
+
+It was **not** an every-run leak: it required a login-button-click
+failure with the password field populated. But the latent path
+shipped through v0.6.2.
+
+v0.6.3 masks `JPasswordField` at the agent (`<redacted password
+len=N>`, never the value), routes the login-failure and TEST_MODE
+dumps through `_redact_logs` for account numbers, and makes the
+agent's `GETTEXT` refuse password fields.
+
+**Action:**
+- Pull v0.6.3 and redeploy (rebuild the image so the new agent jar
+  is picked up — this fix is in the Java agent, not just the Python).
+- If you ran v0.6.2 or earlier and **shared or aggregated controller
+  logs from a login failure**, treat those logs as
+  password-bearing and rotate the IBKR password. Logs from
+  successful logins are unaffected (the dump only fires on the
+  failure path).
+
 ### v0.6.2
 
 **No breaking changes.** Real fix for the dual-mode post-login config

@@ -4,6 +4,57 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-05-11
+
+### Security
+
+- **Plaintext password could be written to logs via a window dump.**
+  The in-JVM agent's `WINDOW` dump (`dumpComponentTree`) called
+  `getText()` on every `JTextComponent`. `JPasswordField` is a
+  `JTextComponent`, and its `getText()` returns the **plaintext
+  password** — which the controller had typed into the login frame.
+  The login-failure diagnostic in `gateway_controller.py` logs that
+  dump of the `"IBKR Gateway"` window at **ERROR level** (always
+  emitted, not gated on `CONTROLLER_DEBUG`), so on a login-button
+  click failure the IBKR password could land in `docker logs` — the
+  very output the bug-report template asks users to attach.
+
+  - **Scope / reachability:** not an every-run leak. It required the
+    `Log In` / `Paper Log In` click to fail (both agent clicks
+    returning false), which triggers the ERROR-level dump while the
+    password field is populated. No evidence it was triggered in
+    practice; what shipped was the latent path, present in releases
+    up to and including **v0.6.2**.
+  - **Fix (root):** the agent now masks `JPasswordField` in
+    `dumpComponentTree` — it emits `<redacted password len=N>` and
+    never calls `getText()` on a password field (the transient
+    `getPassword()` char[] is zeroed after reading its length). This
+    closes the leak for *all* dump callers at once.
+  - **Fix (defense-in-depth):** the login-failure dump and the
+    `CONTROLLER_TEST_MODE` dump in `gateway_controller.py` now run
+    every line through `_redact_logs` (which strips `DU/U` account
+    numbers from window titles).
+  - **Hardening (same invariant):** the agent's `GETTEXT` command now
+    refuses a `JPasswordField` (returns `ERR refused type=password`)
+    so the agent never hands back a password over the socket via any
+    command. No controller code path calls `GETTEXT` on the password
+    field, so this is non-breaking.
+
+  **If you ran v0.6.2 or earlier:** upgrade, and treat any saved
+  controller logs from a *login failure* as potentially
+  password-bearing — rotate the password if such logs were shared or
+  shipped to an aggregator. Single successful logins did not hit this
+  path.
+
+### Validation
+
+- 224 unit tests pass (no behavioral change to tested Python paths;
+  the fix is at the agent boundary + two dump callsites).
+- `python3 -m py_compile gateway_controller.py`: OK.
+- The Java agent change is compile-checked by CI (`make` +
+  `gateway-version-matrix`); the masked-dump output is confirmed by
+  spike against a live login.
+
 ## [0.6.2] - 2026-05-01
 
 ### Fixed

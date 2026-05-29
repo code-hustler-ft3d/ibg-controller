@@ -189,10 +189,13 @@ public class GatewayInputAgent {
                 // Diagnostic: dump full component tree of windows whose
                 // title contains <substring>. Pass empty for all windows.
                 // Captures text from JLabel, JTextComponent (JTextField,
-                // JTextArea, JEditorPane, JTextPane, JPasswordField),
-                // AbstractButton (JButton, JToggleButton, JRadioButton),
-                // plus showing/visible state and accessible name. This is
-                // the way to see dialog body text that LABELS misses.
+                // JTextArea, JEditorPane, JTextPane), and AbstractButton
+                // (JButton, JToggleButton, JRadioButton), plus
+                // showing/visible state and accessible name. This is the
+                // way to see dialog body text that LABELS misses.
+                // SECURITY: JPasswordField contents are NEVER emitted —
+                // only a "<redacted password len=N>" placeholder (see
+                // dumpComponentTree).
                 return doDumpWindow(rest);
             }
             case "SETTEXT_IN_WIN": {
@@ -337,6 +340,15 @@ public class GatewayInputAgent {
         JTextComponent field = findByName(JTextComponent.class, name);
         if (field == null) {
             return "ERR not_found type=text name=" + name;
+        }
+        // SECURITY: never return a password field's contents over the
+        // socket. GETTEXT is only used to read back non-password fields
+        // for verification; no controller code path calls it on the
+        // login JPasswordField (SETTEXT_LOGIN_PASSWORD has no readback).
+        // Refuse defensively so the agent never hands a plaintext
+        // password to any caller via any command.
+        if (field instanceof javax.swing.JPasswordField) {
+            return "ERR refused type=password name=" + name;
         }
         final String[] result = new String[1];
         SwingUtilities.invokeAndWait(() -> result[0] = field.getText());
@@ -818,6 +830,20 @@ public class GatewayInputAgent {
             text = ((AbstractButton) c).getText();
         } else if (c instanceof JLabel) {
             text = ((JLabel) c).getText();
+        } else if (c instanceof javax.swing.JPasswordField) {
+            // SECURITY: never emit a password field's contents. A
+            // JPasswordField is a JTextComponent, so the generic branch
+            // below would call getText() and return the PLAINTEXT
+            // password — which then lands in any log that prints this
+            // dump (e.g. the login-failure diagnostic in the Python
+            // controller). Emit only the length so the field is still
+            // visible in the tree for debugging, never the value. This
+            // branch MUST come before the JTextComponent branch since
+            // JPasswordField extends JTextField extends JTextComponent.
+            char[] pw = ((javax.swing.JPasswordField) c).getPassword();
+            int len = pw.length;
+            java.util.Arrays.fill(pw, '\0');  // don't leave a plaintext copy
+            text = "<redacted password len=" + len + ">";
         } else if (c instanceof JTextComponent) {
             text = ((JTextComponent) c).getText();
         }
