@@ -2033,5 +2033,38 @@ class TestRecoverJvmMaintenanceGuard(unittest.TestCase):
         mock_delay.assert_not_called()
 
 
+class TestResolveTwofaDevice(unittest.TestCase):
+    """_resolve_twofa_device picks which device to select from Gateway's
+    multi-method 2FA chooser (issue #7)."""
+
+    def test_explicit_value_wins(self):
+        self.assertEqual(
+            gc._resolve_twofa_device("IB Key", True), "IB Key")
+        self.assertEqual(
+            gc._resolve_twofa_device("Mobile Authenticator app", False),
+            "Mobile Authenticator app")
+
+    def test_explicit_is_stripped(self):
+        self.assertEqual(
+            gc._resolve_twofa_device("  Mobile Authenticator app  ", True),
+            "Mobile Authenticator app")
+
+    def test_default_totp_mode(self):
+        # No explicit device + a TOTP secret configured → Mobile Authenticator.
+        self.assertEqual(
+            gc._resolve_twofa_device("", True), "Mobile Authenticator app")
+        self.assertEqual(
+            gc._resolve_twofa_device(None, True), "Mobile Authenticator app")
+
+    def test_default_non_totp_mode(self):
+        # No explicit device + no TOTP secret → IB Key.
+        self.assertEqual(gc._resolve_twofa_device("", False), "IB Key")
+        self.assertEqual(gc._resolve_twofa_device(None, False), "IB Key")
+
+    def test_whitespace_only_falls_back_to_default(self):
+        self.assertEqual(
+            gc._resolve_twofa_device("   ", True), "Mobile Authenticator app")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

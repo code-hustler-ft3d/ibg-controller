@@ -27,8 +27,10 @@ import javax.accessibility.AccessibleContext;
 import javax.swing.AbstractButton;
 import javax.swing.JCheckBox;
 import javax.swing.JLabel;
+import javax.swing.JList;
 import javax.swing.JToggleButton;
 import javax.swing.JTree;
+import javax.swing.ListModel;
 import javax.swing.SwingUtilities;
 import javax.swing.text.JTextComponent;
 import javax.swing.tree.TreeModel;
@@ -55,6 +57,7 @@ import javax.swing.tree.TreePath;
  *   SETTEXT_IN_WIN <title>|<text>         → OK | ERR ...
  *   CLICK_IN_WIN <title>|<button>         → OK | ERR ...
  *   JTREE_SELECT_PATH <title>|<p1>/<p2>/..→ OK selected=<path> | ERR ...
+ *   JLIST_SELECT <title>|<value>          → OK selected=<value> index=<i> | ERR ...
  *   JCHECK <title>|<name>|<true|false>    → OK unchanged=<v> | OK changed=<v> | ERR ...
  *   SETTEXT_BY_LABEL <title>|<label>|<v>  → OK set label=<label> value=<v> | ERR ...
  *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
@@ -225,6 +228,22 @@ public class GatewayInputAgent {
                 // Configuration dialog's ConfigurationTree
                 // (e.g. "API/Settings").
                 return doJTreeSelectPath(rest);
+            }
+            case "JLIST_SELECT": {
+                // Select an entry in a JList by its displayed value.
+                // Protocol: JLIST_SELECT <title_substr>|<value>
+                // Finds the first showing JList in the first showing
+                // window whose title contains <title_substr>, then
+                // selects the entry whose model element toString().trim()
+                // equals <value>. Mirrors IBC's
+                // SecondFactorAuthenticationDialogHandler: the
+                // multi-2FA-method chooser is a JList of device names
+                // ("IB Key", "Mobile Authenticator app"); selecting the
+                // wanted device + clicking OK (via CLICK_IN_WIN) advances
+                // to the TOTP code entry. Selection only — the OK click
+                // is a separate command, matching how JCHECK and the
+                // config dialog compose primitives.
+                return doJListSelect(rest);
             }
             case "JCHECK": {
                 // Set a toggle-style button (JCheckBox, JRadioButton,
@@ -531,6 +550,65 @@ public class GatewayInputAgent {
             tree.scrollPathToVisible(targetPath);
         });
         return "OK selected=" + pathStr;
+    }
+
+    private static String doJListSelect(String rest) throws Exception {
+        int pipe = rest.indexOf('|');
+        if (pipe < 0) {
+            return "ERR jlist_select_missing_pipe";
+        }
+        String titleSubstr = rest.substring(0, pipe);
+        String value = rest.substring(pipe + 1);
+
+        Window target = findWindowByTitleSubstring(titleSubstr);
+        if (target == null) {
+            return "ERR not_found window_title_substring=" + titleSubstr;
+        }
+
+        // First showing JList in the window. The multi-method 2FA chooser
+        // is a JList of device names; mirrors IBC's
+        // SecondFactorAuthenticationDialogHandler.selectSecondFactorDevice
+        // (findList → match model element → setSelectedIndex).
+        JList<?> list = null;
+        for (JList<?> candidate : collect(target, JList.class)) {
+            if (candidate.isShowing()) {
+                list = candidate;
+                break;
+            }
+        }
+        if (list == null) {
+            return "ERR not_found jlist in_window=" + titleSubstr;
+        }
+
+        final JList<?> list2 = list;
+        final String want = value.trim();
+        final int[] matchedIndex = { -1 };
+        final StringBuilder available = new StringBuilder();
+        // Selection is a model change, not a modal-opening action, so
+        // invokeAndWait is safe (same as JCHECK / JTREE_SELECT_PATH).
+        SwingUtilities.invokeAndWait(() -> {
+            ListModel<?> model = list2.getModel();
+            for (int i = 0; i < model.getSize(); i++) {
+                Object el = model.getElementAt(i);
+                String entry = el == null ? "" : el.toString().trim();
+                if (available.length() > 0) available.append(", ");
+                available.append('"').append(entry).append('"');
+                if (matchedIndex[0] < 0 && entry.equals(want)) {
+                    matchedIndex[0] = i;
+                    list2.setSelectedIndex(i);
+                    list2.ensureIndexIsVisible(i);
+                }
+            }
+        });
+
+        if (matchedIndex[0] < 0) {
+            // Entry names are device-type labels (not credentials); echo
+            // the available list so a misconfigured TWOFA_DEVICE is
+            // diagnosable from one run.
+            return "ERR not_found jlist_entry=" + want
+                   + " available=[" + available + "]";
+        }
+        return "OK selected=" + want + " index=" + matchedIndex[0];
     }
 
     private static String doJCheck(String rest) throws Exception {

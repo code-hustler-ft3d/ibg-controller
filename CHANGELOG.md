@@ -4,6 +4,58 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - unreleased (pending live multi-method spike)
+
+### Added
+
+- **Multi-method 2FA device selection (`TWOFA_DEVICE`), fixing issue #7.**
+  On accounts with more than one second-factor method enabled (e.g.
+  IB Key + Mobile Authenticator), Gateway presents a device **chooser**
+  (a Swing `JList`) before the code field. Pre-v0.7.0 the controller
+  ignored it and typed the TOTP into the chooser's first control (or
+  waited on the default IB Key method), so automated TOTP login failed
+  on multi-method accounts — exactly the "code entered in a weird
+  place" symptom reported in #7.
+  - **New agent command `JLIST_SELECT <title>|<value>`** — selects the
+    `JList` entry whose `toString().trim()` equals `<value>`, mirroring
+    IBC's `SecondFactorAuthenticationDialogHandler.selectSecondFactorDevice`
+    (`findList` → match model element → `setSelectedIndex`). Pure
+    selection primitive; the OK click is a separate `CLICK_IN_WIN`,
+    matching how `JCHECK` and the config dialog compose.
+  - **`handle_2fa()`** now detects the chooser and selects the wanted
+    device before entering the code / waiting for push. The device is
+    `TWOFA_DEVICE` (IBC-compatible env var, **revived** — it was a
+    silent no-op before), defaulting to `Mobile Authenticator app` in
+    TOTP mode and `IB Key` otherwise (`_resolve_twofa_device`).
+  - **Strict no-op on single-method accounts:** when no `JList` is
+    present the agent returns `ERR not_found jlist` and the controller
+    falls through to the existing code/push handling — byte-identical
+    behavior. The new path only activates when a device chooser
+    actually exists, which bounds the risk to the (already-broken)
+    multi-method case.
+  - A misconfigured `TWOFA_DEVICE` (not offered by Gateway) fails
+    cleanly with `ALERT_2FA_FAILED` and echoes the devices that *were*
+    available, instead of mis-entering the code.
+
+### Changed
+
+- `TWOFA_DEVICE` is now honored (above) rather than silently ignored;
+  the prior misleading comment in `_warn_unsupported_env_vars()`
+  claiming push 2FA "handled" it is corrected.
+
+### Validation
+
+- 229 unit tests pass, incl. new `_resolve_twofa_device` coverage
+  (explicit-wins, TOTP default, IB-Key default, whitespace handling).
+- `make` compiles the agent jar with `JLIST_SELECT` (`javac --release
+  17`); `make test` green end-to-end (manifest + py_compile + tests).
+- **NOT YET SPIKED:** the chooser interaction is verified by code +
+  IBC parity, not yet run against a live multi-method account. This
+  release is held until that spike confirms the dialog is a `JList`,
+  the device strings match, and the post-OK flow (same-dialog vs.
+  follow-on code dialog) works end-to-end. The `[0.7.0]` date is set
+  at release.
+
 ## [0.6.3] - 2026-05-11
 
 ### Security

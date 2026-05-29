@@ -76,6 +76,33 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.7.0
+
+**Additive — fixes multi-method 2FA login (issue #7).** If your IBKR
+account has **more than one** second-factor method enabled (e.g. both
+IB Key and Mobile Authenticator), Gateway shows a device chooser at
+login. Before v0.7.0 the controller couldn't drive it, so automated
+TOTP login failed (the code went to the wrong control). v0.7.0 selects
+the right device from the chooser, then enters the code.
+
+- **If you have a single 2FA method: nothing changes.** There's no
+  chooser, and the new code path is a strict no-op.
+- **If you have multiple methods:** set `TWOFA_DEVICE` to the device
+  you want the controller to use — e.g. `TWOFA_DEVICE=Mobile
+  Authenticator app` (the exact label Gateway shows). It defaults to
+  `Mobile Authenticator app` when `TWOFACTOR_CODE` is set, so if that's
+  your TOTP device you may not need to set it explicitly. A wrong/unknown
+  value fails cleanly with `ALERT_2FA_FAILED` and logs the devices
+  Gateway actually offered.
+- This fix is in the **Java agent jar** (new `JLIST_SELECT` command) as
+  well as the Python controller, so **rebuild/repull the image** — a
+  Python-only refresh won't pick it up.
+
+> **Maintainer note:** this version is held until it's been spiked
+> against a real multi-method account (confirming Gateway's chooser is
+> a `JList` with the expected device labels and post-selection flow).
+> The published `v0.7.0` reflects a validated build.
+
 ### v0.6.3
 
 **Security fix — upgrade recommended.** A plaintext IBKR password

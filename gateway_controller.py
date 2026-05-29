@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.6.3"
+__version__ = "0.7.0"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -620,6 +620,27 @@ def agent_jcheck(title_substring, name, desired):
         return True
     log.error(f"agent JCHECK {name!r}: {resp}")
     return False
+
+
+def agent_jlist_select(title_substring, value):
+    """Select an entry in a JList by its displayed value. Used for the
+    multi-method 2FA device chooser (a JList of device names).
+
+    Returns the raw agent response string, or None on transport error,
+    so the caller can distinguish the three meaningful outcomes:
+      - ``OK selected=...``                  → device selected
+      - ``ERR not_found jlist ...``          → no JList in the window
+        (single-method dialog — there's no chooser to drive)
+      - ``ERR not_found jlist_entry=... available=[...]`` → the
+        requested device isn't offered (misconfigured TWOFA_DEVICE);
+        the available list is echoed for diagnosis.
+    """
+    try:
+        resp = _agent_request(f"JLIST_SELECT {title_substring}|{value}")
+    except Exception as e:
+        log.error(f"agent JLIST_SELECT {value!r}: {type(e).__name__}: {e}")
+        return None
+    return resp
 
 
 def agent_settext_by_label(title_substring, label_text, value):
@@ -1424,8 +1445,37 @@ def handle_existing_session_dialog():
     return False
 
 
+def _resolve_twofa_device(explicit, has_totp):
+    """Resolve which second-factor device to select from Gateway's
+    multi-method chooser (a JList shown only when the account has more
+    than one 2FA method enabled).
+
+    Explicit ``TWOFA_DEVICE`` wins. Otherwise default to the Mobile
+    Authenticator (TOTP) device when a TOTP secret is configured, else
+    IB Key. The result is only used if Gateway actually presents a
+    device chooser; single-method accounts never hit it.
+
+    Matches IBC's ``SecondFactorDevice`` semantics and the device
+    strings IBKR uses in the chooser ("IB Key", "Mobile Authenticator
+    app"). See issue #7.
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return explicit
+    return "Mobile Authenticator app" if has_totp else "IB Key"
+
+
 def handle_2fa(app):
     """Handle Gateway's Second Factor Authentication dialog.
+
+    **Multi-method device chooser (v0.7.0, issue #7):** if the account
+    has more than one second-factor method enabled, Gateway first shows
+    a JList of devices ("IB Key", "Mobile Authenticator app", ...)
+    before the code field. When that chooser is present, the controller
+    selects ``TWOFA_DEVICE`` (defaulting to the Mobile Authenticator
+    device in TOTP mode, IB Key otherwise), clicks OK, then proceeds to
+    the mode handling below. On single-method accounts there is no
+    chooser and this step is a no-op.
 
     Supports two modes:
 
@@ -1468,6 +1518,15 @@ def handle_2fa(app):
     ib_key_mode = not TOTP_SECRET
     if ib_key_mode:
         log.info("No TWOFACTOR_CODE set — will watch for IB Key push dialog if it appears")
+
+    # v0.7.0 (issue #7): which device to pick if the account has more
+    # than one second-factor method enabled and Gateway shows a device
+    # chooser (a JList). On single-method accounts there's no chooser
+    # and this is never used — the device-selection step below is a
+    # strict no-op in that case, so single-method behavior is unchanged.
+    twofa_device = _resolve_twofa_device(os.environ.get("TWOFA_DEVICE"),
+                                         bool(TOTP_SECRET))
+    device_selected = False
 
     # IBC-compat 2FA timeout configuration:
     #   TWOFA_EXIT_INTERVAL   — seconds to wait for the dialog (default 120)
@@ -1542,6 +1601,42 @@ def handle_2fa(app):
                 break
 
         if two_fa_window is not None:
+            # v0.7.0 (issue #7): multi-method device chooser. If the
+            # account has >1 second-factor method, Gateway shows a JList
+            # of devices ("IB Key", "Mobile Authenticator app", ...)
+            # BEFORE presenting the code field. Pre-v0.7.0 the controller
+            # ignored it and typed the TOTP into the chooser's first
+            # control (or waited on IB Key), so TOTP login failed on
+            # multi-method accounts. Select the wanted device + click OK,
+            # then loop back to handle the code field / push that follows.
+            #
+            # Strict no-op on single-method accounts: agent_jlist_select
+            # returns "ERR not_found jlist" (no JList present), we fall
+            # straight through to the existing code/push handling, and
+            # behavior is byte-identical to before.
+            if not device_selected:
+                sel = agent_jlist_select(TWOFA_WINDOW_SUBSTR, twofa_device)
+                if sel and sel.startswith("OK"):
+                    log.info(f"2FA device chooser: selected {twofa_device!r} "
+                             f"({sel.strip()})")
+                    if not agent_click_in_window(TWOFA_WINDOW_SUBSTR, "OK"):
+                        log.warning("2FA device chooser: OK click after device "
+                                    "select did not confirm; continuing anyway")
+                    device_selected = True
+                    last_windows = None
+                    time.sleep(1.0)
+                    continue  # re-detect: code field / push now presented
+                if sel and "not_found jlist_entry" in sel:
+                    log.error(f"2FA device chooser present but configured device "
+                              f"{twofa_device!r} is not offered: {sel.strip()}")
+                    log.error(
+                        f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+                        f"reason=\"TWOFA_DEVICE not offered in chooser\" "
+                        f"device={twofa_device!r}")
+                    return False
+                # else: "ERR not_found jlist" → no chooser (single-method
+                # dialog). Fall through to the existing handling below.
+
             if ib_key_mode:
                 # IB Key push mode: the dialog appeared, IBKR sent a
                 # push notification to the user's phone. We don't type
@@ -3238,10 +3333,9 @@ def _warn_unsupported_env_vars():
     #   BYPASS_WARNING  → _resolve_safe_dismiss_buttons() extends the
     #                     disclaimer allowlist at module load
     #   TWS_COLD_RESTART → apply_warm_state() skips when set
-    # TWOFA_DEVICE is no longer in this list: the controller handles
-    # IB Key push 2FA by polling for the dialog to disappear (the user
-    # approves on their phone, the dialog goes away, we proceed). Same
-    # approach as ibctl. Not as hands-free as TOTP but not impossible.
+    #   TWOFA_DEVICE → honored as of v0.7.0 (issue #7): when the account
+    #                  has multiple 2FA methods, handle_2fa() selects the
+    #                  named device from Gateway's chooser. Not warned.
     unsupported = {
         "CUSTOM_CONFIG":
             "not honored; the controller reads env vars directly and "
