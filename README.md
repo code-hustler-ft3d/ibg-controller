@@ -34,7 +34,7 @@ docker run -d --name ibkr \
 ```
 
 Tags published: `:latest`, `:<major>.<minor>` (e.g. `:0.5`), and
-`:v<major>.<minor>.<patch>` (e.g. `:v0.6.3`). Every tag is signed with
+`:v<major>.<minor>.<patch>` (e.g. `:v0.7.0`). Every tag is signed with
 cosign via Sigstore keyless signing — see [`SECURITY.md`](SECURITY.md)
 for the verification recipe. For reproducible deployments, pin to a
 digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
@@ -136,8 +136,9 @@ Quick start above instead.
 | Single-mode paper cold-start | ✅ verified | ⚠️ code in place | TWS code-path unit-tested; app-name match needs real TWS to validate |
 | Single-mode live cold-start | ✅ verified | ⚠️ code in place | |
 | Dual mode (`TRADING_MODE=both`) | ✅ verified | ⚠️ code in place | Per-instance state isolation, agent sockets, ready files, JVM-PID-scoped find_app |
-| TOTP 2FA | ✅ verified | ⚠️ code in place | |
-| IB Key push 2FA | ✅ wait mode | ✅ wait mode | Controller detects the 2FA dialog, logs "approve on your phone", polls for dialog dismissal. User approves via IB Key mobile app. Same approach as ibctl. |
+| TOTP 2FA (single method) | ✅ verified | ⚠️ code in place | |
+| IB Key push 2FA (single method) | ✅ wait mode | ✅ wait mode | Controller detects the 2FA dialog, logs "approve on your phone", polls for dialog dismissal. User approves via IB Key mobile app. Same approach as ibctl. |
+| Multi-method 2FA | ⚠️ partial (v0.7.0) | ⚠️ partial | Account with >1 method: Gateway defaults the dialog to one method. If that's the method matching `TWOFACTOR_CODE`, login works. If not, the controller now **fails clearly** (no silent mis-type) and tells you to set your IBKR preferred method — automated method-switching is not yet implemented. See [issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7). |
 | Existing-session dialog | ✅ verified | ⚠️ code in place | Clicks `Continue Login`; late-arrival handler catches the dialog if it shows during the 2FA wait |
 | `TWS_MASTER_CLIENT_ID` | ✅ verified | ⚠️ untested | Set + read back |
 | `READ_ONLY_API` | ✅ verified | ⚠️ untested | Set + read back via JCHECK |
@@ -224,6 +225,7 @@ Full diagnostic history and architectural reasoning: [`docs/ARCHITECTURE.md`](do
 | `TRADING_MODE` | `live`, `paper`, or `both` (default: `paper`). `both` runs two Gateway JVMs in parallel with isolated state. |
 | `TWOFACTOR_CODE` | Base32 TOTP secret from IBKR Mobile Authenticator setup. When set, the controller generates a TOTP code and enters it into the Second Factor Authentication dialog. |
 | `TWOFACTOR_CODE_FILE` | Alternative: read the TOTP secret from a file (Docker secrets pattern). |
+| `TWOFA_DEVICE` | IBC-compatible. Only relevant if your IBKR account has **more than one** 2FA method enabled. Names the method `TWOFACTOR_CODE` satisfies — defaults to `Mobile Authenticator app`. The controller checks Gateway's 2FA prompt against this; if Gateway defaulted to a different method it fails clearly rather than mis-typing the code. Ignored on single-method accounts. v0.7.0+ ([issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7)). |
 
 ### 2FA timeout behavior (IBC-compat)
 | Var | Notes |

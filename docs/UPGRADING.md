@@ -76,6 +76,33 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.7.0
+
+**Multi-method 2FA fix (issue #7) + a small log-redaction hardening.**
+
+If your IBKR account has a **single** 2FA method: nothing changes.
+
+If your account has **more than one** 2FA method (e.g. IB Key + Mobile
+Authenticator), Gateway defaults the login dialog to one of them. The
+controller now reads which method the dialog is asking for and:
+- **types the TOTP only if it matches** the method `TWOFACTOR_CODE`
+  satisfies (default: Mobile Authenticator). This is the case that
+  already worked — it still works.
+- **fails clearly if Gateway defaulted to a different method**, with
+  `ALERT_2FA_FAILED reason="2FA method mismatch"` and a remediation
+  line — instead of silently typing the code into the wrong method
+  (the old behavior that produced the #7 failure).
+
+**If you hit the mismatch failure:** set your IBKR account's preferred
+2FA method to the one matching `TWOFACTOR_CODE` (Mobile Authenticator),
+so Gateway defaults to it. Automated *switching* away from Gateway's
+default is not implemented yet (the dialog's switch control is a hidden
+link we haven't been able to drive safely — see #7). You can also set
+`TWOFA_DEVICE` if your dialog's method wording differs from the default.
+
+This release is pure Python (no agent-jar change), but pulling the new
+image is the normal upgrade path.
+
 ### v0.6.3
 
 **Security fix — upgrade recommended.** A plaintext IBKR password

@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.6.3"
+__version__ = "0.7.0"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -1424,6 +1424,62 @@ def handle_existing_session_dialog():
     return False
 
 
+def _resolve_twofa_device(explicit, has_totp):
+    """Resolve which second-factor method we expect Gateway's 2FA dialog
+    to be requesting. Explicit ``TWOFA_DEVICE`` wins; otherwise default to
+    the Mobile Authenticator (TOTP) method when a TOTP secret is
+    configured, else IB Key. IBC-compatible (``SecondFactorDevice``).
+    """
+    explicit = (explicit or "").strip()
+    if explicit:
+        return explicit
+    return "Mobile Authenticator app" if has_totp else "IB Key"
+
+
+def _twofa_requested_method(labels):
+    """From ``agent_labels()`` output (a list of ``(window_title, text)``
+    tuples) return Gateway's 2FA method-prompt label — IBKR phrases it as
+    "Enter <method> code" — or ``None`` if no such label is present.
+
+    On a multi-method account Gateway pre-defaults the Second Factor
+    dialog to ONE method and shows this prompt; reading it tells us which
+    method the dialog is actually expecting.
+    """
+    for _, text in labels:
+        t = (text or "").strip()
+        tl = t.lower()
+        if tl.startswith("enter ") and tl.endswith(" code"):
+            return t
+    return None
+
+
+def _twofa_method_mismatch(prompt, desired_device):
+    """Return True only if ``prompt`` ("Enter <method> code") positively
+    names a method OTHER than ``desired_device``.
+
+    Deliberately lenient — returns False whenever we can't be sure (no
+    recognizable prompt, empty desired, or a match), so single-method
+    accounts and any dialog wording we don't recognize keep the existing
+    "just type the code" behavior. We only block when we POSITIVELY
+    detect the dialog is asking for a different method than the one we
+    can satisfy, to avoid typing a TOTP into the wrong method (issue #7).
+    """
+    if not prompt:
+        return False
+    d = (desired_device or "").strip().lower()
+    if not d:
+        return False
+    p = prompt.lower()
+    if d in p:
+        return False
+    # Fall back to the distinctive head token (e.g. "mobile authenticator"),
+    # so minor wording drift in the env value still matches the prompt.
+    head = " ".join(d.split()[:2])
+    if head and head in p:
+        return False
+    return True
+
+
 def handle_2fa(app):
     """Handle Gateway's Second Factor Authentication dialog.
 
@@ -1468,6 +1524,15 @@ def handle_2fa(app):
     ib_key_mode = not TOTP_SECRET
     if ib_key_mode:
         log.info("No TWOFACTOR_CODE set — will watch for IB Key push dialog if it appears")
+
+    # v0.7.0 (issue #7): the method we can satisfy. On a multi-method
+    # account Gateway pre-defaults the 2FA dialog to one method; we read
+    # the dialog's "Enter <method> code" prompt and only type the TOTP if
+    # it's asking for this method, rather than mis-typing into the wrong
+    # one. Defaults to Mobile Authenticator in TOTP mode (IBC-compatible
+    # TWOFA_DEVICE override).
+    twofa_device = _resolve_twofa_device(os.environ.get("TWOFA_DEVICE"),
+                                         bool(TOTP_SECRET))
 
     # IBC-compat 2FA timeout configuration:
     #   TWOFA_EXIT_INTERVAL   — seconds to wait for the dialog (default 120)
@@ -1573,6 +1638,37 @@ def handle_2fa(app):
             else:
                 # TOTP mode: type the code and click OK
                 log.info(f"2FA dialog detected: {two_fa_window}")
+                # v0.7.0 (issue #7): on a multi-method account Gateway's
+                # dialog is pre-defaulted to one method and shows an
+                # "Enter <method> code" prompt. Only type our TOTP if the
+                # dialog is asking for the method we can satisfy; if it
+                # POSITIVELY names a different method, fail loudly with
+                # remediation instead of mis-typing the code (the silent
+                # failure reported in #7). Lenient: an unrecognized /
+                # absent prompt falls through to the existing behavior,
+                # so single-method accounts are unaffected.
+                prompt = _twofa_requested_method(agent_labels(TWOFA_WINDOW_SUBSTR))
+                if _twofa_method_mismatch(prompt, twofa_device):
+                    log.error(
+                        f"2FA dialog is requesting a different method than "
+                        f"configured: prompt={prompt!r}, expected "
+                        f"{twofa_device!r}. NOT entering the TOTP code into "
+                        f"the wrong method.")
+                    log.error(
+                        f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+                        f"reason=\"2FA method mismatch\" "
+                        f"dialog_prompt={prompt!r} expected={twofa_device!r}")
+                    log.error(
+                        "Remediation: this account has multiple 2FA methods "
+                        "and Gateway defaulted to one ibg-controller can't "
+                        "drive automatically yet. Set your IBKR account's "
+                        f"preferred 2FA method to {twofa_device!r} (the one "
+                        "matching TWOFACTOR_CODE). See docs/UPGRADING.md "
+                        "(issue #7).")
+                    return False
+                if prompt:
+                    log.info(f"2FA method prompt {prompt!r} matches "
+                             f"{twofa_device!r}")
                 code = generate_totp(TOTP_SECRET)
                 log.info(f"Typing TOTP code into the 2FA dialog")
                 if not agent_settext_in_window(TWOFA_WINDOW_SUBSTR, code):
@@ -2928,7 +3024,10 @@ def _diagnose_login_failure():
                  if line and "DeadlockMonitor" not in line
                  and "AdManager" not in line]
         for line in lines[-10:]:
-            log.error(f"    {line}")
+            # Gateway redacts the password in launcher.log, but account
+            # numbers (DU/U) can appear; run through _redact_logs since
+            # this fires on auth failure — exactly when users grab logs.
+            log.error(f"    {_redact_logs(line)}")
         return
 
     if has_timeout and not has_ns_auth_start:
@@ -3238,10 +3337,10 @@ def _warn_unsupported_env_vars():
     #   BYPASS_WARNING  → _resolve_safe_dismiss_buttons() extends the
     #                     disclaimer allowlist at module load
     #   TWS_COLD_RESTART → apply_warm_state() skips when set
-    # TWOFA_DEVICE is no longer in this list: the controller handles
-    # IB Key push 2FA by polling for the dialog to disappear (the user
-    # approves on their phone, the dialog goes away, we proceed). Same
-    # approach as ibctl. Not as hands-free as TOTP but not impossible.
+    # TWOFA_DEVICE is honored as of v0.7.0 (issue #7): handle_2fa()
+    # reads Gateway's "Enter <method> code" prompt and refuses to type
+    # the TOTP if the dialog is asking for a different method than
+    # TWOFA_DEVICE names. Not warned.
     unsupported = {
         "CUSTOM_CONFIG":
             "not honored; the controller reads env vars directly and "
