@@ -2066,6 +2066,29 @@ class TestTwofaRequestedMethod(unittest.TestCase):
     def test_none_on_empty(self):
         self.assertIsNone(gc._twofa_requested_method([]))
 
+    def test_window_scoped_extraction_from_full_label_set(self):
+        # Regression for v0.7.0-rc1: agent_labels() returns labels from
+        # ALL windows; we must scope by window TITLE (not by passing a
+        # title substring to agent_labels, which filters by label text
+        # and silently dropped the prompt). Given the realistic full set,
+        # window-scoping must still find the 2FA prompt.
+        full = [
+            ("IBKR Gateway", "Connecting to server"),
+            ("IBKR Gateway", "Account"),
+            ("Second Factor Authentication", "Enter Mobile Authenticator app code"),
+            ("Second Factor Authentication", "OK"),
+        ]
+        self.assertEqual(
+            gc._twofa_requested_method(full, window_substr="Second Factor"),
+            "Enter Mobile Authenticator app code")
+
+    def test_window_scope_excludes_other_windows(self):
+        # An "Enter ... code" label in some OTHER window must not be
+        # picked when scoping to the 2FA window.
+        labels = [("Some Other Dialog", "Enter card code")]
+        self.assertIsNone(
+            gc._twofa_requested_method(labels, window_substr="Second Factor"))
+
 
 class TestTwofaMethodMismatch(unittest.TestCase):
     def test_match_is_not_mismatch(self):
