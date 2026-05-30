@@ -4,7 +4,7 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [0.7.0] - unreleased (pending futures-admin validation)
+## [0.7.0] - 2026-05-30
 
 ### Fixed
 
@@ -66,9 +66,16 @@ and the project follows [Semantic Versioning](https://semver.org/).
   window substring to `agent_labels()`, which filters by label TEXT —
   the prompt text doesn't contain "Second Factor", so it was dropped.
   Fixed; the agent's recursive label walk does reach the nested prompt.
-- **Held until a confirmation spike** on the futures-admin multi-method
-  account shows the detection engaging (the "method prompt … matches …"
-  line) with login still completing. `[0.7.0]` date set at release.
+- **Live-validated (2026-05-30 spike, real multi-method account):** the
+  happy path engaged correctly —
+  `2FA method prompt 'Enter Mobile Authenticator app code' matches
+  'Mobile Authenticator app'` logged before the code was typed, login
+  reached MONITORING, no regression, no CCP lockout.
+- **Mismatch / fail-loud path is unit-tested + code-verified, not yet
+  exercised live** (would require an account defaulting to a non-TOTP
+  method). It is strictly safe: a positive mismatch returns False with
+  `ALERT_2FA_FAILED`, and any unrecognized case falls through to the
+  prior behavior — it cannot regress a working login.
 
 ## [0.6.3] - 2026-05-11
 
