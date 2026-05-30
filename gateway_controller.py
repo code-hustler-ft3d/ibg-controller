@@ -1436,7 +1436,7 @@ def _resolve_twofa_device(explicit, has_totp):
     return "Mobile Authenticator app" if has_totp else "IB Key"
 
 
-def _twofa_requested_method(labels):
+def _twofa_requested_method(labels, window_substr=None):
     """From ``agent_labels()`` output (a list of ``(window_title, text)``
     tuples) return Gateway's 2FA method-prompt label — IBKR phrases it as
     "Enter <method> code" — or ``None`` if no such label is present.
@@ -1444,8 +1444,18 @@ def _twofa_requested_method(labels):
     On a multi-method account Gateway pre-defaults the Second Factor
     dialog to ONE method and shows this prompt; reading it tells us which
     method the dialog is actually expecting.
+
+    ``window_substr`` scopes the search to labels whose window title
+    contains it. Pass it the 2FA window substring. NOTE: this is the
+    window-title scope — do NOT rely on ``agent_labels(<substr>)`` for
+    it, because that filters by label TEXT, not window title (which
+    silently dropped the prompt in v0.7.0-rc1; the prompt text doesn't
+    contain "Second Factor"). Always call ``agent_labels()`` with no
+    argument and scope here.
     """
-    for _, text in labels:
+    for w, text in labels:
+        if window_substr and window_substr not in (w or ""):
+            continue
         t = (text or "").strip()
         tl = t.lower()
         if tl.startswith("enter ") and tl.endswith(" code"):
@@ -1647,7 +1657,19 @@ def handle_2fa(app):
                 # failure reported in #7). Lenient: an unrecognized /
                 # absent prompt falls through to the existing behavior,
                 # so single-method accounts are unaffected.
-                prompt = _twofa_requested_method(agent_labels(TWOFA_WINDOW_SUBSTR))
+                #
+                # NOTE: agent_labels() filters by label TEXT, not window
+                # title — so we fetch ALL labels (no filter) and scope to
+                # the Second Factor window via the returned window-title.
+                # Poll briefly in case the prompt JLabel renders a beat
+                # after the dialog window appears.
+                prompt = None
+                for _ in range(3):
+                    prompt = _twofa_requested_method(
+                        agent_labels(), window_substr=TWOFA_WINDOW_SUBSTR)
+                    if prompt:
+                        break
+                    time.sleep(0.5)
                 if _twofa_method_mismatch(prompt, twofa_device):
                     log.error(
                         f"2FA dialog is requesting a different method than "

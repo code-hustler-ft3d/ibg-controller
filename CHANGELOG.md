@@ -53,16 +53,22 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Validation
 
-- 235 unit tests pass, incl. new coverage for `_resolve_twofa_device`,
-  `_twofa_requested_method`, and `_twofa_method_mismatch` (match,
-  positive-mismatch, and the lenient no-prompt/no-desired cases that
-  guarantee no single-method regression).
-- `make test` green end-to-end (agent compile + manifest + py_compile +
-  tests). No Java agent change in this release — the fix is pure Python
+- 237 unit tests pass, incl. coverage for `_resolve_twofa_device`,
+  `_twofa_requested_method` (incl. window-scoped extraction from a
+  realistic full label set), and `_twofa_method_mismatch` (match,
+  positive-mismatch, lenient no-prompt/no-desired — guaranteeing no
+  single-method regression).
+- `make test` green end-to-end. No Java agent change — pure Python,
   reusing the existing `LABELS` command.
-- **Held until validated against the futures-admin multi-method
-  account** (confirm the match case still logs in, and the mismatch
-  case produces the clear failure). `[0.7.0]` date set at release.
+- The prompt is read via `agent_labels()` (no arg) and scoped by window
+  TITLE in `_twofa_requested_method(window_substr=...)`. A first spike
+  (rc1) showed the detection didn't engage because the call passed the
+  window substring to `agent_labels()`, which filters by label TEXT —
+  the prompt text doesn't contain "Second Factor", so it was dropped.
+  Fixed; the agent's recursive label walk does reach the nested prompt.
+- **Held until a confirmation spike** on the futures-admin multi-method
+  account shows the detection engaging (the "method prompt … matches …"
+  line) with login still completing. `[0.7.0]` date set at release.
 
 ## [0.6.3] - 2026-05-11
 
