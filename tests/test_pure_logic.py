@@ -2033,5 +2033,65 @@ class TestRecoverJvmMaintenanceGuard(unittest.TestCase):
         mock_delay.assert_not_called()
 
 
+class TestResolveTwofaDevice(unittest.TestCase):
+    def test_explicit_wins(self):
+        self.assertEqual(gc._resolve_twofa_device("IB Key", True), "IB Key")
+        self.assertEqual(
+            gc._resolve_twofa_device("  Mobile Authenticator app  ", False),
+            "Mobile Authenticator app")
+
+    def test_default_totp(self):
+        self.assertEqual(gc._resolve_twofa_device("", True),
+                         "Mobile Authenticator app")
+        self.assertEqual(gc._resolve_twofa_device(None, True),
+                         "Mobile Authenticator app")
+
+    def test_default_non_totp(self):
+        self.assertEqual(gc._resolve_twofa_device("", False), "IB Key")
+        self.assertEqual(gc._resolve_twofa_device("   ", False), "IB Key")
+
+
+class TestTwofaRequestedMethod(unittest.TestCase):
+    def test_finds_enter_method_code_label(self):
+        labels = [("Second Factor Authentication", "Some heading"),
+                  ("Second Factor Authentication", "Enter Mobile Authenticator app code")]
+        self.assertEqual(gc._twofa_requested_method(labels),
+                         "Enter Mobile Authenticator app code")
+
+    def test_none_when_no_prompt(self):
+        labels = [("Second Factor Authentication", "Please authenticate"),
+                  ("Second Factor Authentication", "OK")]
+        self.assertIsNone(gc._twofa_requested_method(labels))
+
+    def test_none_on_empty(self):
+        self.assertIsNone(gc._twofa_requested_method([]))
+
+
+class TestTwofaMethodMismatch(unittest.TestCase):
+    def test_match_is_not_mismatch(self):
+        self.assertFalse(gc._twofa_method_mismatch(
+            "Enter Mobile Authenticator app code", "Mobile Authenticator app"))
+
+    def test_positive_mismatch(self):
+        # Dialog wants IB Key, we can only do Mobile Authenticator (TOTP).
+        self.assertTrue(gc._twofa_method_mismatch(
+            "Enter IB Key code", "Mobile Authenticator app"))
+
+    def test_lenient_when_no_prompt(self):
+        # Unknown/absent prompt → never block (no regression for
+        # single-method or unrecognized dialogs).
+        self.assertFalse(gc._twofa_method_mismatch(None, "Mobile Authenticator app"))
+        self.assertFalse(gc._twofa_method_mismatch("", "Mobile Authenticator app"))
+
+    def test_lenient_when_no_desired(self):
+        self.assertFalse(gc._twofa_method_mismatch("Enter IB Key code", ""))
+
+    def test_head_token_match(self):
+        # Env value slightly differs from the dialog wording but the
+        # distinctive head token ("mobile authenticator") still matches.
+        self.assertFalse(gc._twofa_method_mismatch(
+            "Enter Mobile Authenticator app code", "Mobile Authenticator"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

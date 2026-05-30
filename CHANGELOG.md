@@ -4,6 +4,66 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - unreleased (pending futures-admin validation)
+
+### Fixed
+
+- **Multi-method 2FA no longer mis-types the TOTP into the wrong method
+  (issue #7).** On an IBKR account with more than one second-factor
+  method enabled, Gateway pre-defaults the Second Factor dialog to one
+  method and shows an "Enter `<method>` code" prompt. Previously the
+  controller typed the TOTP regardless of which method the dialog was
+  asking for — so if Gateway defaulted to IB Key (not the TOTP/Mobile
+  Authenticator method), the code went into the wrong control and login
+  failed silently. The controller now **reads the dialog's method
+  prompt** and:
+  - types the code when the prompt matches the method `TWOFACTOR_CODE`
+    satisfies (default `Mobile Authenticator app`, overridable via the
+    IBC-compatible `TWOFA_DEVICE`); else
+  - **fails loudly** with `ALERT_2FA_FAILED reason="2FA method mismatch"`
+    and a remediation line (set your IBKR preferred method), instead of
+    mis-typing.
+  - **Lenient by design:** an unrecognized or absent prompt falls
+    through to the existing "type the code" behavior, so single-method
+    accounts and any dialog wording we don't recognize are unchanged —
+    no regression.
+
+  Scope note: this fixes the *silent failure* and gives clear guidance.
+  Automated *switching* to a non-default method (driving Gateway's
+  "Change input method" control) is **not** included — a live spike
+  (2026-05-29) established that the real 10.45.1c UI is a defaulted code
+  dialog + a hidden "Change input method" link, not the JList chooser an
+  earlier draft assumed; driving that control needs data we don't yet
+  have. Tracked under #7.
+
+### Security
+
+- **launcher.log diagnostic echo now redacts account numbers.** The
+  auth-failure diagnostic logs the last 10 lines of Gateway's
+  `launcher.log` at ERROR; those lines now pass through `_redact_logs`
+  (DU/U account-number masking). Gateway already redacts the password
+  in launcher.log, so this closes the residual account-number exposure
+  in a path that fires exactly when users collect logs for a bug report.
+
+### Changed
+
+- `TWOFA_DEVICE` is now honored (the method-match check above) instead of
+  being a silent no-op; the prior misleading comment in
+  `_warn_unsupported_env_vars()` is corrected.
+
+### Validation
+
+- 235 unit tests pass, incl. new coverage for `_resolve_twofa_device`,
+  `_twofa_requested_method`, and `_twofa_method_mismatch` (match,
+  positive-mismatch, and the lenient no-prompt/no-desired cases that
+  guarantee no single-method regression).
+- `make test` green end-to-end (agent compile + manifest + py_compile +
+  tests). No Java agent change in this release — the fix is pure Python
+  reusing the existing `LABELS` command.
+- **Held until validated against the futures-admin multi-method
+  account** (confirm the match case still logs in, and the mismatch
+  case produces the clear failure). `[0.7.0]` date set at release.
+
 ## [0.6.3] - 2026-05-11
 
 ### Security
