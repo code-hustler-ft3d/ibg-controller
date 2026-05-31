@@ -227,6 +227,34 @@ Full diagnostic history and architectural reasoning: [`docs/ARCHITECTURE.md`](do
 | `TWOFACTOR_CODE_FILE` | Alternative: read the TOTP secret from a file (Docker secrets pattern). |
 | `TWOFA_DEVICE` | IBC-compatible. Only relevant if your IBKR account has **more than one** 2FA method enabled. Names the method `TWOFACTOR_CODE` satisfies — defaults to `Mobile Authenticator app`. The controller checks Gateway's 2FA prompt against this; if Gateway defaulted to a different method it fails clearly rather than mis-typing the code. Ignored on single-method accounts. v0.7.0+ ([issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7)). |
 
+### 2FA setup for unattended use (read this if you have a choice of method)
+
+The controller is built for **unattended, headless** operation, and that
+constrains which 2FA method works:
+
+- **Use Mobile Authenticator (TOTP)** — provide the base32 secret via
+  `TWOFACTOR_CODE`. This is the only method a headless container can
+  satisfy on its own.
+- **IB Key push is *not* suitable for unattended use.** It sends a
+  notification you must tap "approve" on, on a phone — there's no one to
+  tap it when a container auto-restarts at 3am. The controller *can*
+  wait for an IB Key approval (leave `TWOFACTOR_CODE` unset and it polls
+  for the dialog to clear), but that only helps if a human is actually
+  there to approve. For true automation, it's a dead end.
+- **If your account has *more than one* method enabled**, Gateway
+  defaults its login dialog to one of them. If it defaults to IB Key,
+  your TOTP can't satisfy that dialog — v0.7.0 detects this and fails
+  with a clear `ALERT_2FA_FAILED reason="2FA method mismatch"` rather
+  than silently entering the code in the wrong place (see
+  [issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7)).
+  The resolution is on the IBKR side: get the login the controller uses
+  to default to (or only have) **Mobile Authenticator**. Manage your
+  methods in **Client Portal → Settings → User Settings → Security →
+  Secure Login System**, or contact **IBKR Client Services (Secure
+  Login dept)**. How IBKR's multi-method defaulting and device
+  management behave is governed entirely by IBKR — confirm against your
+  own account; this project can't change it.
+
 ### 2FA timeout behavior (IBC-compat)
 | Var | Notes |
 |---|---|
