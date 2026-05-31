@@ -17,6 +17,15 @@ re-authentication events, and exposes IBC's TCP command server.
 > community of `gnzsnz/ib-gateway-docker` can read, patch, and extend
 > it without a JVM or Rust toolchain.
 
+## Scope
+
+ibg-controller **targets headless Docker IB Gateway** and **favors
+[`gnzsnz/ib-gateway-docker`](https://github.com/gnzsnz/ib-gateway-docker)**
+as its base: the shipped image builds `FROM` it and `docker/run.sh`
+extends its scaffolding. `UPSTREAM_IMAGE` is a build arg so it isn't
+hard-locked, but gnzsnz's image is the path ibg-controller is built,
+tested, and maintained for.
+
 ## Quick start
 
 The fastest way to use `ibg-controller` is the pre-built image on
