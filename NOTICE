@@ -1,0 +1,32 @@
+ibg-controller — NOTICE
+
+ibg-controller's own code — gateway_controller.py and the in-JVM Java agent
+(agent/GatewayInputAgent.java) — is original work, licensed under the MIT
+License (see LICENSE).
+
+This project builds on, and is distributed on top of, work from others:
+
+- gnzsnz/ib-gateway-docker — MIT License
+  (Copyright 2022 Emanuel Fernandes; Copyright 2023 gnzsnz)
+  The shipped Docker image is built FROM ghcr.io/gnzsnz/ib-gateway, and
+  docker/run.sh is DERIVED from that project's run.sh — it sources the
+  upstream common.sh and reuses its helper functions (file_env,
+  apply_settings, set_ports, port_forwarding, wait_x_socket, ...). The
+  upstream MIT copyright notice is preserved here and in docker/run.sh.
+
+- IbcAlpha/IBC — GPLv3
+  (Copyright the IBC authors)
+  The Java automation tool that ibg-controller is designed to REPLACE.
+  ibg-controller is an independent reimplementation; it does NOT include,
+  copy, link, or distribute any IBC source code or the IBC.jar. Knowledge
+  of Gateway's dialogs was informed by reading IBC, but no IBC code is
+  used — so ibg-controller carries no GPL obligation from IBC.
+
+- Lcstyle/ibctl
+  (Copyright Lcstyle)
+  Rust + Java prior art whose in-JVM-agent architecture inspired this
+  project's Python + Java split. No ibctl source code is included.
+
+Trademarks: "Interactive Brokers", "IB Gateway", "Trader Workstation",
+"TWS", and "IB Key" are trademarks of Interactive Brokers LLC. This project
+is not affiliated with or endorsed by Interactive Brokers.

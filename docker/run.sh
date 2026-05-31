@@ -1,6 +1,13 @@
 #!/bin/bash
 # shellcheck disable=SC2317
 # Don't warn about unreachable commands in this file
+#
+# Derived from gnzsnz/ib-gateway-docker's run.sh (MIT License,
+# Copyright 2022 Emanuel Fernandes, 2023 gnzsnz). This variant swaps the
+# upstream IBC-first dispatch for the ibg-controller path; it still
+# sources the upstream common.sh and reuses its helpers (file_env,
+# apply_settings, set_ports, port_forwarding, wait_x_socket, ...).
+# See NOTICE.
 
 set -Eeo pipefail
 
