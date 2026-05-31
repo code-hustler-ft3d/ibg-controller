@@ -51,7 +51,7 @@ release: all
 	@mkdir -p $(DIST)/$(NAME)-$(VERSION)/docs
 	cp $(AGENT_JAR) $(DIST)/$(NAME)-$(VERSION)/gateway-input-agent.jar
 	cp $(DIST)/$(CONTROLLER_PY) $(DIST)/$(NAME)-$(VERSION)/$(CONTROLLER_PY)
-	cp README.md LICENSE CHANGELOG.md SECURITY.md \
+	cp README.md LICENSE NOTICE CHANGELOG.md SECURITY.md \
 	  $(DIST)/$(NAME)-$(VERSION)/
 	cp docs/*.md $(DIST)/$(NAME)-$(VERSION)/docs/
 	cp scripts/install.sh $(DIST)/$(NAME)-$(VERSION)/install.sh
