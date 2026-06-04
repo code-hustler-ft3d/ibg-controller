@@ -18,6 +18,19 @@
 ARG UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:stable
 FROM ${UPSTREAM_IMAGE}
 
+# Re-declare post-FROM so they're in scope for the LABEL below (a build ARG
+# declared before FROM is only visible to the FROM instruction itself).
+ARG UPSTREAM_IMAGE
+ARG IB_GATEWAY_VERSION=unknown
+
+# Self-describing image: record the bundled IB Gateway version and the exact
+# upstream base so `docker inspect` (and the GHCR page) report them without
+# starting the container. The release workflow passes the real
+# IB_GATEWAY_VERSION, kept in lockstep with the digest-pinned UPSTREAM_IMAGE;
+# local builds that don't set it report "unknown".
+LABEL com.ibg-controller.ib-gateway-version="${IB_GATEWAY_VERSION}" \
+      org.opencontainers.image.base.name="${UPSTREAM_IMAGE}"
+
 USER root
 
 # Runtime packages. `gettext-base socat xvfb x11vnc sshpass openssh-client
