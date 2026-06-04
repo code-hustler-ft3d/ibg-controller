@@ -4,6 +4,26 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Upstream Gateway pin bumped 10.45.1c → 10.45.1g.** Both are on
+  gnzsnz's `:stable` line (`:stable` resolved to 10.45.1g at the time of
+  this change); the previous pin had fallen a few patch revisions behind.
+  Same 10.45 minor, so dialog behavior is unchanged — the 2FA/login UI
+  was validated on 10.45.1c and the CI build matrix now exercises both
+  10.45.1c and 10.45.1g.
+
+### Added
+
+- **Image now self-reports its bundled Gateway version (#15, #16).**
+  The release image carries a `com.ibg-controller.ib-gateway-version`
+  label (plus `org.opencontainers.image.base.name`), so
+  `docker inspect` and the GHCR page show the bundled IB Gateway build
+  without starting the container. Release notes also state the version
+  from now on.
+
 ## [0.7.0] - 2026-05-30
 
 ### Fixed

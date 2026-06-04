@@ -143,15 +143,15 @@ jobs:
     # (JRE path, apt package rename, userid shift) before users do.
     #
     # The matrix covers the two Gateway versions we actively verify
-    # against — the prior stable (10.44.1g) and the current stable
-    # (10.45.1c). Add a new entry here when bumping verified versions
-    # in README.md / docs/FROM_IBC.md.
+    # against — the previously shipped pin (10.45.1c) and the current
+    # stable now pinned in release-image.yml (10.45.1g). Add a new entry
+    # here when bumping verified versions in README.md / docs/FROM_IBC.md.
     strategy:
       fail-fast: false
       matrix:
         upstream:
-          - ghcr.io/gnzsnz/ib-gateway:10.44.1g
           - ghcr.io/gnzsnz/ib-gateway:10.45.1c
+          - ghcr.io/gnzsnz/ib-gateway:10.45.1g
     steps:
       - name: Check out
         uses: actions/checkout@v4

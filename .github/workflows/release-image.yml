@@ -138,13 +138,13 @@ jobs:
           # Pin the upstream Gateway base by digest so published releases
           # don't silently track `:stable`. Bump this in lockstep with a
           # deliberate Gateway-version upgrade. Multi-arch manifest (amd64
-          # + arm64) as of 10.45.1c, sha256:b4ede80…
+          # + arm64) as of 10.45.1g, sha256:827d7a5…
           # IB_GATEWAY_VERSION feeds the com.ibg-controller.ib-gateway-version
           # image label — keep it in lockstep with the digest pin above so a
           # `docker inspect` reports the exact bundled Gateway build.
           build-args: |
-            UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1c@sha256:b4ede803caf48279b4bdc21c8de1fb19edaef8bedbb2b49153e72b042f660bf3
-            IB_GATEWAY_VERSION=10.45.1c
+            UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1g@sha256:827d7a5b8454ec19cff2abe0ae6983f15bde4a11c5d5dff4cd74d67ace85a3f2
+            IB_GATEWAY_VERSION=10.45.1g
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Embed buildx provenance so `docker buildx imagetools inspect`

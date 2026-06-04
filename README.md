@@ -118,7 +118,7 @@ make
 # Build the image. UPSTREAM_IMAGE defaults to ghcr.io/gnzsnz/ib-gateway:stable
 # (a moving tag). For reproducible production builds, pin a digest:
 docker build -t ibg-controller:local \
-  --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1c@sha256:... \
+  --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1g@sha256:... \
   .
 ```
 
@@ -132,7 +132,7 @@ Quick start above instead.
 | Requirement | Notes |
 |---|---|
 | **Linux** | `amd64` and `arm64`. Ubuntu 24.04 base tested. |
-| **IB Gateway** | Tested on **10.45.1c**. Should work on any 10.x with a compatible install4j launcher and a Zulu JRE 17+. |
+| **IB Gateway** | Release images pin **10.45.1g** (gnzsnz `:stable` line); dialog behavior validated on **10.45.1c** of the same line. Should work on any 10.x with a compatible install4j launcher and a Zulu JRE 17+. |
 | **Python 3.10+** | For f-strings with `=` and type hints. |
 | **JDK 17+** | Only at *build* time, for the agent. Runtime uses Gateway's bundled Zulu JRE. |
 | **Ubuntu packages** | `python3 matchbox-window-manager` (matchbox provides focus routing for Xvfb; Xvfb itself ships in the upstream `gnzsnz/ib-gateway` image) |
