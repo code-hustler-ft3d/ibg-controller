@@ -283,12 +283,18 @@ ALERT_LOGIN_FAILED mode=live reason="bad-credentials" suggested_action="IBKR rej
 ALERT_LOGIN_FAILED mode=live reason="post-auth-no-progress" suggested_action="server accepted the auth handshake but login never completed; verify TWS_USERID / TWS_PASSWORD (or _PAPER variants) and scan logs for an unrecognized post-auth dialog"
 ```
 
-**When fired**: two distinct code paths, both emitting the same
-grep-contract token with different `reason=` values:
+**When fired**: three code paths, all emitting the same grep-contract
+token (`reason=` distinguishes them):
 
+- `reason="bad-credentials"` from `handle_post_login_dialogs` — initial
+  post-login path; Gateway popped the "Invalid username or password"
+  credential-rejection modal. The controller dismisses it and lets the
+  normal login retry proceed (same suggested_action wording as the
+  `attempt_inplace_relogin` modal case below).
 - `reason="bad-credentials"` from `attempt_inplace_relogin` — Gateway
-  popped a visible "Login failed" / "Authentication failed" modal
-  during re-auth; the controller dismisses it and retries.
+  popped a visible "Login failed" / "Authentication failed" / "Invalid
+  username or password" modal during re-auth; the controller dismisses
+  it and retries.
 - `reason="bad-credentials"` from `_diagnose_login_failure` — terminal
   initial-login path, `launcher.log` shows `NS_AUTH_START` *and* a
   `CCP: Timeout!` (handshake completed, credentials rejected at
