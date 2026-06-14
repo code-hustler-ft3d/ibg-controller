@@ -1128,6 +1128,55 @@ class TestDetectPasswordExpiry(unittest.TestCase):
         self.assertIsNone(days)
 
 
+class TestDetectBadCredentials(unittest.TestCase):
+    """_detect_bad_credentials() recognizes Gateway's credential-rejection
+    modal wording ("Invalid username or password" and close variants) so
+    handle_post_login_dialogs / attempt_inplace_relogin can emit the
+    ALERT_LOGIN_FAILED grep-contract token and dismiss the dialog.
+
+    Grep-contract for external monitors (see docs/OBSERVABILITY.md):
+      ALERT_LOGIN_FAILED mode=<live|paper> reason="bad-credentials" suggested_action="..."
+    """
+
+    def test_matches_canonical_invalid_username_or_password_modal(self):
+        dump = ('Connection to server failed: Invalid username or '
+                'password. Please check the Caps Lock key; passwords '
+                'are case sensitive.')
+        self.assertTrue(gc._detect_bad_credentials(dump))
+
+    def test_matches_two_word_user_name_spelling(self):
+        # Some IBKR builds render the two-word "user name".
+        self.assertTrue(gc._detect_bad_credentials(
+            "Invalid user name or password."))
+
+    def test_matches_password_is_incorrect_variant(self):
+        self.assertTrue(gc._detect_bad_credentials(
+            "Username or password is incorrect."))
+
+    def test_matches_credentials_rejected_variant(self):
+        self.assertTrue(gc._detect_bad_credentials(
+            "Connection failed because credentials were rejected."))
+
+    def test_case_insensitive(self):
+        self.assertTrue(gc._detect_bad_credentials(
+            "INVALID USERNAME OR PASSWORD"))
+
+    def test_no_match_on_progress_dialog(self):
+        self.assertFalse(gc._detect_bad_credentials(
+            "Connecting to server. Please wait."))
+
+    def test_no_match_on_password_expiry_wording(self):
+        # Must not collide with the password-expiry branch that runs first.
+        self.assertFalse(gc._detect_bad_credentials(
+            "Your password will expire in 14 days."))
+
+    def test_no_match_on_empty_input(self):
+        self.assertFalse(gc._detect_bad_credentials(""))
+
+    def test_no_match_on_none_input(self):
+        self.assertFalse(gc._detect_bad_credentials(None))
+
+
 class TestResolveSafeDismissButtons(unittest.TestCase):
     """v0.5.1: _resolve_safe_dismiss_buttons() builds the ordered
     dismiss allowlist from BYPASS_WARNING. Returns a tuple so

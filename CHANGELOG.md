@@ -17,6 +17,14 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Login now recognizes the "Invalid username or password"
+  credential-rejection modal.** `handle_post_login_dialogs` previously
+  left this dialog unhandled and let it fall through; it now emits the
+  existing `ALERT_LOGIN_FAILED reason="bad-credentials"` grep-contract
+  token and dismisses the modal so the normal CCP-backoff login retry
+  proceeds (detection is a signal, not a corrective abort). The in-JVM
+  relogin path (`attempt_inplace_relogin`) recognizes the same wording
+  too. Gap spotted via @efJerryYang's fork; implemented independently.
 - **Image now self-reports its bundled Gateway version (#15, #16).**
   The release image carries a `com.ibg-controller.ib-gateway-version`
   label (plus `org.opencontainers.image.base.name`), so

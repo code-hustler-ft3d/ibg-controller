@@ -1233,6 +1233,39 @@ def _detect_password_expiry(dump):
     return False, None, None
 
 
+# Credential-rejection modal wording. Gateway surfaces a modal such as
+# "Connection to server failed: Invalid username or password. Please check
+# the Caps Lock key; passwords are case sensitive." when IBKR rejects the
+# supplied login. This is distinct from the launcher.log handshake-timeout
+# diagnosis in _diagnose_login_failure and from the in-JVM relogin marker
+# strings; recognizing the modal lets us emit the ALERT_LOGIN_FAILED
+# grep-contract token at the initial-login stage instead of letting the
+# dialog fall through unrecognized. The alternation also covers the
+# two-word "user name" spelling some IBKR builds use.
+_BAD_CREDENTIALS_MATCH = re.compile(
+    r"(?:"
+    r"(?:invalid|incorrect)\s+user\s?name\s+or\s+password"
+    r"|user\s?name\s+or\s+password\s+(?:is\s+|was\s+)?(?:invalid|incorrect)"
+    r"|credentials?\s+(?:were\s+|was\s+|are\s+|is\s+)?(?:rejected|invalid|incorrect)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _detect_bad_credentials(dump):
+    """Return True when a dialog reports the login credentials were
+    rejected (Gateway's "Invalid username or password" modal and close
+    variants).
+
+    Detection is a *signal*, not a corrective action (see the Non-goals
+    note in CHANGELOG): the caller emits ALERT_LOGIN_FAILED and dismisses
+    the dialog, then the normal CCP-backoff login retry proceeds.
+    """
+    if not dump:
+        return False
+    return bool(_BAD_CREDENTIALS_MATCH.search(dump))
+
+
 def handle_post_login_dialogs(app):
     """Inspect any modal dialog that appears right after the Log In click,
     handle the ones we recognize, and leave the rest alone.
@@ -1331,6 +1364,29 @@ def handle_post_login_dialogs(app):
                         "dismiss button present; leaving dialog in place")
             else:
                 log.info("Unrecognized 'password' dialog — leaving in place")
+        elif _detect_bad_credentials(dump):
+            log.info("Recognized: credential-rejection dialog")
+            log.error(
+                f"ALERT_LOGIN_FAILED mode={TRADING_MODE} "
+                f"reason=\"bad-credentials\" "
+                f"suggested_action=\"Gateway surfaced a credential-"
+                f"rejection modal; verify TWS_USERID / TWS_PASSWORD "
+                f"(or _PAPER variants) and update env if password "
+                f"was rotated in IBKR Account Settings\"")
+            # Detection is a signal, not a corrective action (see the
+            # Non-goals note in CHANGELOG): dismiss the modal so it
+            # doesn't wedge the post-login flow, then let the normal
+            # login retry / CCP backoff proceed. Do NOT abort here.
+            dismissed = False
+            for btn in ("OK", "Close", "Continue"):
+                if btn in dump and agent_click_in_window(title, btn):
+                    log.info(f"Dismissed credential-rejection dialog via '{btn}'")
+                    dismissed = True
+                    break
+            if not dismissed:
+                log.warning(
+                    "Credential-rejection dialog detected but no known "
+                    "dismiss button present; leaving dialog in place")
         else:
             log.info(f"Unrecognized modal — leaving in place to let Gateway flow proceed")
 
@@ -2829,8 +2885,9 @@ def attempt_inplace_relogin(app):
             "unable to connect",
             "server cannot be reached",
         )
-        is_credential_error = any(
-            m in body_lower for m in credential_error_markers)
+        is_credential_error = (
+            any(m in body_lower for m in credential_error_markers)
+            or _detect_bad_credentials(body))
         is_network_error = any(
             m in body_lower for m in network_error_markers)
         if is_credential_error or is_network_error:
