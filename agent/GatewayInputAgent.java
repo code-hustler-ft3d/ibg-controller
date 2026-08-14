@@ -27,8 +27,11 @@ import javax.accessibility.AccessibleContext;
 import javax.swing.AbstractButton;
 import javax.swing.JCheckBox;
 import javax.swing.JLabel;
+import javax.swing.JList;
+import javax.swing.JTextField;
 import javax.swing.JToggleButton;
 import javax.swing.JTree;
+import javax.swing.ListModel;
 import javax.swing.SwingUtilities;
 import javax.swing.text.JTextComponent;
 import javax.swing.tree.TreeModel;
@@ -42,7 +45,7 @@ import javax.swing.tree.TreePath;
  * INSTALL4J_ADD_VM_PARAMS. Listens on a Unix domain socket with a
  * line-based text protocol, single client at a time, no concurrency.
  *
- * Protocol (v0.2):
+ * Protocol (v0.3):
  *   PING                                  → OK pong
  *   GET_PID                               → OK <jvm_pid>
  *   SETTEXT <name> <text...>              → OK | ERR ...
@@ -55,6 +58,7 @@ import javax.swing.tree.TreePath;
  *   SETTEXT_IN_WIN <title>|<text>         → OK | ERR ...
  *   CLICK_IN_WIN <title>|<button>         → OK | ERR ...
  *   JTREE_SELECT_PATH <title>|<p1>/<p2>/..→ OK selected=<path> | ERR ...
+ *   JLIST_SELECT <title>|<item>          → OK selected=<item> | ERR ...
  *   JCHECK <title>|<name>|<true|false>    → OK unchanged=<v> | OK changed=<v> | ERR ...
  *   SETTEXT_BY_LABEL <title>|<label>|<v>  → OK set label=<label> value=<v> | ERR ...
  *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
@@ -225,6 +229,18 @@ public class GatewayInputAgent {
                 // Configuration dialog's ConfigurationTree
                 // (e.g. "API/Settings").
                 return doJTreeSelectPath(rest);
+            }
+            case "JLIST_SELECT": {
+                // Select an item by text in the first JList inside the
+                // first showing window whose title contains <title_substr>.
+                // Protocol: JLIST_SELECT <title_substr>|<item_text>
+                // Used to pick the 2FA device (e.g. "Mobile Authenticator
+                // app") in the Second Factor Authentication dialog's
+                // device list on multi-method accounts — the controller's
+                // AT-SPI view can't drive JList, but the in-JVM agent can
+                // (mirrors IBC's SecondFactorDevice handling of the same
+                // dialog).
+                return doJListSelect(rest);
             }
             case "JCHECK": {
                 // Set a toggle-style button (JCheckBox, JRadioButton,
@@ -407,8 +423,19 @@ public class GatewayInputAgent {
                 break;
             }
         }
-        if (field == null && !fields.isEmpty()) {
-            field = fields.get(0);  // fallback to first regardless
+        if (field == null) {
+            // Fall back to the first real input field (JTextField /
+            // JPasswordField) even if it reports non-editable, but NEVER a
+            // JTextArea — those are dialog headings/body text (e.g. the 2FA
+            // device-selector's "Select second factor device" heading), and
+            // typing into one silently corrupts the dialog while appearing
+            // to succeed (SETTEXT returned OK, code landed in a heading).
+            for (JTextComponent f : fields) {
+                if (f instanceof JTextField) {
+                    field = f;
+                    break;
+                }
+            }
         }
         if (field == null) {
             return "ERR not_found text_component_in_window=" + titleSubstr;
@@ -531,6 +558,52 @@ public class GatewayInputAgent {
             tree.scrollPathToVisible(targetPath);
         });
         return "OK selected=" + pathStr;
+    }
+
+    private static String doJListSelect(String rest) throws Exception {
+        // Protocol: JLIST_SELECT <title_substr>|<item_text>
+        int pipe = rest.indexOf('|');
+        if (pipe < 0) {
+            return "ERR jlist_select_missing_pipe";
+        }
+        String titleSubstr = rest.substring(0, pipe);
+        String itemText = rest.substring(pipe + 1);
+
+        Window target = findWindowByTitleSubstring(titleSubstr);
+        if (target == null) {
+            return "ERR not_found window_title_substring=" + titleSubstr;
+        }
+
+        // First JList inside this window — the 2FA device selector is
+        // the only list in the Second Factor Authentication dialog.
+        // JList is generic; collect() infers the raw type here, which
+        // is fine for iterating the model.
+        @SuppressWarnings({"rawtypes", "unchecked"})
+        List<JList> lists = collect(target, JList.class);
+        if (lists.isEmpty()) {
+            return "ERR no_jlist_in_window=" + titleSubstr;
+        }
+        final JList<?> list = lists.get(0);
+        final ListModel<?> model = list.getModel();
+
+        int found = -1;
+        for (int i = 0; i < model.getSize(); i++) {
+            Object entry = model.getElementAt(i);
+            String entryStr = entry == null ? "" : entry.toString().trim();
+            if (entryStr.equals(itemText)) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) {
+            return "ERR jlist_item_not_found want=" + itemText;
+        }
+        final int idx = found;
+        SwingUtilities.invokeAndWait(() -> {
+            list.setSelectedIndex(idx);
+            list.ensureIndexIsVisible(idx);
+        });
+        return "OK selected=" + itemText;
     }
 
     private static String doJCheck(String rest) throws Exception {

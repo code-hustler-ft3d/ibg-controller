@@ -559,6 +559,28 @@ def agent_click_in_window(title_substring, button_text):
     return False
 
 
+def agent_jlist_select(title_substring, item_text):
+    """Ask the agent to select an item by text in the first JList of a
+    window whose title contains the given substring.
+
+    Used to pick the 2FA device (e.g. \"Mobile Authenticator app\") in
+    the Second Factor Authentication dialog's device list on
+    multi-method accounts (issue #7): Gateway pre-selects one method
+    there and the controller's AT-SPI view can't drive a JList, but the
+    in-JVM agent can — mirroring IBC's SecondFactorDevice handling of
+    the same dialog.
+    """
+    try:
+        resp = _agent_request(f"JLIST_SELECT {title_substring}|{item_text}")
+    except Exception as e:
+        log.error(f"agent JLIST_SELECT {title_substring!r}: {type(e).__name__}: {e}")
+        return False
+    if resp.startswith("OK"):
+        return True
+    log.error(f"agent JLIST_SELECT {title_substring!r}: {resp}")
+    return False
+
+
 def agent_close_window(title_substring):
     """v0.5.6: Post a WINDOW_CLOSING event to the first showing window
     whose title contains ``title_substring``. Returns True if the event
@@ -1704,6 +1726,65 @@ def handle_2fa(app):
             else:
                 # TOTP mode: type the code and click OK
                 log.info(f"2FA dialog detected: {two_fa_window}")
+                # Multi-method accounts: Gateway's 2FA dialog may first
+                # show a "Select second factor device" list (pre-selected
+                # to IB Key when multiple methods are enabled) instead of
+                # going straight to a code-entry prompt. If the selector
+                # is present, pick the device named by TWOFA_DEVICE
+                # (default "Mobile Authenticator app" in TOTP mode) and
+                # click OK; the dialog then switches to the code-entry
+                # prompt and the flow below types the TOTP. Without this
+                # step the code would be entered into a dialog still
+                # expecting IB Key approval (issue #7 — the list is
+                # drivable in-JVM via JLIST_SELECT even though AT-SPI
+                # can't see it; same dialog IBC's SecondFactorDevice
+                # handles).
+                # NOTE: the "Select second factor device" heading is a
+                # JTextArea, which agent_labels() (JLabel-only) misses —
+                # IBC's handler finds it via findTextArea. Use the full
+                # component-tree dump instead (covers JLabel,
+                # JTextComponent incl. JTextArea, and AbstractButton).
+                window_dump = agent_window(TWOFA_WINDOW_SUBSTR)
+                selector_present = "Select second factor device" in (window_dump or "")
+                if selector_present:
+                    log.info("2FA dialog shows device selector — selecting "
+                             f"{twofa_device!r} before TOTP entry")
+                    if not agent_jlist_select(TWOFA_WINDOW_SUBSTR, twofa_device):
+                        log.error("JLIST_SELECT on 2FA device selector failed")
+                        log.error(
+                            f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+                            "reason=\"JLIST_SELECT on 2FA device selector failed\"")
+                        return False
+                    if not agent_click_in_window(TWOFA_WINDOW_SUBSTR, "OK"):
+                        log.error("CLICK_IN_WIN OK on 2FA device selector failed")
+                        log.error(
+                            f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+                            "reason=\"CLICK_IN_WIN OK on 2FA device selector failed\"")
+                        return False
+                    # Give the dialog a beat to switch to the code-entry
+                    # prompt before the method-prompt check below.
+                    # After device selection Gateway re-authenticates
+                    # with the chosen method: the code-entry dialog appears
+                    # only after a network round-trip (observed seconds,
+                    # not ms). Poll for it; log window titles only when
+                    # they change (mirrors the 2FA wait loop).
+                    code_dialog_ready = False
+                    last_poll_windows = None
+                    for _poll in range(15):
+                        time.sleep(1.0)
+                        ws = agent_windows()
+                        titles = [t for _, t, _ in ws]
+                        if titles != last_poll_windows:
+                            log.info(f"Post-select windows: {titles}")
+                            last_poll_windows = titles
+                        if any(("second factor" in t.lower()
+                                or "authenticator" in t.lower()
+                                or "enter" in t.lower()) for t in titles):
+                            code_dialog_ready = True
+                            break
+                    if not code_dialog_ready:
+                        log.warning("No 2FA code-entry dialog detected within "
+                                    "15s after device selection")
                 # v0.7.0 (issue #7): on a multi-method account Gateway's
                 # dialog is pre-defaulted to one method and shows an
                 # "Enter <method> code" prompt. Only type our TOTP if the
@@ -1749,16 +1830,31 @@ def handle_2fa(app):
                              f"{twofa_device!r}")
                 code = generate_totp(TOTP_SECRET)
                 log.info(f"Typing TOTP code into the 2FA dialog")
-                if not agent_settext_in_window(TWOFA_WINDOW_SUBSTR, code):
-                    log.error("SETTEXT_IN_WIN on 2FA dialog failed")
+                # The code-entry dialog's title may differ from the
+                # device-selector dialog's ("Second Factor ..."); try
+                # candidate substrings in order.
+                settext_ok = False
+                for _substr in ("Second Factor", "Authenticator", "Authentication"):
+                    if agent_settext_in_window(_substr, code):
+                        settext_ok = True
+                        break
+                if not settext_ok:
+                    log.error("SETTEXT_IN_WIN on 2FA dialog failed "
+                              "(tried Second Factor/Authenticator/Authentication)")
                     log.error(
                         f"ALERT_2FA_FAILED mode={TRADING_MODE} "
                         "reason=\"agent SETTEXT_IN_WIN on 2FA dialog failed\"")
                     return False
                 time.sleep(0.5)
                 log.info("Clicking OK in 2FA dialog")
-                if not agent_click_in_window(TWOFA_WINDOW_SUBSTR, "OK"):
-                    log.error("CLICK_IN_WIN OK on 2FA dialog failed")
+                click_ok = False
+                for _substr in ("Second Factor", "Authenticator", "Authentication"):
+                    if agent_click_in_window(_substr, "OK"):
+                        click_ok = True
+                        break
+                if not click_ok:
+                    log.error("CLICK_IN_WIN OK on 2FA dialog failed "
+                              "(tried Second Factor/Authenticator/Authentication)")
                     log.error(
                         f"ALERT_2FA_FAILED mode={TRADING_MODE} "
                         "reason=\"agent CLICK_IN_WIN OK on 2FA dialog failed\"")
