@@ -6,30 +6,20 @@
 [![License: MIT](https://img.shields.io/github/license/code-hustler-ft3d/ibg-controller)](LICENSE)
 [![cosign signed](https://img.shields.io/badge/cosign-signed-0a84ff?logo=sigstore&logoColor=white)](SECURITY.md)
 
-A Python + in-JVM Java agent drop-in replacement for
-[IBC](https://github.com/IbcAlpha/IBC) on IB Gateway, targeted at the
-headless Docker use case. Launches Gateway, drives the login dialog
-(including TOTP 2FA), applies post-login API config, monitors for
-re-authentication events, and exposes IBC's TCP command server.
+A drop-in replacement for [IBC](https://github.com/IbcAlpha/IBC) on
+headless Docker IB Gateway. A Python controller plus a small in-JVM
+Java agent: launches Gateway, drives the login dialog (including TOTP
+2FA), applies post-login API config, monitors for re-auth events, and
+speaks IBC's TCP command protocol.
 
-> IBC is being deprecated in September 2026. This is one of the
-> community paths forward — written in Python so the maintainer
-> community of `gnzsnz/ib-gateway-docker` can read, patch, and extend
-> it without a JVM or Rust toolchain.
-
-## Scope
-
-ibg-controller **targets headless Docker IB Gateway** and **favors
-[`gnzsnz/ib-gateway-docker`](https://github.com/gnzsnz/ib-gateway-docker)**
-as its base: the shipped image builds `FROM` it and `docker/run.sh`
-extends its scaffolding. `UPSTREAM_IMAGE` is a build arg so it isn't
-hard-locked, but gnzsnz's image is the path ibg-controller is built,
-tested, and maintained for.
+IBC is deprecated as of September 2026. This is one of the community
+paths forward, written in Python so the
+[`gnzsnz/ib-gateway-docker`](https://github.com/gnzsnz/ib-gateway-docker)
+community can read and patch it without a JVM or Rust toolchain. That
+image is also the base this project builds on and is tested against
+(`UPSTREAM_IMAGE` is a build arg if you need a different one).
 
 ## Quick start
-
-The fastest way to use `ibg-controller` is the pre-built image on
-GitHub Container Registry:
 
 ```bash
 docker pull ghcr.io/code-hustler-ft3d/ibg-controller:latest
@@ -42,137 +32,169 @@ docker run -d --name ibkr \
   ghcr.io/code-hustler-ft3d/ibg-controller:latest
 ```
 
-Tags published: `:latest`, `:<major>.<minor>` (e.g. `:0.5`), and
-`:v<major>.<minor>.<patch>` (e.g. `:v0.7.0`). Every tag is signed with
-cosign via Sigstore keyless signing — see [`SECURITY.md`](SECURITY.md)
-for the verification recipe. For reproducible deployments, pin to a
-digest (`ghcr.io/code-hustler-ft3d/ibg-controller@sha256:...`) — the
-digest is printed in each release's CI log.
+Tags: `:latest`, `:<major>.<minor>`, `:v<major>.<minor>.<patch>`. All
+cosign-signed; verification recipe and digest pinning in
+[`SECURITY.md`](SECURITY.md).
 
-> **IMPORTANT: required consumer config (v0.5.11+).** If you run
-> ibg-controller under `docker compose`, you **must** set
-> `stop_grace_period: 90s` on the `ib-gateway` service. Docker's
-> default of 10s is too short for the clean-logout chain to complete
-> and you will strand IBKR session slots on every container restart.
-> See [`docs/MIGRATION.md`](docs/MIGRATION.md#shutdown-grace-period)
-> for the timing math.
->
-> ```yaml
-> services:
->   ib-gateway:
->     image: ghcr.io/code-hustler-ft3d/ibg-controller:latest
->     stop_grace_period: 90s   # required — see MIGRATION.md
->     environment:
->       TRADING_MODE: paper
->       TWS_SERVER_PAPER: cdc1.ibllc.com
->       USE_IBG_CONTROLLER: "yes"
->       # ... your other env vars
-> ```
+**If you use docker compose, set `stop_grace_period: 90s`.** Docker's
+default 10s is too short for the clean-logout chain, and cutting it
+short strands IBKR session slots on every restart
+([timing math](docs/MIGRATION.md#shutdown-grace-period)):
 
-If you'd rather build the image yourself (or compose ibg-controller
-into a larger image of your own):
-
-```dockerfile
-# In the Dockerfile's setup stage:
-COPY ./ibg-controller /root/ibg-controller
-RUN cd /root/ibg-controller && \
-    make install DESTDIR=/root && \
-    cd / && rm -rf /root/ibg-controller /root/build
-
-# In the production stage, add these packages:
-#   python3 matchbox-window-manager
-# and follow docs/MIGRATION.md for the rest.
+```yaml
+services:
+  ib-gateway:
+    image: ghcr.io/code-hustler-ft3d/ibg-controller:latest
+    stop_grace_period: 90s   # required
+    environment:
+      TRADING_MODE: paper
+      TWS_SERVER_PAPER: cdc1.ibllc.com
+      USE_IBG_CONTROLLER: "yes"
+      # ... your other env vars
 ```
 
-Then at `docker run` time:
+Deeper guides:
 
-```bash
-docker run -d --name ibkr \
-  --env-file /path/to/your/.env \
-  -e TRADING_MODE=paper \
-  -e USE_IBG_CONTROLLER=yes \
-  -e TWS_SERVER_PAPER=cdc1.ibllc.com \
-  -e TWOFACTOR_CODE=<your TOTP secret> \
-  -p 127.0.0.1:4002:4004 \
-  your-ib-gateway-image
-```
+- Build your own image, or add the controller to an existing one: [`docs/MIGRATION.md`](docs/MIGRATION.md)
+- Coming from IBC (`config.ini` → env vars): [`docs/FROM_IBC.md`](docs/FROM_IBC.md)
+- Finding your regional server (`TWS_SERVER`): [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md)
+- Why each piece exists: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
-Full Dockerfile migration instructions: [`docs/MIGRATION.md`](docs/MIGRATION.md).
-Already running IBC? Converting your `config.ini` to ibg-controller
-env vars: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
-Finding your regional server (`TWS_SERVER`): [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md).
-Why each piece is necessary: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-
-## Using the shipped Dockerfile
-
-A ready-to-use `Dockerfile` is shipped at the repo root. It extends
-[`gnzsnz/ib-gateway-docker`](https://github.com/gnzsnz/ib-gateway-docker),
-adds the small set of runtime packages the controller needs (`python3`
-+ `matchbox-window-manager`), and drops the controller artifacts from
-`dist/` into `/home/ibgateway/`:
-
-```bash
-# Build the agent jar and stage the controller
-make
-
-# Build the image. UPSTREAM_IMAGE defaults to ghcr.io/gnzsnz/ib-gateway:stable
-# (a moving tag). For reproducible production builds, pin a digest:
-docker build -t ibg-controller:local \
-  --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1g@sha256:... \
-  .
-```
-
-Use this when you want a single ready-to-run image with no further
-customization. If you're composing ibg-controller into a larger image
-of your own, use the `make install DESTDIR=...` path shown in the
-Quick start above instead.
-
-## System requirements
+## Requirements
 
 | Requirement | Notes |
 |---|---|
-| **Linux** | `amd64` and `arm64`. Ubuntu 24.04 base tested. |
-| **IB Gateway** | Release images pin **10.45.1g** (gnzsnz `:stable` line); dialog behavior validated on **10.45.1c** of the same line. Should work on any 10.x with a compatible install4j launcher and a Zulu JRE 17+. |
-| **Python 3.10+** | For f-strings with `=` and type hints. |
-| **JDK 17+** | Only at *build* time, for the agent. Runtime uses Gateway's bundled Zulu JRE. |
-| **Ubuntu packages** | `python3 matchbox-window-manager` (matchbox provides focus routing for Xvfb; Xvfb itself ships in the upstream `gnzsnz/ib-gateway` image) |
-| **JRE config** | None. Pre-v0.6.2 the image wrote `accessibility.properties` and copied `libatk-wrapper.so` into the JRE; both were dropped after v0.5.12 disabled the AT-SPI bridge in the JVM. |
+| Linux `amd64`/`arm64` | Ubuntu 24.04 base tested |
+| IB Gateway 10.x | Release images pin **10.45.1g** (gnzsnz `:stable` line) |
+| Python 3.10+ | Runtime; stdlib only, no pip installs |
+| JDK 17+ | Build time only — runtime uses Gateway's bundled Zulu JRE |
+| `python3`, `matchbox-window-manager` | The only packages added on top of the upstream image |
 
-## Compatibility table
+## What works
 
 | Feature | Gateway | TWS | Notes |
 |---|---|---|---|
-| Single-mode paper cold-start | ✅ verified | ⚠️ code in place | TWS code-path unit-tested; app-name match needs real TWS to validate |
-| Single-mode live cold-start | ✅ verified | ⚠️ code in place | |
-| Dual mode (`TRADING_MODE=both`) | ✅ verified | ⚠️ code in place | Per-instance state isolation, agent sockets, ready files, JVM-PID-scoped find_app |
+| Paper / live / dual-mode cold start | ✅ verified | ⚠️ code in place | dual mode = two isolated JVMs |
 | TOTP 2FA (single method) | ✅ verified | ⚠️ code in place | |
-| IB Key push 2FA (single method) | ✅ wait mode | ✅ wait mode | Controller detects the 2FA dialog, logs "approve on your phone", polls for dialog dismissal. User approves via IB Key mobile app. Same approach as ibctl. |
-| Multi-method 2FA | ⚠️ partial (v0.7.0) | ⚠️ partial | Account with >1 method: Gateway defaults the dialog to one method. If that's the method matching `TWOFACTOR_CODE`, login works. If not, the controller now **fails clearly** (no silent mis-type) and tells you to set your IBKR preferred method — automated method-switching is not yet implemented. See [issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7). |
-| Existing-session dialog | ✅ verified | ⚠️ code in place | Clicks `Continue Login`; late-arrival handler catches the dialog if it shows during the 2FA wait |
-| `TWS_MASTER_CLIENT_ID` | ✅ verified | ⚠️ untested | Set + read back |
-| `READ_ONLY_API` | ✅ verified | ⚠️ untested | Set + read back via JCHECK |
-| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | ✅ verified | ⚠️ untested | Gateway shows one or the other based on account state; controller tries both labels |
-| `STOP` command | ✅ verified | ⚠️ untested | |
-| `RESTART` command (in-place) | ✅ code verified | ⚠️ untested | Full tear-down / re-launch / re-drive login pipeline — verified against live Gateway |
-| `RECONNECTACCOUNT` | ✅ verified | ⚠️ untested | |
-| `ENABLEAPI` | ✅ verified | ⚠️ untested | |
-| `RECONNECTDATA` | ❌ no Gateway menu item | ⚠️ dispatch in place | TWS-only |
+| IB Key push 2FA | ✅ wait mode | ✅ wait mode | waits for you to approve on the phone |
+| Multi-method 2FA | ⚠️ fails loud | ⚠️ fails loud | both dialog shapes detected; see [2FA](#2fa) |
+| Existing-session dialog | ✅ verified | ⚠️ code in place | |
+| Post-login config (`READ_ONLY_API`, `TWS_MASTER_CLIENT_ID`, auto logoff/restart times) | ✅ verified | ⚠️ untested | |
+| Command server (`STOP`, `RESTART`, `RECONNECTACCOUNT`, `ENABLEAPI`) | ✅ verified | ⚠️ untested | `RECONNECTDATA` is TWS-only |
 
-"✅ verified" = run end-to-end against a real IB account with logged
-evidence in the parent repo's `spike/` directory. "⚠️ code in place"
-= written, unit-tested where possible, not yet run against the
-corresponding product.
+✅ verified = run end-to-end against a real IB account.
+⚠️ code in place = written and unit-tested, not yet run against the
+real product.
 
-## What it replaces
+## 2FA
 
-- **IBC** — Java, ~8000 lines. Replaced entirely for Gateway.
-  TWS support is an isolated code switch (`GATEWAY_OR_TWS=tws`) that's
-  unit-tested for the launcher-discovery path but not yet live-tested
-  against real TWS.
-- **oathtool** — stdlib-only TOTP generation.
-- **xdotool** — not needed for input; the in-JVM agent handles text entry.
+- **Use Mobile Authenticator (TOTP)** for unattended operation: set
+  `TWOFACTOR_CODE` to the base32 secret from IBKR's authenticator
+  setup. This is the only method a headless container can satisfy on
+  its own.
+- **IB Key push** requires a human to tap approve on a phone. The
+  controller will wait for that (leave `TWOFACTOR_CODE` unset), which
+  is fine attended and a dead end for automation.
+- **Accounts with more than one method**: Gateway pre-picks one, and
+  the dialog shape varies by account — some get a code dialog
+  defaulted to one method, others a device-selector list. The
+  controller detects both shapes. If the pre-pick doesn't match
+  `TWOFACTOR_CODE` it selects the right device where the dialog allows
+  it, and otherwise fails loudly (`ALERT_2FA_FAILED`) with the fix in
+  the log — it never types the code into the wrong method. IBKR
+  rejects mid-challenge method switching server-side
+  ([#20](https://github.com/code-hustler-ft3d/ibg-controller/issues/20)),
+  so the durable fix is on the account: make Mobile Authenticator your
+  default (or only) method in Client Portal → Settings → User Settings
+  → Security → Secure Login System. Background:
+  [#7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7),
+  [#20](https://github.com/code-hustler-ft3d/ibg-controller/issues/20).
 
-## Architecture at a glance
+## Env vars
+
+### Credentials
+
+| Var | Notes |
+|---|---|
+| `TWS_USERID` / `TWS_PASSWORD` | IB credentials |
+| `TWS_USERID_PAPER` / `TWS_PASSWORD_PAPER` | Paper credentials, used when `TRADING_MODE=paper` |
+| `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
+| `TRADING_MODE` | `live`, `paper` (default), or `both` |
+| `TWOFACTOR_CODE` | Base32 TOTP secret; enables automatic 2FA entry |
+| `TWOFA_DEVICE` | IBC-compatible. Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Ignored on single-method accounts. |
+
+### Connection
+
+| Var | Notes |
+|---|---|
+| `TWS_SERVER` / `TWS_SERVER_PAPER` | IBKR regional server hostname — see [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) |
+| `GATEWAY_OR_TWS` | `gateway` (default) or `tws` |
+
+### Dialog handling (IBC-compat)
+
+| Var | Notes |
+|---|---|
+| `EXISTING_SESSION_DETECTED_ACTION` | `primary` (default) / `primaryoverride` / `secondary` / `manual` |
+| `TWOFA_EXIT_INTERVAL` | Seconds to wait for the 2FA dialog (default `120`) |
+| `TWOFA_TIMEOUT_ACTION` | On timeout: `exit`, `restart`, or `none` (default) |
+| `RELOGIN_AFTER_TWOFA_TIMEOUT` | `yes`/`no`: re-drive the login form once before the timeout action |
+| `BYPASS_WARNING` | Extra disclaimer button labels to auto-dismiss (comma/semicolon-separated). Bare `OK` is refused — it cancels in-progress logins. |
+| `TWS_COLD_RESTART` | `yes` skips the warm-state copy and cold-starts Gateway |
+
+### Post-login API config
+
+| Var | Notes |
+|---|---|
+| `TWS_MASTER_CLIENT_ID` | Master API client ID |
+| `READ_ONLY_API` | `yes`/`no` |
+| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other depending on account state; set both vars and the controller handles whichever is displayed. |
+
+### Command server
+
+| Var | Notes |
+|---|---|
+| `CONTROLLER_COMMAND_SERVER_PORT` | TCP port for IBC-compat commands (`STOP`, `RESTART`, `RECONNECTACCOUNT`, `ENABLEAPI`). Unset = disabled. IBC's default was `7462`. |
+| `CONTROLLER_COMMAND_SERVER_HOST` | Bind address, default `0.0.0.0` (control exposure with Docker's `-p 127.0.0.1:...`) |
+| `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN` | Optional shared secret; clients send `AUTH <token>` first. Strongly recommended if the port is reachable beyond localhost. |
+
+### Health and recovery
+
+| Var | Notes |
+|---|---|
+| `CONTROLLER_HEALTH_SERVER_PORT` | HTTP `/health` port (default `8080` in the shipped image; empty disables) |
+| `CONTROLLER_HEALTH_SERVER_HOST` | Bind address, default `0.0.0.0` |
+| `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` | Delay before re-auth inside IBKR's nightly maintenance window (default `480`) |
+| `CCP_LOCKOUT_MAX_JVM_RESTARTS` | JVM restarts allowed on persistent CCP lockout (default `0` = halt loudly) |
+
+### Paths and debugging
+
+| Var | Notes |
+|---|---|
+| `TWS_SETTINGS_PATH` | Gateway settings dir; set per instance by `run.sh` in dual mode |
+| `GATEWAY_WARM_STATE` | Optional dir copied into the settings dir before launch (seeds `jts.ini` + autorestart tokens) |
+| `GATEWAY_INPUT_AGENT_JAR` / `GATEWAY_INPUT_AGENT_SOCKET` | Agent jar / socket path overrides |
+| `CONTROLLER_READY_FILE` | Readiness signal file override |
+| `CONTROLLER_DEBUG` | `1` = debug logging |
+| `CONTROLLER_TEST_MODE` | `1` = exit right after clicking Log In (smoke tests) |
+
+## Monitoring
+
+`GET /health` returns controller state, JVM liveness, API port status,
+and last-auth timestamp — HTTP 200 when logged in and serving, 503
+otherwise. `GET /ready` is a process-liveness probe. The shipped
+Dockerfile wires this into a Docker `HEALTHCHECK`.
+
+The logs carry stable `ALERT_*` tokens (`ALERT_2FA_FAILED`,
+`ALERT_LOGIN_FAILED`, `ALERT_CCP_PERSISTENT`, `ALERT_PASSWORD_EXPIRED`,
+`ALERT_SHUTDOWN`, ...) that monitors can grep regardless of log level.
+Token names and keys are a stability contract. Full inventory, field
+semantics, and integration examples:
+[`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+
+Operator playbook for failure scenarios (CCP lockout, 2FA failure, JVM
+crash): [`docs/DISCONNECT_RECOVERY.md`](docs/DISCONNECT_RECOVERY.md).
+
+## How it works
 
 ```
                    ┌────────────────────────────────────────┐
@@ -188,516 +210,98 @@ corresponding product.
                    │     Unix socket (/tmp/gateway-input-{mode}.sock)
                    │            ↑                           │
                    │  gateway_controller.py (Python)        │
-                   │    ├─ agent socket: discover windows,  │
-                   │    │    type text, click, navigate     │
-                   │    │    JTree                          │
                    │    ├─ state machine: login → 2FA →     │
                    │    │    config → ready → monitor       │
                    │    ├─ IBC-compat command server (TCP)  │
-                   │    └─ signals /tmp/gateway_ready_{mode} │
+                   │    └─ /health endpoint                 │
                    │                                        │
                    └────────────────────────────────────────┘
 ```
 
-- **Python controller** runs the state machine, the re-auth monitor
-  loop, and the IBC-compat command server. All UI work is delegated
-  to the in-JVM agent over the Unix socket.
-- **Java agent** (~750 lines) loaded via `-javaagent:` into Gateway's JVM
-  exists because Gateway's Swing fields reject every external input
-  mechanism (synthetic X11 events get filtered by Swing's AWT
-  subsystem; AT-SPI `EditableText` writes return `false`). The agent
-  uses Swing's own `JTextField.setText()`, `AbstractButton.doClick()`,
-  `JTree.setSelectionPath()`, and `JToggleButton.doClick()` — the only
-  things that actually work — plus `Window.getWindows()` for component
-  discovery.
-- **No AT-SPI / ATK in the runtime path.** Earlier versions used the
-  AT-SPI2 `AtkWrapper` bridge for component discovery and button
-  clicks. v0.5.12 disabled the bridge in the JVM after a thread-dump
-  showed `AtkWrapper$5.propertyChange` deadlocking on
-  `JProgressBar.setValue` calls during login (surfaced as a misleading
-  `CCP LOCKOUT DETECTED` warning); v0.6.2 removed the install-time
-  ATK packages and JRE configuration entirely. See
-  [CHANGELOG.md](CHANGELOG.md) v0.5.12 / v0.6.2 for the full record.
+Gateway's Swing fields reject every external input mechanism
+(synthetic X11 events, AT-SPI writes), so a small Java agent
+(~950 lines, no dependencies) is loaded into Gateway's JVM via
+`-javaagent:` and does the UI work from inside — `setText`, `doClick`,
+tree/list selection — over a line-based Unix-socket protocol. The
+Python controller runs the state machine and never touches the UI
+directly. Design history and the reasoning behind each piece:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Full diagnostic history and architectural reasoning: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
-
-## Env vars
-
-### Credentials
-| Var | Notes |
-|---|---|
-| `TWS_USERID` | Your IB username (or paper username if `TRADING_MODE=paper` and `TWS_USERID_PAPER` isn't set) |
-| `TWS_PASSWORD` | Your IB password |
-| `TWS_PASSWORD_FILE` | Alternative: read the password from a file at this path (Docker secrets pattern). `run.sh` loads it via `file_env` before launching the controller. |
-| `TWS_USERID_PAPER` | Paper account username — used when `TRADING_MODE=paper` |
-| `TWS_PASSWORD_PAPER` | Paper account password — used when `TRADING_MODE=paper` |
-| `TRADING_MODE` | `live`, `paper`, or `both` (default: `paper`). `both` runs two Gateway JVMs in parallel with isolated state. |
-| `TWOFACTOR_CODE` | Base32 TOTP secret from IBKR Mobile Authenticator setup. When set, the controller generates a TOTP code and enters it into the Second Factor Authentication dialog. |
-| `TWOFACTOR_CODE_FILE` | Alternative: read the TOTP secret from a file (Docker secrets pattern). |
-| `TWOFA_DEVICE` | IBC-compatible. Only relevant if your IBKR account has **more than one** 2FA method enabled. Names the method `TWOFACTOR_CODE` satisfies — defaults to `Mobile Authenticator app`. The controller checks Gateway's 2FA prompt against this; if Gateway defaulted to a different method it fails clearly rather than mis-typing the code. Ignored on single-method accounts. v0.7.0+ ([issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7)). |
-
-### 2FA setup for unattended use (read this if you have a choice of method)
-
-The controller is built for **unattended, headless** operation, and that
-constrains which 2FA method works:
-
-- **Use Mobile Authenticator (TOTP)** — provide the base32 secret via
-  `TWOFACTOR_CODE`. This is the only method a headless container can
-  satisfy on its own.
-- **IB Key push is *not* suitable for unattended use.** It sends a
-  notification you must tap "approve" on, on a phone — there's no one to
-  tap it when a container auto-restarts at 3am. The controller *can*
-  wait for an IB Key approval (leave `TWOFACTOR_CODE` unset and it polls
-  for the dialog to clear), but that only helps if a human is actually
-  there to approve. For true automation, it's a dead end.
-- **If your account has *more than one* method enabled**, Gateway
-  defaults its login dialog to one of them. If it defaults to IB Key,
-  your TOTP can't satisfy that dialog — v0.7.0 detects this and fails
-  with a clear `ALERT_2FA_FAILED reason="2FA method mismatch"` rather
-  than silently entering the code in the wrong place (see
-  [issue #7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7)).
-  The resolution is on the IBKR side: get the login the controller uses
-  to default to (or only have) **Mobile Authenticator**. Manage your
-  methods in **Client Portal → Settings → User Settings → Security →
-  Secure Login System**, or contact **IBKR Client Services (Secure
-  Login dept)**. How IBKR's multi-method defaulting and device
-  management behave is governed entirely by IBKR — confirm against your
-  own account; this project can't change it.
-
-### 2FA timeout behavior (IBC-compat)
-| Var | Notes |
-|---|---|
-| `TWOFA_EXIT_INTERVAL` | Seconds to wait for the Second Factor Authentication dialog to appear. Default `120`. Matches IBC's env var name. |
-| `TWOFA_TIMEOUT_ACTION` | What to do if the wait expires: `exit` (controller exits non-zero), `restart` (in-place Gateway re-launch via the RESTART command path), or `none` (fall through to `wait_for_api_port` — matches Phase 1 behavior, useful for paper accounts / autorestart tokens that skip 2FA entirely). Default `none`. |
-| `RELOGIN_AFTER_TWOFA_TIMEOUT` | `yes`/`no`. If `yes`, re-drive the login form once before dispatching `TWOFA_TIMEOUT_ACTION`. Matches IBC. |
-
-### Disclaimer dismissal (IBC-compat)
-| Var | Notes |
-|---|---|
-| `BYPASS_WARNING` | Comma- or semicolon-separated list of extra button labels to auto-dismiss in the post-login disclaimer loop. Extends the built-in allowlist (`I understand and accept`, `I Accept`, `Acknowledge`, `Accept and Continue`). Bare `OK` is permanently refused — clicking OK on Gateway's "Connecting to server..." progress modal cancels the in-progress login. |
-| `TWS_COLD_RESTART` | `yes`/`no`. If `yes`, `apply_warm_state()` skips any `GATEWAY_WARM_STATE` copy and forces Gateway to cold-start. Useful for debugging stuck state. Matches IBC's env var. |
-
-### Server (the bootstrap knob)
-| Var | Notes |
-|---|---|
-| `TWS_SERVER` | IBKR regional server hostname (e.g. `ndc1.ibllc.com`, `cdc1.ibllc.com`). Default: Gateway's built-in default. **See [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) for how to find your server.** |
-| `TWS_SERVER_PAPER` | Same but for paper mode. Some users have live on one region and paper on another. |
-
-### Dialog behavior
-| Var | Notes |
-|---|---|
-| `EXISTING_SESSION_DETECTED_ACTION` | `primary` (default) / `primaryoverride` / `secondary` / `manual`. Matches IBC's setting of the same name. Gateway 10.45.1c's dialog uses `Continue Login` for primary and `Cancel` for secondary. |
-
-### Post-login API config (v0.2)
-| Var | Notes |
-|---|---|
-| `TWS_MASTER_CLIENT_ID` | Integer. Sets Master API client ID in Configure → Settings → API. |
-| `READ_ONLY_API` | `yes`/`no`. Toggles Read-Only API checkbox. |
-| `AUTO_LOGOFF_TIME` | `HH:MM`. Sets Configure → Settings → Lock and Exit → Set Auto Log Off Time. |
-| `AUTO_RESTART_TIME` | `HH:MM AM/PM`. Sets Configure → Settings → Lock and Exit → Set Auto Restart Time. |
-
-Gateway's Lock and Exit panel shows **either** the Auto Log Off Time
-field **or** the Auto Restart Time field depending on whether the
-account has an active autorestart daily-token cycle. The controller
-tries both labels and sets the one Gateway is currently displaying.
-If the user sets the one Gateway isn't showing, a clear warning is
-logged. Setting *both* env vars makes the controller handle whichever
-Gateway is displaying in any given session.
-
-### Command server (v0.2)
-| Var | Notes |
-|---|---|
-| `CONTROLLER_COMMAND_SERVER_PORT` | TCP port to listen on for IBC-compat commands. Unset (default) disables the server. Set to `7462` to match IBC's default. In dual mode, the paper instance auto-offsets to `port+1` to avoid a bind collision. |
-| `CONTROLLER_COMMAND_SERVER_HOST` | Bind address. Default `0.0.0.0` so Docker port forwarding works; restrict exposure with Docker's `-p 127.0.0.1:7462:7462` for loopback-only external access. |
-
-Supported commands: `STOP`, `RESTART` (in-place Gateway JVM re-launch
-+ full re-login), `RECONNECTACCOUNT`, `ENABLEAPI`. `RECONNECTDATA`
-returns a clean error on Gateway (no File → Reconnect Data menu item)
-and dispatches on TWS.
-
-**Optional auth token (recommended if you expose the port beyond
-localhost)**: set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN=<random-secret>`.
-When set, clients must send `AUTH <token>\n` as their first line
-before a command:
-
-```
-AUTH <token>
-STOP
-```
-
-The token is checked with `hmac.compare_digest` to resist timing
-side-channels. Without the token set, the command server runs in
-IBC-compat no-auth mode and logs a loud WARNING at startup.
-
-### Recovery tunables (v0.5.10)
-| Var | Notes |
-|---|---|
-| `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` | Seconds to sleep after a JVM code-0 exit (or cold start) inside IBKR's daily maintenance window (~23:30-00:30 `America/New_York`) before re-auth. Default `480` (8 min). The delay lets IBKR's auth server drain the cooperatively-shutdown session; re-auth'ing too quickly during this window is silently dropped → CCP LOCKOUT cascade. See [`docs/DISCONNECT_RECOVERY.md`](docs/DISCONNECT_RECOVERY.md#scenario-ibkr-daily-maintenance-window-v0510) for the 2026-04-20/21 incident that motivated this. |
-| `CCP_LOCKOUT_MAX_JVM_RESTARTS` | Cap on CCP-lockout-triggered JVM restart cycles. Default `0` (halt on first persistent lockout — see `ALERT_CCP_PERSISTENT_HALT`). Set to a positive integer (e.g. `5`) to restore the pre-v0.5.9 auto-recovery loop. |
-
-### Observability (v0.4.9)
-| Var | Notes |
-|---|---|
-| `CONTROLLER_HEALTH_SERVER_PORT` | TCP port for the HTTP `/health` endpoint. Default `8080` in the shipped image, unset on source checkout. In dual mode, paper auto-offsets to `port+1`. Set to empty to disable the health server entirely. |
-| `CONTROLLER_HEALTH_SERVER_HOST` | Bind address. Default `0.0.0.0` so Docker port forwarding works. Restrict external exposure with Docker's `-p 127.0.0.1:8080:8080` on the host side. |
-
-`GET /health` returns JSON with the controller's state, Gateway JVM
-liveness, API port status, CCP lockout streak, and the timestamp of
-the most recent successful auth. HTTP 200 if the controller is logged
-in and serving (`state==MONITORING` AND `api_port_open` AND
-`jvm_alive`); 503 otherwise. `GET /ready` returns 200 while the
-process is running (for Kubernetes-style readiness).
-
-The controller also emits stable grep-contract log tokens
-(`ALERT_CCP_PERSISTENT`, `ALERT_JVM_RESTART_EXHAUSTED`,
-`ALERT_2FA_FAILED`, `ALERT_PASSWORD_EXPIRED`, `ALERT_LOGIN_FAILED`,
-`ALERT_SHUTDOWN`) that external monitors can pattern-match on
-regardless of log level. `ALERT_PASSWORD_EXPIRED` fires in two
-flavors — `status=warning` (with `days_remaining=N` when the dialog
-reports it, actionable before lockout) and `status=expired` (login
-is already blocked, rotate the password in IBKR's web portal).
-`ALERT_LOGIN_FAILED` fires when Gateway surfaces a credential-rejection
-modal or when the `launcher.log` fingerprint matches a bad-credentials
-auth flow (`reason=bad-credentials`), so monitors can tell a
-stale-password account lockout apart from IBKR's silent cooldown
-(`ALERT_CCP_PERSISTENT`) without waiting for the CCP-retry ceiling.
-`ALERT_SHUTDOWN` is the lifecycle complement — INFO-level and emitted
-on SIGTERM/SIGINT with `graceful=true|false` so dashboards can
-distinguish operator-initiated shutdowns from Gateway-JVM crashes,
-and flag stuck-JVM `graceful=false` restarts that need attention.
-
-The shipped `Dockerfile` includes a `HEALTHCHECK` that curls `/health`
-every 30s with a 180s start-period. In `DUAL_MODE=yes` it probes both
-the live and paper ports; either side being unhealthy marks the
-container unhealthy.
-
-Full protocol, field semantics, and integration examples (cron,
-Prometheus blackbox_exporter, jq): [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
-
-Playbook for operator-action scenarios (CCP lockout, 2FA failure,
-JVM restart exhaustion, Gateway JVM crash): [`docs/DISCONNECT_RECOVERY.md`](docs/DISCONNECT_RECOVERY.md).
-
-### Product selector (v0.2)
-| Var | Notes |
-|---|---|
-| `GATEWAY_OR_TWS` | `gateway` (default) or `tws`. Switches launcher discovery (`$TWS_PATH/ibgateway/...` vs `$TWS_PATH/tws/...`) and the agent's window-title match between IB Gateway and Trader Workstation. Code path unit-tested; live validation pending a TWS-with-controller Dockerfile variant. |
-
-### Dual-mode per-instance (v0.2.1)
-| Var | Notes |
-|---|---|
-| `TWS_SETTINGS_PATH` | In dual mode, `run.sh` sets this per instance (e.g. `/home/ibgateway/Jts_live`) so live and paper have isolated state. Single-mode users don't need to set it. |
-| `CONTROLLER_READY_FILE` | Override the readiness signal file. Defaults to `/tmp/gateway_ready` (single mode) or `/tmp/gateway_ready_{mode}` (dual mode, set automatically by run.sh). |
-
-### Other
-| Var | Notes |
-|---|---|
-| `GATEWAY_WARM_STATE` | Optional path. If set, the controller copies files from this directory into Gateway's settings dir before launch. Useful for seeding a fresh container with a previously-captured jts.ini + encrypted state dir (for autorestart token support). |
-| `GATEWAY_INPUT_AGENT_JAR` | Override path to the agent jar. Default: `~/gateway-input-agent.jar`. |
-| `GATEWAY_INPUT_AGENT_SOCKET` | Override Unix socket path. Default: `/tmp/gateway-input.sock` (single mode) or `/tmp/gateway-input-{mode}.sock` (dual mode, set automatically by run.sh). |
-| `CONTROLLER_DEBUG` | Set to `1` to enable debug-level logging. |
-| `CONTROLLER_TEST_MODE` | Set to `1` to exit immediately after clicking Log In (for smoke tests). |
-
-## Docker integration
-
-This tool is designed to drop into a
-[gnzsnz/ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker)
-image via a `Dockerfile.template` addition, replacing IBC. Install via
-the Makefile target (`make install DESTDIR=...`) that drops
-`gateway-input-agent.jar` and `scripts/gateway_controller.py` into the
-`ibgateway` user's home.
-
-See [`docs/MIGRATION.md`](docs/MIGRATION.md) for swapping out IBC in a
-`gnzsnz/ib-gateway-docker`-style Dockerfile.
-
-If you already have an IBC `config.ini`, the
-[`ibc_config_to_env.py`](scripts/ibc_config_to_env.py) one-shot tool
-converts it to the equivalent ibg-controller env vars (`.env`,
-`docker run -e`, or `docker-compose` format), warning on unsupported
-keys instead of silently dropping them. Full mapping table and cutover
-recipe: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
-
-```bash
-./ibc_config_to_env.py /path/to/your/IBC/config.ini > .env
-# or: ./ibc_config_to_env.py --format compose config.ini
-```
+Replaces IBC (entirely, for Gateway), oathtool (stdlib TOTP), and
+xdotool (the agent types from inside the JVM).
 
 ## Building
 
 ```bash
-# Build the agent jar and stage the controller into dist/
-make
-
-# Syntax-check the Python controller + validate the agent jar manifest
-make test
-
-# Create a release tarball (dist/ibg-controller-0.6.2.tar.gz)
-make release VERSION=0.6.2
-
-# Install directly into a running ibgateway home (for dev on host, or
-# as called by the Docker image's setup stage)
+make            # build the agent jar, stage controller into dist/
+make test       # build checks + full unit suite (stdlib unittest, no pip)
+make release VERSION=x.y.z
 make install DESTDIR=/home/ibgateway
 ```
 
-Build requires a JDK 17+ (`javac` + `jar`) and `make`. No Maven, no Gradle.
-
-### Installing from a release tarball (for consumers who don't build)
-
-```bash
-VER=0.6.2
-curl -sSLO https://github.com/code-hustler-ft3d/ibg-controller/releases/download/v${VER}/ibg-controller-${VER}.tar.gz
-tar -xzf ibg-controller-${VER}.tar.gz
-cd ibg-controller-${VER}
-DESTDIR=/home/ibgateway ./install.sh
-```
-
-The tarball layout is flat:
-```
-ibg-controller-0.6.2/
-├── gateway-input-agent.jar   ← installed to $DESTDIR/gateway-input-agent.jar
-├── gateway_controller.py      ← installed to $DESTDIR/scripts/gateway_controller.py
-├── ibc_config_to_env.py       ← one-shot IBC config.ini → env migration tool
-├── install.sh
-├── README.md, CHANGELOG.md, LICENSE, SECURITY.md
-└── docs/
-    ├── ADR-001-in-jvm-dialog-dispatcher.md
-    ├── ARCHITECTURE.md
-    ├── BOOTSTRAP.md
-    ├── DISCONNECT_RECOVERY.md
-    ├── FROM_IBC.md
-    ├── MIGRATION.md
-    ├── OBSERVABILITY.md
-    └── UPGRADING.md
-```
+Needs `make` and a JDK 17+. No Maven, no Gradle, no pip. Release
+tarballs with an `install.sh` are attached to each
+[GitHub release](https://github.com/code-hustler-ft3d/ibg-controller/releases).
 
 ## Troubleshooting
 
-### IBKR auth lockouts and the controller's automatic backoff (v0.3.2+)
+**`CCP LOCKOUT DETECTED` / login retries looping.** IBKR's auth server
+rate-limits fresh logins after failed attempts. The controller detects
+it, backs off exponentially (60s → 600s), and retries in-JVM — just
+let it run; it typically clears in 5–60 minutes. If you're stuck after
+an hour: check the userid matches the trading mode, check
+`TWS_SERVER` against [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md), and see
+the [full playbook](docs/DISCONNECT_RECOVERY.md#scenario-ccp-lockout-concurrent-ibkr-session).
+On images before v0.5.12 this warning was usually a JVM-internal
+deadlock, not a real lockout — upgrade.
 
-> **Important triage note (v0.5.12+):** the `CCP LOCKOUT DETECTED`
-> warning name is misleading. Pre-v0.5.12 the most common cause was
-> an **intra-JVM `AtkWrapper` deadlock** that fired the
-> `AuthTimeoutMonitor-CCP` 20-second timer locally without IBKR ever
-> being reached. v0.5.12 disables the AT-SPI bridge in the JVM and
-> the deadlock is gone — so if you're seeing this on v0.5.12+, it's
-> much more likely a real broker-side lockout. Triage:
->
-> - `launcher.log` contains `NS_AUTH_START` for the affected mode →
->   real broker-side lockout, follow the backoff playbook below
->   and/or [DISCONNECT_RECOVERY.md →
->   CCP lockout](docs/DISCONNECT_RECOVERY.md#scenario-ccp-lockout-concurrent-ibkr-session).
-> - No `NS_AUTH_START` and you're on a pre-v0.5.12 image → it was
->   the deadlock; upgrade.
-> - No `NS_AUTH_START` on v0.5.12+ → check
->   `/tmp/jvm_console_${TRADING_MODE}.log` after `kill -3 <jvm_pid>`
->   for an `AtkUtil.invokeInSwing` parked thread (smoking gun for a
->   bridge regression — open an issue).
+**"Gateway PID unknown (agent never reported one)".** The in-JVM agent
+didn't start. Check the `-javaagent:` flag is on the JVM command line,
+the socket in `GATEWAY_INPUT_AGENT_SOCKET` exists, and
+`/tmp/jvm_console_${TRADING_MODE}.log` for agent boot errors.
 
-IBKR's auth server occasionally stops responding to fresh password
-logins for several minutes (and occasionally hours) after a burst of
-failed attempts from the same account. There are two visible failure
-modes:
+**"Existing session detected" loops forever.** Something else keeps
+logging in as the same account (another container, TWS on your
+desktop, the mobile app). Shut the other session down.
 
-1. **CCP silent timeout** — Gateway logs a 20-second silent
-   `AuthTimeoutMonitor-CCP: Timeout!` in `launcher.log` with no dialog
-   on-screen. Gateway 10.45.1c also hides the error dialog that
-   10.44.1g surfaces in the same state, making this worse.
-2. **Stuck-connecting retry loop** — Gateway's login dialog stays up
-   showing `Attempt N: connecting to server (trying for another XX
-   seconds)`. The auth protocol never starts, so no `Timeout!` line
-   appears in `launcher.log` at all — the only visible signal is the
-   dialog text.
-
-**What the controller does automatically**: as of v0.4.0, the controller
-detects both modes, applies an exponential backoff between retries
-(60s → 120s → 240s → 480s → 600s cap), and recovers by **re-driving
-Log In on the existing Gateway JVM** — never by killing and
-relaunching it. This matches
-[IBC's `LoginManager.initiateLogin`](https://github.com/IbcAlpha/IBC/blob/master/src/ibcalpha/ibc/LoginManager.java)
-pattern: IBKR's auth server treats each new JVM as a fresh handshake
-and keeps the CCP limiter armed, so the previous v0.2.2–v0.3.2
-"backoff + `do_restart_in_place`" design never let the lockout clear.
-You'll see these lines:
-
-```
-CCP LOCKOUT DETECTED — IBKR's auth server silently dropped the auth request
-CCP backoff: waiting 60s before next auth attempt
-Retrying auth in-JVM after CCP backoff (attempt 1/8)
-In-JVM relogin attempt (no JVM restart — matches IBC's LoginManager.initiateLogin semantics)
-```
-
-or
-
-```
-Login dialog stuck in 'connecting to server' retry loop — IBKR auth server isn't accepting sessions right now. Applying CCP backoff before retry.
-CCP backoff: waiting 120s before next auth attempt
-```
-
-The backoff counter is per-trading-mode (live and paper run as
-separate processes in dual mode, so they don't share state), and
-resets on genuine 2FA-success. Up to 8 in-JVM retries per controller
-lifetime; past that the controller exits and the container
-orchestrator's restart policy takes over. **Just let it run** — the
-controller will keep retrying with increasing delays until IBKR's
-rate limiter clears, often 5–60 minutes total.
-
-**If you're still stuck after an hour of patient backoff**, double-check:
-
-1. You're sending the right username for the trading mode (the
-   controller auto-swaps to `TWS_USERID_PAPER` when
-   `TRADING_MODE=paper`, but double-check your env file)
-2. Your `TWS_SERVER` / `TWS_SERVER_PAPER` matches the regional
-   server your account is actually hosted on — see
-   [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md)
-3. If you have a *previously working* container's `/home/ibgateway/Jts`
-   state available, mount it via `GATEWAY_WARM_STATE` — autorestart
-   token reauth goes through a different code path than fresh-password
-   auth and bypasses the cooldown
-
-If a clean retry from a known-good config still fails after the
-backoff has run its course, the issue is almost certainly account-side
-(wrong server, wrong userid, account locked), not the controller.
-Gateway's `launcher.log` at `/home/ibgateway/Jts/launcher.log` will
-confirm the CCP-Timeout case — you'll see the
-`Authenticating` → `Timeout!` pattern with nothing in between. The
-stuck-connecting case won't show in `launcher.log`; check the
-controller's own logs for the "stuck in 'connecting to server'"
-warning instead.
-
-### "Gateway PID unknown (agent never reported one) — cannot proceed without a JVM identity"
-
-App discovery relies on the input agent reporting its JVM PID through
-the Unix socket. If you see this error, the agent itself failed to
-start. Check:
-
-1. The `-javaagent:/home/ibgateway/gateway-input-agent.jar=...`
-   flag is in the JVM's command line. Inside the container:
-   `cat /proc/$(pgrep -f java)/cmdline | tr '\0' '\n' | grep agent`.
-2. The agent socket exists and is writable:
-   `ls -l /tmp/gateway-input-${TRADING_MODE}.sock` (or
-   `/tmp/gateway-input.sock` in single-mode).
-3. `/tmp/jvm_console_${TRADING_MODE}.log` — added in v0.5.12. Check
-   the JVM console for agent boot errors.
-
-> **Pre-v0.5.12 deployments only:** if you're still on a release that
-> used the AT-SPI desktop tree for app discovery and you see "IBKR
-> Gateway never appeared in AT-SPI desktop tree within 120s",
-> upgrade. v0.5.12+ doesn't use AT-SPI at all and v0.6.2 removed the
-> ATK install steps from the image; both error modes are gone.
-
-### "Existing session detected" dialog keeps appearing in a loop
-
-The controller's `EXISTING_SESSION_DETECTED_ACTION=primary` clicks
-`Continue Login`, which tells IBKR to kick the *other* session. If
-something else keeps reconnecting as that account (another container,
-the mobile app, TWS on your desktop), you'll ping-pong forever. Shut
-down the other session first.
-
-### The controller logs "Gateway JVM PID (from agent): None"
-
-The Java agent's `GET_PID` command returned nothing. This usually
-means the agent's Unix socket is the old IBC default path (check
-`GATEWAY_INPUT_AGENT_SOCKET` in the container's env) or the
-`ProcessHandle` API isn't available (you're running on JRE < 17).
-Verify the JRE is Zulu 17 or newer.
-
-### Post-login config: "Auto Log Off Time" label not found
-
-Gateway's Lock and Exit panel shows *either* "Set Auto Log Off Time
-(HH:MM)" *or* "Set Auto Restart Time (HH:MM)" depending on account
-state. The controller tries the label matching the env var you set.
-If it can't find it, it warns which label Gateway is currently
-showing and suggests the other env var. Set both `AUTO_LOGOFF_TIME`
-and `AUTO_RESTART_TIME` if you want the controller to handle whichever
-Gateway is displaying.
+**"Auto Log Off Time" label not found.** Gateway shows either the
+logoff or the restart field depending on account state — set both
+`AUTO_LOGOFF_TIME` and `AUTO_RESTART_TIME` and the controller handles
+whichever is displayed.
 
 ## Security
 
-Full supply chain details (cosign verification, SBOM extraction,
-pinning to digests, vuln reporting): [`SECURITY.md`](SECURITY.md).
-Quick version of the deployment hygiene below.
+Supply chain: no third-party dependencies (Python stdlib + one
+dependency-free Java file), digest-pinned base image, cosign-signed
+release images. Verification recipes and reporting:
+[`SECURITY.md`](SECURITY.md).
 
-This is a narrow threat model — single-user container running a
-trading tool. But there are real things to get right.
+Deployment hygiene:
 
-**If you're running with `CONTROLLER_COMMAND_SERVER_PORT` set**:
-
-1. **Bind to loopback only** via Docker: `-p 127.0.0.1:7462:7462`.
-   The in-container bind is `0.0.0.0` by default so Docker port
-   forwarding works at all; *Docker's* mapping is what controls
-   external exposure. Never use a bare `-p 7462:7462` (which
-   binds the host's external interface) unless you also set an
-   auth token.
-2. **Set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN`** to a random
-   secret if the port is reachable by anything other than
-   `127.0.0.1` on the host, or if the host is multi-tenant.
-   Without it, anyone who can reach the port can send
-   `STOP`/`RESTART`/`RECONNECTACCOUNT`.
-3. The controller logs a loud WARNING at startup if the command
-   server is enabled without an auth token. Don't ignore it.
-
-**Credentials**:
-
-1. Pass them via `docker run --env-file /path/to/.env`, never on the
-   command line. The controller redacts them in its own logs; Gateway
-   itself also redacts them in `launcher.log`.
-2. Set your `.env` file to `600` on the host. Docker Engine only
-   reads the file at `docker run` time; what's in `/proc/<pid>/environ`
-   after that depends on your Docker Engine version.
-3. For additional safety, consider Docker secrets (`_FILE` env vars
-   like `TWS_PASSWORD_FILE`) — the controller delegates those to
-   `run.sh`'s `file_env` helper which loads them from a separate
-   file path.
-
-**Logs and sharing them**:
-
-1. Window/dialog dumps (`CONTROLLER_DEBUG=1`, the `CONTROLLER_TEST_MODE`
-   dump, and the login-failure diagnostic) redact account numbers
-   matching `DU\d{5,10}` / `U\d{5,10}` (IBKR account format), and as of
-   **v0.6.3** the in-JVM agent masks password-field contents at the
-   source — a `JPasswordField` is emitted as `<redacted password
-   len=N>`, never its value. (Before v0.6.3 the login-failure dump
-   could log your IBKR password in plaintext; see CHANGELOG.md v0.6.3.
-   Upgrade, and if you ran an older version, treat any saved
-   login-failure logs as sensitive.) Other identifying information
-   like your username can still appear in window titles. **Review
-   logs before posting them publicly**.
-2. Gateway's own `/home/ibgateway/Jts/launcher.log` is NOT
-   controlled by us and may include fragments of your session. If
-   you attach it to a bug report, sanitize first.
-
-**Warm state and file inputs**:
-
-1. `GATEWAY_WARM_STATE` is trusted — only set it to a directory
-   you own or copied from your own working container. A malicious
-   warm-state dir could inject arbitrary content into
-   `$JTS_CONFIG_DIR`.
-2. `TWS_SERVER` / `TWS_SERVER_PAPER` are validated as hostnames
-   (DNS label characters only) at controller startup. An invalid
-   hostname aborts before Gateway starts.
-
-**What's NOT protected**:
-
-- The Java agent's Unix socket is reachable by any process in the
-  same container that can read `/tmp/gateway-input-*.sock`
-  (owner-only perms are set, but the container is single-user so
-  this is mostly for defense-in-depth).
-- The command server has no rate limiting.
-- No TLS on the command server. Mitigated by recommending
-  loopback-only binding via Docker's `-p 127.0.0.1:...`.
+- Command server: keep it loopback-only (`-p 127.0.0.1:7462:7462`)
+  or set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN`. Without a token,
+  anyone who can reach the port can send `STOP`/`RESTART`.
+- Credentials: use `--env-file` (mode `600`) or the `_FILE` secrets
+  variants, never `-e` on the command line.
+- Logs: the controller redacts account numbers and (v0.6.3+) password
+  fields at the source, but window titles can still carry your
+  username, and Gateway's own `launcher.log` is not under our control.
+  Review before posting publicly.
+- `GATEWAY_WARM_STATE` is trusted input — only point it at a directory
+  you own.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Builds on work from IBC, ibctl, and
-gnzsnz/ib-gateway-docker, all credited below.
+MIT — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Acknowledgements
 
-- **@rlktradewright** for [IBC](https://github.com/IbcAlpha/IBC). Most
-  of what we know about driving Gateway's dialogs comes from reading IBC.
-- **[Lcstyle/ibctl](https://github.com/Lcstyle/ibctl)** for the Java-agent
-  architecture and the edge-case catalog. The idea of using an in-JVM
-  agent for the operations that Swing rejects externally came from ibctl.
-- **@gnzsnz** for steering the tool's architecture in
-  [issue #366](https://github.com/gnzsnz/ib-gateway-docker/issues/366)
-  and for making the `ib-gateway-docker` image this is meant to drop
-  into.
+- **@rlktradewright** for [IBC](https://github.com/IbcAlpha/IBC) —
+  most of what we know about driving Gateway's dialogs comes from
+  reading IBC.
+- **[Lcstyle/ibctl](https://github.com/Lcstyle/ibctl)** for the
+  in-JVM agent idea and the edge-case catalog.
+- **@gnzsnz** for
+  [ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker)
+  and for steering this tool's architecture in
+  [issue #366](https://github.com/gnzsnz/ib-gateway-docker/issues/366).
