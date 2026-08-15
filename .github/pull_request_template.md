@@ -10,7 +10,7 @@ behind a refactor. Skip if the "What" makes the "Why" self-evident. -->
 
 ## Checklist
 
-- [ ] `make clean && make && make test` passes (166+ tests green)
+- [ ] `make clean && make && make test` passes (full unit suite green)
 - [ ] No credentials, account numbers, or PII in the diff
 - [ ] CHANGELOG.md updated under the next version's heading
 - [ ] `docs/OBSERVABILITY.md` updated (if touching ALERT tokens, `/health`, or env vars listed there)

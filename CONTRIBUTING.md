@@ -63,31 +63,108 @@ LICENSE                   ← MIT
    scope before you spend time.
 2. One logical change per PR. Rebase-and-merge strategy — please
    keep commits meaningful, no "fix typo in WIP commit".
-3. If you change agent protocol (new commands, new wire format),
-   bump the version in both the agent source and the Python side's
-   protocol check.
+3. If you add or change an agent protocol command: add a row to the
+   command table in the `GatewayInputAgent.java` header comment, tag
+   the new dispatch `case` with the version it ships in, and add the
+   command to the list in `docs/ARCHITECTURE.md`.
 4. If you touch the state machine in `gateway_controller.py`:
    - Hand-write a test plan in the PR description
    - Spike logs go in the parent `spike/` directory of whatever repo
      is integrating this (we don't keep test logs with credentials in
      this repo)
-5. Run `make clean && make` before pushing — any fresh build must
-   succeed.
+5. Run `make clean && make && make test` before pushing — any fresh
+   build must succeed and the unit suite must be green.
+6. Contributions are welcome from the community at large. The
+   maintainer may decline contributions that would create ambiguity
+   about the project's IP provenance (for example, work products of an
+   employment relationship).
 
 ## Testing
 
-There is no automated test suite. End-to-end testing requires a real
-IB account + credentials + TOTP secret, which can't live in CI. The
-testing model is:
+Two layers:
 
-- Maintainers run a spike container against their own real account
-  after any state-machine change
-- Spike logs (sanitized, no credentials) get committed under
-  `spike/PHASE*_SUCCESS.md` in the integrating image's parent repo
-- Breaking changes documented in `CHANGELOG.md`
+**Unit suite** — `tests/`, stdlib `unittest` only, no pip installs:
 
-If you have ideas for a fake/mock Gateway that would let us run some
-automated tests, please open an issue.
+```
+make test                                 # syntax + jar manifest + unit suite
+python3 -m unittest discover -s tests     # suite alone
+```
+
+The controller imports cleanly on any host with a Python 3 stdlib (no
+Gateway, no display). The suite covers the pure decision helpers
+(`_twofa_*`, `_detect_*`, `_coerce_*`, `_redact_logs`, TOTP
+generation, env parsing) directly, and orchestration paths by stubbing
+the `agent_*` socket wrappers with `unittest.mock.patch.object` — see
+`tests/test_pure_logic.py` for the house patterns. New logic should
+follow the same shape: keep decisions in small pure helpers, test them
+directly, and mock the agent boundary for flow tests.
+
+**Live validation** — end-to-end truth (real dialog wording, window
+timing, IBKR server-side behavior) requires a real IB account +
+credentials + TOTP secret, which can't live in CI. State-machine
+changes therefore still need a hand-written test plan in the PR
+description, and get validated by maintainer spike runs against a real
+account before release; sanitized spike logs go in the integrating
+repo's `spike/` directory, never here. The README compatibility
+table's vocabulary tracks this: ✅ = validated against real Gateway,
+⚠️ = code in place and unit-tested, not yet run against the real
+product.
+
+## Adding a new ALERT token or reason
+
+- Format: `ALERT_<NAME> mode={TRADING_MODE} key=value key="quoted
+  prose"` — one `log.error`/`log.info` call per emission, `mode=`
+  first.
+- Token names and key names are a stability contract
+  (`docs/OBSERVABILITY.md`). Adding a new token, or a new `reason=`
+  value on an existing token, is additive and fine; renaming or
+  removing is a breaking change.
+- Update `docs/OBSERVABILITY.md`: example line(s), **When fired**,
+  **What the operator should do**, **Recommended debounce** — plus the
+  grep recipe near the end of that file and README's monitoring token
+  list if the token itself is new.
+
+## Adding a new env var
+
+- Read it where it's used (`os.environ.get` at the use site or at
+  module load, matching its neighbors); document it in README's env
+  table.
+- IBC-compatible names: add the mapping row to `docs/FROM_IBC.md`,
+  and if `scripts/ibc_config_to_env.py` should translate it, update
+  that script together with `tests/test_ibc_config_to_env.py`.
+- If the var was previously listed as unsupported, remove it from
+  `_warn_unsupported_env_vars` and update `tests/test_env_compat.py`.
+
+## Adding a new dialog handler
+
+- Detect windows by title substring via `agent_windows()`; read
+  dialog text via `agent_labels()` — but note that is JLabel-only:
+  headings can be JTextArea, which only the `WINDOW` component dump
+  shows (this distinction caused real bugs; see issue #20).
+- Follow the wrapper contract: `agent_*` helpers catch all
+  exceptions, `log.error`, and return a bool — they never raise into
+  the state machine.
+- Poll with `time.monotonic()` deadlines and ~0.5–1s sleeps; log
+  window lists only when they change; never log typed payloads, and
+  run window dumps through `_redact_logs` before logging them.
+- Keep the decision in a pure helper (`_detect_*` / `_twofa_*` style)
+  and unit-test it; mock the wrappers for the flow test.
+
+## Adding a new agent command
+
+- Java: a dispatch `case` with a `// Protocol:` comment and version
+  tag, a `doXxx` method mirroring the closest existing command, and a
+  row in the header's command table. Error strings follow
+  `ERR <snake_case_reason> key=value`.
+- EDT rules (see the threading note in the agent header):
+  `invokeAndWait` for mutations that cannot open a modal dialog;
+  `invokeLater` plus a short sleep for clicks that might. Read-only
+  commands walk the component tree without EDT synchronization
+  (established precedent).
+- Never echo typed text or payloads in responses or logs, and never
+  emit `JPasswordField` contents (v0.6.3 security posture).
+- Python: an `agent_xxx` wrapper following the catch-log-bool
+  contract, and a `docs/ARCHITECTURE.md` command-list entry.
 
 ## Scope
 

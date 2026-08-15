@@ -64,6 +64,14 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **`make test` now fails when the unit suite fails.** The unittest
+  invocation was piped through `tail -5`, so the pipeline's exit
+  status was tail's and a red suite still exited 0 — CI has never
+  been able to fail on a unit-test regression. The pipe is gone
+  (non-verbose discover output is already compact) and a failing
+  suite now propagates. Verified in both directions (green passes,
+  sabotaged suite fails).
+
 - **`SETTEXT_IN_WIN` can no longer type into JTextArea headings — the
   actual mechanism of issue #7's "code entered in a weird place"
   (#20, #21).** The command's fallback took the *first JTextComponent
@@ -75,8 +83,25 @@ and the project follows [Semantic Versioning](https://semver.org/).
   fields (`JTextField`, which includes `JPasswordField`) and returns
   `ERR` otherwise. Found by @xuanmingguo (#20).
 
+### Docs
+
+- **CONTRIBUTING.md now describes the real testing model.** It
+  previously claimed "there is no automated test suite" (stale since
+  the suite was introduced; 253 tests today) and the PR template
+  referenced "Adding a new..." walkthroughs that didn't exist. The
+  Testing section now documents both layers (stdlib unit suite +
+  live-validation spikes), and the four walkthroughs (ALERT tokens,
+  env vars, dialog handlers, agent commands) are written. The PR
+  template no longer hardcodes a test count.
+
 ### Validation
 
+- `handle_2fa`'s selector orchestration now has direct tests
+  (`TestHandle2faSelectorFlow`): switch-rejected → dedicated ALERT
+  reason and no code typed; switch-accepted → full selector →
+  code-entry → TOTP flow; JLIST failure → fail-loud; no selector →
+  v0.7.0 flow untouched (the no-regression invariant). These mirror
+  the mock-dialog harness scenarios that validated the #21 merge.
 - Harness reproduction (2026-08-14): mock Swing dialogs of BOTH
   real-world variants (component trees per the #20 dump and the
   2026-05-29 spike dump) driven by the real agent jar and the real
