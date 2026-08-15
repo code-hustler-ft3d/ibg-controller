@@ -225,6 +225,16 @@ via VNC and enter the code manually.
    notifications rather than TOTP. The controller *does* handle IB Key
    wait mode, but if the operator doesn't tap Approve on their phone
    within `TWOFA_EXIT_INTERVAL` (default 120s), the wait times out.
+4. **Multi-method account defaulting to the wrong method** — the
+   account has more than one 2FA method and Gateway pre-picked one
+   `TWOFACTOR_CODE` can't satisfy. Reasons `"2FA method mismatch"` and
+   `"2FA device switch produced no code-entry dialog"` are this case
+   (the second means the controller selected the right device but
+   IBKR rejected the mid-challenge switch server-side — issue #20).
+   Fix on the account side: set the preferred second-factor method to
+   the one matching `TWOFACTOR_CODE` in Client Portal → Settings →
+   User Settings → Security → Secure Login System, or drop to a
+   single method.
 
 ### Recovery
 

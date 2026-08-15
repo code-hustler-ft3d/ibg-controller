@@ -114,11 +114,20 @@ class TestSpecialMappings(unittest.TestCase):
 
 
 class TestInformationalAndUnsupported(unittest.TestCase):
-    def test_informational_twofactordevice_warns_only(self):
-        pairs = ibc.parse_ibc_config("TwoFactorDevice=mobile\n")
+    def test_twofactordevice_maps_to_twofa_device(self):
+        # v0.7.0+: TWOFA_DEVICE is honored on multi-method accounts, so
+        # the converter translates it instead of calling it implicit.
+        pairs = ibc.parse_ibc_config(
+            "TwoFactorDevice=Mobile Authenticator app\n")
         env, warnings = ibc.convert(pairs)
-        self.assertEqual(env, [])
-        self.assertTrue(any("handled implicitly" in w for w in warnings))
+        self.assertEqual(dict(env)["TWOFA_DEVICE"],
+                         "Mobile Authenticator app")
+        self.assertFalse(any("handled implicitly" in w for w in warnings))
+
+    def test_secondfactordevice_alias_maps_too(self):
+        pairs = ibc.parse_ibc_config("SecondFactorDevice=IB Key\n")
+        env, _ = ibc.convert(pairs)
+        self.assertEqual(dict(env)["TWOFA_DEVICE"], "IB Key")
 
     def test_unsupported_fix_warns(self):
         pairs = ibc.parse_ibc_config("FIX=yes\nFIXLoginId=fixuser\n")

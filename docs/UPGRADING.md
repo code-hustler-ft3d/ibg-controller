@@ -76,6 +76,30 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased (next release)
+
+Multi-method 2FA, continued from v0.7.0 (issues #7, #20 / PR #21):
+
+- Gateway's multi-method dialog turns out to have **two
+  account-dependent shapes**: the pre-defaulted code dialog v0.7.0
+  handles, and a device-selector list. The controller now detects and
+  drives both. This supersedes the v0.7.0 note below that said the
+  switch control couldn't be driven — it can be driven mechanically,
+  but IBKR **rejects the mid-challenge switch server-side**, so the
+  operator remediation is unchanged: set your preferred method to the
+  one matching `TWOFACTOR_CODE` (Client Portal → Settings → User
+  Settings → Security → Secure Login System).
+- Selector-shaped accounts that previously saw a false
+  `2FA handled successfully` followed by a dead login now get a clear
+  failure. If your monitoring matches `ALERT_2FA_FAILED` reasons,
+  three new values exist: `"2FA device switch produced no code-entry
+  dialog"`, `"JLIST_SELECT on 2FA device selector failed"`,
+  `"CLICK_IN_WIN OK on 2FA device selector failed"`
+  ([OBSERVABILITY.md](OBSERVABILITY.md)).
+- **The agent jar changed** (new `JLIST_SELECT` command), so pull the
+  new image — or if you build/install from source, rebuild so the new
+  jar is picked up.
+
 ### v0.7.0
 
 **Multi-method 2FA fix (issue #7) + a small log-redaction hardening.**

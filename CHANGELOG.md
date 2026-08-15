@@ -8,6 +8,26 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **README rewritten as a compact reference (issue #19).** ~700 →
+  ~290 lines. The env-var tables, quick start, `stop_grace_period`
+  warning, and compatibility table stay; the architecture history,
+  CCP-backoff exposition, and troubleshooting essays now live only in
+  `docs/` where they always had canonical copies. Claims refreshed
+  along the way (multi-method 2FA per #20, agent size, `make test`
+  description, stale version examples). Env var names in the README
+  table are unchanged (stability contract).
+
+- **`ibc_config_to_env.py` now maps `TwoFactorDevice` /
+  `SecondFactorDevice` → `TWOFA_DEVICE`.** The converter previously
+  called these "handled implicitly — no env var needed", which has
+  been wrong since v0.7.0 started honoring `TWOFA_DEVICE` on
+  multi-method accounts. Tests updated to pin the mapping.
+
+- **CI and release workflows pin actions to commit SHAs** (tag noted
+  in a comment on each line) instead of mutable version tags —
+  removes the last trust-a-moving-tag link in the supply chain. No
+  behavior change at current versions.
+
 - **Upstream Gateway pin bumped 10.45.1c → 10.45.1g.** Both are on
   gnzsnz's `:stable` line (`:stable` resolved to 10.45.1g at the time of
   this change); the previous pin had fallen a few patch revisions behind.
@@ -84,6 +104,16 @@ and the project follows [Semantic Versioning](https://semver.org/).
   `ERR` otherwise. Found by @xuanmingguo (#20).
 
 ### Docs
+
+- **Multi-method 2FA accuracy sweep across the doc set.**
+  `docs/FROM_IBC.md` and `docs/MIGRATION.md` no longer claim
+  `TwoFactorDevice` is handled implicitly; `docs/UPGRADING.md` gains
+  the next-release section (two dialog shapes, new ALERT reasons,
+  agent-jar rebuild note) superseding v0.7.0's "switch control can't
+  be driven" claim; `docs/DISCONNECT_RECOVERY.md`'s 2FA scenario adds
+  the multi-method root cause and its account-side fix;
+  `docs/ARCHITECTURE.md`'s state-machine walkthrough now describes the
+  selector detection and method-prompt gate.
 
 - **CONTRIBUTING.md now describes the real testing model.** It
   previously claimed "there is no automated test suite" (stale since

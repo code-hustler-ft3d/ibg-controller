@@ -186,9 +186,10 @@ If you need these, keep IBC for now.
 
 - `CUSTOM_CONFIG` — no IBC config file is written; the controller
   reads env vars directly.
-- `TWOFA_DEVICE`, `TWOFA_TIMEOUT_ACTION` — only TOTP is handled via
-  `TWOFACTOR_CODE`. IB Key push device support is impossible from a
-  headless container.
+- IB Key push as an *unattended* method — the controller can wait for
+  a phone approval, but nobody is there to tap it in a headless
+  deployment. Use TOTP via `TWOFACTOR_CODE` (and `TWOFA_DEVICE` on
+  multi-method accounts, honored since v0.7.0).
 
 ## Shutdown grace period
 

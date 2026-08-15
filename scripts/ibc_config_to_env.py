@@ -77,6 +77,12 @@ DIRECT_MAPPINGS: Dict[str, Tuple[str, Callable[[str], Optional[str]]]] = {
         "RELOGIN_AFTER_TWOFA_TIMEOUT", _yes_no),
     "SaveTwsSettingsAt": ("SAVE_TWS_SETTINGS", _identity),
     "TimeZone": ("TIME_ZONE", _identity),
+    # v0.7.0+: TWOFA_DEVICE is honored on multi-method accounts (the
+    # controller checks Gateway's 2FA prompt / device selector against
+    # it). Previously listed as handled-implicitly; that was true only
+    # for single-method accounts.
+    "TwoFactorDevice": ("TWOFA_DEVICE", _identity),
+    "SecondFactorDevice": ("TWOFA_DEVICE", _identity),
 }
 
 
@@ -99,11 +105,6 @@ SPECIAL_MAPPINGS: Dict[str, Callable[[str], Optional[List[Tuple[str, str]]]]] = 
 # IBC keys that have no env equivalent but the controller already
 # implements the behaviour (so the user doesn't need to do anything).
 INFORMATIONAL: Dict[str, str] = {
-    "TwoFactorDevice":
-        "controller polls for the 2FA dialog to be dismissed (same "
-        "approach IBC takes); no env var needed",
-    "SecondFactorDevice":
-        "alias for TwoFactorDevice — handled implicitly",
     "LogToConsole":
         "controller always logs to stdout/stderr; no env var needed",
 }

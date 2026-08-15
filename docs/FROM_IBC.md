@@ -48,7 +48,7 @@ review). The tool's `--help` output lists every key it knows about.
 
 | IBC key | controller env | Notes |
 |---|---|---|
-| `TwoFactorDevice` / `SecondFactorDevice` | — | Handled implicitly — controller polls for the 2FA dialog to be dismissed (same approach IBC takes). Add `TWOFACTOR_CODE=<base32-secret>` if you're on TOTP. |
+| `TwoFactorDevice` / `SecondFactorDevice` | `TWOFA_DEVICE` | v0.7.0+: honored on multi-method accounts — the controller checks Gateway's 2FA prompt / device selector against it and fails loudly on a mismatch instead of typing the code into the wrong method. Defaults to `Mobile Authenticator app` when `TWOFACTOR_CODE` is set; single-method accounts can ignore it. |
 | `SecondFactorAuthenticationExitInterval` | `TWOFA_EXIT_INTERVAL` | Same value (seconds). |
 | `ExitAfterSecondFactorAuthenticationTimeout` | `TWOFA_TIMEOUT_ACTION` | `yes` → `exit`, `no` → `none`. ibg-controller also supports `restart` (in-place relogin). |
 | `ReloginAfterSecondFactorAuthenticationTimeout` | `RELOGIN_AFTER_TWOFA_TIMEOUT` | Same yes/no. |
@@ -122,8 +122,10 @@ default. You don't need to set anything.
 
 | IBC key | What the controller does by default |
 |---|---|
-| `TwoFactorDevice` / `SecondFactorDevice` | Polls for the 2FA dialog to be dismissed (user approves IB Key on phone, dialog disappears, controller proceeds). Same approach IBC takes. |
 | `LogToConsole` | Controller always logs to stdout/stderr. |
+
+(`TwoFactorDevice` / `SecondFactorDevice` used to be listed here; as
+of v0.7.0 they map to `TWOFA_DEVICE` — see the 2FA table above.)
 
 If you find an IBC key not covered here, run it through
 `ibc_config_to_env.py` — the tool's warnings surface anything it

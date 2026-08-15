@@ -235,11 +235,18 @@ Why each was added:
    `Continue Login` via `CLICK_IN_WIN`. Leaves unrecognized modals
    alone.
 6. **2FA**: `handle_2fa(app)` — if `TWOFACTOR_CODE` is set, poll for a
-   window titled `Second Factor`. When present, generate a TOTP code
-   and use `SETTEXT_IN_WIN` to type it, then `CLICK_IN_WIN Second
-   Factor|OK`. Early-exits if the API port opens. Also opportunistically
-   handles a late-arriving `Existing session detected` dialog in case
-   the initial `handle_post_login_dialogs` poll missed it.
+   window titled `Second Factor`. When present: if the dialog is the
+   multi-method *device selector* (detected via the `WINDOW` dump —
+   its heading is a JTextArea that `LABELS` can't see), select
+   `TWOFA_DEVICE` via `JLIST_SELECT`, click OK, and poll for the
+   code-entry prompt (failing loudly if it never appears — IBKR
+   rejects mid-challenge switches server-side, issue #20). Then read
+   the "Enter <method> code" prompt via `LABELS` and only type if it
+   matches `TWOFA_DEVICE` (v0.7.0, issue #7): generate the TOTP, type
+   via `SETTEXT_IN_WIN`, `CLICK_IN_WIN Second Factor|OK`. Early-exits
+   if the API port opens. Also opportunistically handles a
+   late-arriving `Existing session detected` dialog in case the
+   initial `handle_post_login_dialogs` poll missed it.
 7. **Disclaimers**: `dismiss_post_login_disclaimers()` — click any
    "I understand and accept" style buttons. Conservative: never clicks
    bare "OK".
