@@ -2165,5 +2165,53 @@ class TestTwofaMethodMismatch(unittest.TestCase):
             "Enter Mobile Authenticator app code", "Mobile Authenticator"))
 
 
+class TestTwofaSelectorPresent(unittest.TestCase):
+    # Dumps modeled on the agent's real WINDOW output for the two
+    # account-dependent shapes of the Second Factor dialog (issue #20
+    # ground truth; harness-verified 2026-08-14).
+
+    SELECTOR_DUMP = (
+        "=== window=Second Factor Authentication type=JDialog modal=true ===\n"
+        "JDialog accName=\"Second Factor Authentication\"\n"
+        "  JRootPane\n"
+        "    JPanel\n"
+        "      JTextArea text=\"Select second factor device\"\n"
+        "      JScrollPane\n"
+        "        JViewport\n"
+        "          JList\n"
+        "      JPanel\n"
+        "        JButton text=\"OK\"\n"
+        "        JButton text=\"Cancel\"\n"
+        "        JButton text=\"Help\"\n"
+    )
+
+    LINK_DUMP = (
+        "=== window=Second Factor Authentication type=JDialog modal=true ===\n"
+        "JDialog accName=\"Second Factor Authentication\"\n"
+        "  JRootPane\n"
+        "    JPanel\n"
+        "      JLabel text=\"Enter Mobile Authenticator app code\"\n"
+        "      JTextField\n"
+        "      JLabel text=\"Change input method\" hidden\n"
+        "      JButton text=\"OK\"\n"
+        "      JButton text=\"Cancel\"\n"
+    )
+
+    def test_detects_selector_variant(self):
+        self.assertTrue(gc._twofa_selector_present(self.SELECTOR_DUMP))
+
+    def test_link_variant_is_not_selector(self):
+        # The pre-defaulted code dialog (issue #7 spike shape) must NOT
+        # trigger the selector path — it goes straight to the v0.7.0
+        # method-prompt check.
+        self.assertFalse(gc._twofa_selector_present(self.LINK_DUMP))
+
+    def test_agent_error_paths_are_lenient(self):
+        # agent_window() returns "" on socket errors; never treat that
+        # as a selector.
+        self.assertFalse(gc._twofa_selector_present(""))
+        self.assertFalse(gc._twofa_selector_present(None))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
