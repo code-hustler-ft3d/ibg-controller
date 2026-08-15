@@ -515,9 +515,14 @@ ALERT_2FA_FAILED mode=live reason="agent SETTEXT_IN_WIN on 2FA dialog failed"
 ALERT_2FA_FAILED mode=live reason="agent CLICK_IN_WIN OK on 2FA dialog failed"
 ALERT_2FA_FAILED mode=live reason="2FA dialog timeout; TWOFA_TIMEOUT_ACTION=exit"
 ALERT_2FA_FAILED mode=live reason="2FA dialog timeout and do_restart_in_place failed"
+ALERT_2FA_FAILED mode=live reason="2FA method mismatch" dialog_prompt='Enter IB Key code' expected='Mobile Authenticator app'
+ALERT_2FA_FAILED mode=live reason="JLIST_SELECT on 2FA device selector failed"
+ALERT_2FA_FAILED mode=live reason="CLICK_IN_WIN OK on 2FA device selector failed"
+ALERT_2FA_FAILED mode=live reason="2FA device switch produced no code-entry dialog"
 ```
 
-**When fired**: on terminal 2FA failure paths in `handle_2fa`:
+**When fired**: on terminal 2FA failure paths in `handle_2fa`
+(`reason=` distinguishes them):
 1. The TOTP code couldn't be typed into the 2FA dialog (agent
    `SETTEXT_IN_WIN` returned false).
 2. The OK button couldn't be clicked (agent `CLICK_IN_WIN` returned
@@ -526,11 +531,27 @@ ALERT_2FA_FAILED mode=live reason="2FA dialog timeout and do_restart_in_place fa
    `TWOFA_TIMEOUT_ACTION=exit`.
 4. Same timeout but `TWOFA_TIMEOUT_ACTION=restart` and the restart also
    failed.
+5. (v0.7.0) The dialog positively asked for a different method than
+   `TWOFA_DEVICE` (multi-method account, code-dialog variant); carries
+   `dialog_prompt=` and `expected=` keys. The controller refuses to
+   type the TOTP into the wrong method.
+6. (unreleased, #20/#21) The multi-method *device-selector* variant was
+   detected but couldn't be driven (`JLIST_SELECT` / OK click failed).
+7. (unreleased, #20/#21) The device was selected and OK clicked, but no
+   "Enter <method> code" prompt appeared within 15s — on current
+   Gateway the in-dialog switch is rejected server-side (issue #20),
+   so expect this reason on multi-method accounts whose default method
+   isn't the one `TWOFACTOR_CODE` satisfies.
 
-**What the operator should do**: connect via VNC
+**What the operator should do**: for reasons 1–4, connect via VNC
 (`vnc://<container-host>:5900`) and enter the TOTP manually, or
 verify `TWOFACTOR_CODE` in the env is the correct base32 secret from
-IBKR's Mobile Authenticator setup QR code.
+IBKR's Mobile Authenticator setup QR code. For reasons 5–7
+(multi-method accounts), set the account's preferred second-factor
+method to the one matching `TWOFACTOR_CODE` (Client Portal → Settings
+→ User Settings → Security → Secure Login System) so Gateway defaults
+to it — in-dialog switching is rejected by IBKR server-side; see
+issues #7 and #20.
 
 **Recommended debounce**: 15 min.
 

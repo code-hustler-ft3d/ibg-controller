@@ -173,6 +173,15 @@ JCHECK <title>|<name>|<true|false>         → OK unchanged=<v> | OK changed=<v>
 SETTEXT_BY_LABEL <title>|<label>|<value>   → OK set label=<label> value=<v>
 ```
 
+**v0.3 additions (multi-method 2FA device selector, #20/#21)**:
+```
+JLIST_SELECT <title_substr>|<item_text>    → OK selected=<item> | ERR ...
+```
+Selects an item by exact text in the first `JList` of the first showing
+window whose title contains the substring. Used to pick `TWOFA_DEVICE`
+in the 2FA device-selector dialog (the same dialog shape IBC's
+`SecondFactorDevice` handling targets).
+
 Why each was added:
 
 - **`GET_PID`** — returns `ProcessHandle.current().pid()`. Used by the

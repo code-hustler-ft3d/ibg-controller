@@ -17,6 +17,36 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Multi-method 2FA: the device-selector dialog variant is now
+  detected and driven (#20, #21).** Gateway 10.45.x has TWO
+  account-dependent shapes for the "Second Factor Authentication"
+  dialog: the pre-defaulted code dialog v0.7.0 handles (issue #7
+  spike), and a real device selector — a "Select second factor device"
+  JTextArea heading over a `JList` of the account's methods, IB Key
+  pre-selected (issue #20 ground truth; this is the shape IBC's
+  `SecondFactorDevice` targets). The heading is invisible to `LABELS`
+  (JLabel-only), so v0.7.0's method-prompt guard couldn't see it. The
+  controller now detects the selector via the `WINDOW` component dump
+  (`_twofa_selector_present`), selects `TWOFA_DEVICE` with the new
+  `JLIST_SELECT` agent command, clicks OK, and polls for the
+  "Enter <method> code" prompt before typing the TOTP.
+  - **Honest scope**: on current Gateway the in-dialog switch is
+    rejected server-side (#20: the pre-selected method's challenge is
+    already in flight when the selector opens; 3/3 reproduction on
+    10.45.1c). So the practical effect today is a clear failure —
+    `ALERT_2FA_FAILED reason="2FA device switch produced no code-entry
+    dialog"` with remediation — instead of the old silent
+    `2FA handled successfully` followed by an unexplained dead login.
+    New agent-failure reasons `"JLIST_SELECT on 2FA device selector
+    failed"` / `"CLICK_IN_WIN OK on 2FA device selector failed"` cover
+    the drive path itself. If a future Gateway/IBKR change accepts the
+    switch, the full selector → code-entry → TOTP flow is already in
+    place (exercised against a mock dialog).
+  - Contributed by @xuanmingguo (#21) with the decisive component-tree
+    dump in #20; integration adds the prompt-based readiness poll, the
+    dedicated failure reason, `_twofa_selector_present` + unit tests,
+    and doc/contract updates.
+
 - **Login now recognizes the "Invalid username or password"
   credential-rejection modal.** `handle_post_login_dialogs` previously
   left this dialog unhandled and let it fall through; it now emits the
@@ -31,6 +61,35 @@ and the project follows [Semantic Versioning](https://semver.org/).
   `docker inspect` and the GHCR page show the bundled IB Gateway build
   without starting the container. Release notes also state the version
   from now on.
+
+### Fixed
+
+- **`SETTEXT_IN_WIN` can no longer type into JTextArea headings — the
+  actual mechanism of issue #7's "code entered in a weird place"
+  (#20, #21).** The command's fallback took the *first JTextComponent
+  regardless* when no editable field existed; on the selector dialog
+  that was the "Select second factor device" heading, so the TOTP
+  replaced the heading text, the agent returned OK, and the controller
+  logged `2FA handled successfully` while actually submitting an
+  unanswered IB Key push. The fallback now only considers real input
+  fields (`JTextField`, which includes `JPasswordField`) and returns
+  `ERR` otherwise. Found by @xuanmingguo (#20).
+
+### Validation
+
+- Harness reproduction (2026-08-14): mock Swing dialogs of BOTH
+  real-world variants (component trees per the #20 dump and the
+  2026-05-29 spike dump) driven by the real agent jar and the real
+  `handle_2fa`. Pre-fix code reproduced the silent failure end-to-end
+  (`OK` + heading corrupted + OK clicked with IB Key selected +
+  "2FA handled successfully"); post-fix code fails loud on the selector
+  (dedicated ALERT reason) and is byte-identical in behavior on the
+  link-variant happy path. `make test` green (249 tests).
+- NOT yet exercised live: the rejected-switch path on a real
+  multi-method account (the #20 reporter's account shape — asked in
+  #21) and a re-run of the link-variant happy path on real Gateway
+  (futures-admin box) to confirm the code field is picked by the
+  primary editable-field selector, not the narrowed fallback.
 
 ## [0.7.0] - 2026-05-30
 
