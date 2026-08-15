@@ -89,7 +89,7 @@ test: all
 	fi
 	@if command -v python3 >/dev/null 2>&1 && [ -d tests ]; then \
 	  echo "Running unit tests..."; \
-	  python3 -m unittest discover -s tests -v 2>&1 | tail -5; \
+	  python3 -m unittest discover -s tests || exit 1; \
 	else \
 	  echo "python3 or tests/ not available, skipping unit tests"; \
 	fi

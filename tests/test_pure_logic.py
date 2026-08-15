@@ -2213,5 +2213,127 @@ class TestTwofaSelectorPresent(unittest.TestCase):
         self.assertFalse(gc._twofa_selector_present(None))
 
 
+class TestHandle2faSelectorFlow(unittest.TestCase):
+    """Orchestration tests for handle_2fa's device-selector path
+    (#20/#21), with every agent_* wrapper stubbed at the module
+    boundary and time.sleep no-op'd. The scenarios mirror the
+    mock-dialog harness runs that validated the merge (2026-08-14):
+    switch rejected server-side → dedicated ALERT reason; switch
+    accepted → full selector → code-entry → TOTP flow; no selector →
+    the v0.7.0 flow untouched (leniency invariant).
+    """
+
+    TWOFA_WINDOWS = [("JDialog", "Second Factor Authentication", True)]
+    PROMPT_LABELS = [("Second Factor Authentication",
+                      "Enter Mobile Authenticator app code")]
+
+    def _run(self, *, window_dump, labels, jlist_ok=True):
+        """Drive handle_2fa with a canned dialog shape. Returns
+        (result, mocks dict, captured ERROR log lines)."""
+        mocks = {}
+        with patch.object(gc, "TOTP_SECRET", "JBSWY3DPEHPK3PXP"), \
+             patch.object(gc, "is_api_port_open", return_value=False), \
+             patch.object(gc, "agent_windows",
+                          return_value=self.TWOFA_WINDOWS), \
+             patch.object(gc, "agent_window",
+                          return_value=window_dump), \
+             patch.object(gc, "agent_labels", return_value=labels), \
+             patch.object(gc, "agent_jlist_select",
+                          return_value=jlist_ok) as jls, \
+             patch.object(gc, "agent_settext_in_window",
+                          return_value=True) as stw, \
+             patch.object(gc, "agent_click_in_window",
+                          return_value=True) as cw, \
+             patch.object(gc, "generate_totp", return_value="123456"), \
+             patch.object(gc.time, "sleep"):
+            mocks["jlist"] = jls
+            mocks["settext"] = stw
+            mocks["click"] = cw
+            with _capture_controller_errors() as errors:
+                result = gc.handle_2fa(None)
+        return result, mocks, errors
+
+    def test_switch_rejected_fails_with_dedicated_reason(self):
+        # Selector detected, selection + OK succeed, but no
+        # "Enter <method> code" prompt ever appears (IBKR rejected the
+        # switch server-side). Must fail loud with the dedicated
+        # reason, and must NOT attempt to type the code.
+        result, mocks, errors = self._run(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[])
+        self.assertFalse(result)
+        self.assertTrue(any(
+            'reason="2FA device switch produced no code-entry dialog"'
+            in line for line in errors),
+            f"dedicated ALERT reason missing from: {errors}")
+        mocks["jlist"].assert_called_once_with(
+            "Second Factor", "Mobile Authenticator app")
+        mocks["settext"].assert_not_called()
+
+    def test_switch_accepted_completes_totp_flow(self):
+        # Selector detected and, after selection, the code-entry
+        # prompt appears — the flow must continue through the normal
+        # v0.7.0 prompt check and type the TOTP.
+        result, mocks, errors = self._run(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=self.PROMPT_LABELS)
+        self.assertTrue(result)
+        mocks["jlist"].assert_called_once_with(
+            "Second Factor", "Mobile Authenticator app")
+        mocks["settext"].assert_called_once_with("Second Factor", "123456")
+        # OK clicked twice: once on the selector, once on the code dialog.
+        self.assertEqual(mocks["click"].call_count, 2)
+
+    def test_jlist_failure_fails_loud(self):
+        result, mocks, errors = self._run(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], jlist_ok=False)
+        self.assertFalse(result)
+        self.assertTrue(any(
+            'reason="JLIST_SELECT on 2FA device selector failed"'
+            in line for line in errors))
+        mocks["settext"].assert_not_called()
+
+    def test_no_selector_runs_v070_flow_untouched(self):
+        # Link-variant dump (code dialog): JLIST_SELECT must never be
+        # called and the pre-existing flow must succeed — the
+        # no-regression guarantee for single-method and link-variant
+        # accounts.
+        result, mocks, errors = self._run(
+            window_dump=TestTwofaSelectorPresent.LINK_DUMP,
+            labels=self.PROMPT_LABELS)
+        self.assertTrue(result)
+        mocks["jlist"].assert_not_called()
+        mocks["settext"].assert_called_once_with("Second Factor", "123456")
+        self.assertEqual(mocks["click"].call_count, 1)
+
+
+class _capture_controller_errors:
+    """Context manager collecting ERROR-level lines from the
+    'controller' logger without failing when none are emitted
+    (assertLogs raises on zero records; success paths emit none)."""
+
+    def __enter__(self):
+        import logging
+
+        class _ListHandler(logging.Handler):
+            def __init__(self, sink):
+                super().__init__(level=logging.ERROR)
+                self.sink = sink
+
+            def emit(self, record):
+                self.sink.append(record.getMessage())
+
+        self.lines = []
+        self.handler = _ListHandler(self.lines)
+        logging.getLogger("controller").addHandler(self.handler)
+        return self.lines
+
+    def __exit__(self, *exc):
+        import logging
+        logging.getLogger("controller").removeHandler(self.handler)
+        return False
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
