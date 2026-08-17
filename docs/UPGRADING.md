@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased (next release)
+### v0.8.0
 
 Multi-method 2FA, continued from v0.7.0 (issues #7, #20 / PR #21):
 

@@ -4,7 +4,7 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.0] - 2026-08-16
 
 ### Changed
 
@@ -126,6 +126,16 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Validation
 
+- **Live-validated (2026-08-16, dual-mode rc on the maintainer's real
+  account, Gateway 10.45.1g)**: the code-dialog (link-variant) happy
+  path is unchanged through the new code — selector detection
+  correctly no-ops on the real dialog (`2FA method prompt 'Enter
+  Mobile Authenticator app code' matches 'Mobile Authenticator app'`
+  → TOTP typed → MONITORING, both instances, zero ALERT lines), and
+  the login completing confirms the narrowed `SETTEXT_IN_WIN`
+  fallback never engages on the real code field. The
+  selector/rejected-switch path remains harness-validated only — it
+  needs an account that presents the selector (invited in #20/#21).
 - `handle_2fa`'s selector orchestration now has direct tests
   (`TestHandle2faSelectorFlow`): switch-rejected → dedicated ALERT
   reason and no code typed; switch-accepted → full selector →
