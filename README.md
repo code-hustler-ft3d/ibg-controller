@@ -95,6 +95,16 @@ real product.
 - **IB Key push** requires a human to tap approve on a phone. The
   controller will wait for that (leave `TWOFACTOR_CODE` unset), which
   is fine attended and a dead end for automation.
+- **Passkey / WebAuthn accounts are not supported for unattended
+  login.** IBKR forced some regions (Hong Kong and Japan as of 2026-08)
+  onto passkeys; Gateway then opens an in-app browser expecting a
+  hardware security key, which a headless container can't present. The
+  controller detects this and fails loudly (`ALERT_2FA_FAILED
+  reason="passkey/WebAuthn 2FA flow ..."`) instead of hanging — it does
+  not drive the ceremony, which would mean importing your passkey
+  private key into the container. If the account still offers Mobile
+  Authenticator, switch to it; otherwise log in attended via VNC. See
+  [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22).
 - **Accounts with more than one method**: Gateway pre-picks one, and
   the dialog shape varies by account — some get a code dialog
   defaulted to one method, others a device-selector list. The

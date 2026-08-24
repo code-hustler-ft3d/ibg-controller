@@ -519,6 +519,7 @@ ALERT_2FA_FAILED mode=live reason="2FA method mismatch" dialog_prompt='Enter IB 
 ALERT_2FA_FAILED mode=live reason="JLIST_SELECT on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="CLICK_IN_WIN OK on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="2FA device switch produced no code-entry dialog"
+ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login not supported"
 ```
 
 **When fired**: on terminal 2FA failure paths in `handle_2fa`
@@ -535,13 +536,20 @@ ALERT_2FA_FAILED mode=live reason="2FA device switch produced no code-entry dial
    `TWOFA_DEVICE` (multi-method account, code-dialog variant); carries
    `dialog_prompt=` and `expected=` keys. The controller refuses to
    type the TOTP into the wrong method.
-6. (unreleased, #20/#21) The multi-method *device-selector* variant was
+6. (v0.8.0, #20/#21) The multi-method *device-selector* variant was
    detected but couldn't be driven (`JLIST_SELECT` / OK click failed).
-7. (unreleased, #20/#21) The device was selected and OK clicked, but no
+7. (v0.8.0, #20/#21) The device was selected and OK clicked, but no
    "Enter <method> code" prompt appeared within 15s — on current
    Gateway the in-dialog switch is rejected server-side (issue #20),
    so expect this reason on multi-method accounts whose default method
    isn't the one `TWOFACTOR_CODE` satisfies.
+8. (v0.8.1, #22) A passkey/WebAuthn login flow was detected — IBKR
+   routed the login to a browser (jxbrowser) expecting a hardware
+   security key instead of the TOTP dialog. A headless container can't
+   satisfy that, so unattended login isn't possible. Forced on some
+   regions (Hong Kong, Japan as of 2026-08). The controller does not
+   drive the ceremony (that would require holding the passkey private
+   key).
 
 **What the operator should do**: for reasons 1–4, connect via VNC
 (`vnc://<container-host>:5900`) and enter the TOTP manually, or
@@ -551,7 +559,10 @@ IBKR's Mobile Authenticator setup QR code. For reasons 5–7
 method to the one matching `TWOFACTOR_CODE` (Client Portal → Settings
 → User Settings → Security → Secure Login System) so Gateway defaults
 to it — in-dialog switching is rejected by IBKR server-side; see
-issues #7 and #20.
+issues #7 and #20. For reason 8 (passkey), unattended login isn't
+possible on that account: if it still offers Mobile Authenticator,
+make that the login method (same Secure Login System panel); otherwise
+log in attended via VNC. See issue #22.
 
 **Recommended debounce**: 15 min.
 

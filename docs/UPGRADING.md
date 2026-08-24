@@ -76,6 +76,19 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.8.1
+
+- **Passkey/WebAuthn accounts now fail loudly instead of hanging
+  (issue #22).** IBKR forced some regions (Hong Kong, Japan as of
+  2026-08) off TOTP onto passkeys; Gateway then opens a browser flow a
+  headless container can't satisfy. The controller detects it and emits
+  `ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow - unattended login
+  not supported"` (a new additive reason — grep-by-prefix monitors need
+  no change). No unattended workaround exists for a passkey-forced
+  account; the fix is account-side (switch back to Mobile Authenticator
+  if offered) or attended login via VNC. Pure Python, no agent-jar
+  change — pull the new image or, if you build from source, `make`.
+
 ### v0.8.0
 
 Multi-method 2FA, continued from v0.7.0 (issues #7, #20 / PR #21):

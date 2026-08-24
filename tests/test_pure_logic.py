@@ -2308,6 +2308,60 @@ class TestHandle2faSelectorFlow(unittest.TestCase):
         self.assertEqual(mocks["click"].call_count, 1)
 
 
+class TestDetectPasskeyFlow(unittest.TestCase):
+    NORMAL_LOGIN = [
+        ("JFrame", "IBKR Gateway", False),
+        ("aV", "Second Factor Authentication", True),
+    ]
+
+    def test_matches_each_signature(self):
+        for title in ("Passkey", "WebAuthn ceremony",
+                      "Insert your Security Key", "JxBrowser"):
+            with self.subTest(title=title):
+                windows = [("JFrame", title, True)]
+                self.assertIsNotNone(gc._detect_passkey_flow(windows))
+
+    def test_case_insensitive(self):
+        self.assertEqual(
+            gc._detect_passkey_flow([("x", "USE YOUR PASSKEY", True)]),
+            "passkey")
+
+    def test_normal_login_is_not_passkey(self):
+        self.assertIsNone(gc._detect_passkey_flow(self.NORMAL_LOGIN))
+
+    def test_empty_and_none_title(self):
+        self.assertIsNone(gc._detect_passkey_flow([]))
+        self.assertIsNone(gc._detect_passkey_flow([("x", None, False)]))
+
+
+class TestHandle2faPasskeyFlow(unittest.TestCase):
+    PASSKEY_WINDOWS = [
+        ("JFrame", "IBKR Gateway", False),
+        ("aV", "Security Key Authentication", True),
+    ]
+
+    def test_passkey_window_fails_loud_without_typing(self):
+        # A passkey ceremony window in the 2FA wait must fail with the
+        # dedicated reason and never type a TOTP code (we don't drive
+        # WebAuthn — that would mean holding the user's private key).
+        with patch.object(gc, "TOTP_SECRET", "JBSWY3DPEHPK3PXP"), \
+             patch.object(gc, "is_api_port_open", return_value=False), \
+             patch.object(gc, "agent_windows",
+                          return_value=self.PASSKEY_WINDOWS), \
+             patch.object(gc, "agent_settext_in_window",
+                          return_value=True) as stw, \
+             patch.object(gc, "generate_totp", return_value="123456"), \
+             patch.object(gc.time, "sleep"):
+            with _capture_controller_errors() as errors:
+                result = gc.handle_2fa(None)
+        self.assertFalse(result)
+        self.assertTrue(any(
+            'reason="passkey/WebAuthn 2FA flow - unattended login '
+            'not supported"' in line for line in errors),
+            f"passkey ALERT reason missing from: {errors}")
+        stw.assert_not_called()
+
+
 class _capture_controller_errors:
     """Context manager collecting ERROR-level lines from the
     'controller' logger without failing when none are emitted

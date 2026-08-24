@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.8.0"
+__version__ = "0.8.1"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -1529,6 +1529,40 @@ def _twofa_selector_present(window_dump):
     return "Select second factor device" in (window_dump or "")
 
 
+# Window-title fragments that positively identify IBKR's passkey /
+# WebAuthn login flow. On a passkey account Gateway launches an in-app
+# browser (jxbrowser) that runs the WebAuthn ceremony and expects a
+# hardware security key, instead of showing the Second Factor dialog we
+# drive. IBKR forced this on Hong Kong and Japan accounts (2026-08) and
+# may widen it. These fragments are deliberately high-specificity —
+# none appears in a normal Gateway login window set — so a match means
+# we are NOT in a TOTP flow. PROVISIONAL: assembled without a live
+# passkey account (issue #22); a real WINDOW dump may refine them. A
+# non-match is not proof it isn't passkey (the jxbrowser window title
+# may be generic) — the timeout path carries a fallback diagnostic.
+_PASSKEY_FLOW_TITLE_FRAGMENTS = (
+    "passkey",
+    "webauthn",
+    "security key",
+    "jxbrowser",
+)
+
+
+def _detect_passkey_flow(windows):
+    """Return the passkey/WebAuthn window-title fragment that matched, or
+    ``None``. ``windows`` is ``agent_windows()`` output — a list of
+    ``(type, title, modal)`` tuples. Lets ``handle_2fa`` fail loudly when
+    IBKR routed the login through a passkey ceremony a headless container
+    can't satisfy (issue #22), rather than waiting out the 2FA timeout
+    for a dialog that will never appear."""
+    for _type, title, _modal in windows:
+        tl = (title or "").lower()
+        for frag in _PASSKEY_FLOW_TITLE_FRAGMENTS:
+            if frag in tl:
+                return frag
+    return None
+
+
 def _twofa_requested_method(labels, window_substr=None):
     """From ``agent_labels()`` output (a list of ``(window_title, text)``
     tuples) return Gateway's 2FA method-prompt label — IBKR phrases it as
@@ -1701,6 +1735,37 @@ def handle_2fa(app):
             last_windows = None
             time.sleep(0.5)
             continue
+
+        # Passkey / WebAuthn: IBKR moved some accounts (Hong Kong and
+        # Japan as of 2026-08, possibly wider over time) off TOTP onto
+        # passkeys. Gateway then launches an in-app browser (jxbrowser)
+        # that expects a hardware security key — which a headless
+        # container has no way to present. Detect it and fail loudly
+        # rather than waiting out the full timeout for a TOTP dialog that
+        # will never appear (issue #22). We do NOT drive the ceremony:
+        # that would mean importing the user's passkey private key into
+        # the container, which we deliberately don't do.
+        passkey_hit = _detect_passkey_flow(windows)
+        if passkey_hit is not None:
+            log.error(
+                f"Passkey/WebAuthn login flow detected (window matched "
+                f"{passkey_hit!r}). This account is on passkey 2FA, which "
+                f"launches a browser expecting a hardware security key — a "
+                f"headless container can't satisfy it, so unattended login "
+                f"isn't possible here.")
+            log.error(
+                f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+                "reason=\"passkey/WebAuthn 2FA flow - unattended login "
+                "not supported\"")
+            log.error(
+                "Options: (1) if the account still offers Mobile "
+                "Authenticator (TOTP), make it the login method in Client "
+                "Portal -> Settings -> User Settings -> Security -> Secure "
+                "Login System; (2) log in attended via VNC; (3) on arm64, "
+                "Gateway currently ships no arm64 jxbrowser build, so the "
+                "passkey flow can't run there at all (upstream IBKR "
+                "installer issue). See issue #22.")
+            return False
 
         # Look for the 2FA dialog
         two_fa_window = None
@@ -1913,6 +1978,19 @@ def handle_2fa(app):
                     "loop — IBKR auth server isn't accepting sessions "
                     "right now. Applying CCP backoff before retry.")
         _apply_ccp_backoff()
+    elif TOTP_SECRET:
+        # We were configured for TOTP but no Second Factor dialog ever
+        # appeared and the login isn't stuck connecting. The positive
+        # passkey-window check in the loop didn't fire either (its
+        # jxbrowser window title may be generic), so this is a hint, not
+        # a verdict: a common cause on current accounts is that the
+        # account is no longer on TOTP — moved to passkey/WebAuthn (a
+        # browser flow we can't drive) or IB Key push. See issue #22.
+        log.warning(
+            "No Second Factor (TOTP) dialog appeared despite TWOFACTOR_CODE "
+            "being set. If this account was recently moved to passkey/"
+            "WebAuthn 2FA (IBKR is forcing this in some regions) or IB Key "
+            "push, unattended TOTP login isn't possible — see issue #22.")
 
     # Optional relogin attempt before dispatching the timeout action.
     # Mirrors IBC's RELOGIN_AFTER_TWOFA_TIMEOUT behavior: if set, we

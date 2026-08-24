@@ -4,6 +4,44 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] - 2026-08-24
+
+### Added
+
+- **Passkey/WebAuthn login flows now fail loudly instead of hanging
+  (issue #22).** IBKR forced some regions (Hong Kong, Japan as of
+  2026-08, possibly wider over time) off TOTP onto passkeys. On such an
+  account Gateway launches an in-app browser (jxbrowser) that runs a
+  WebAuthn ceremony expecting a hardware security key, rather than the
+  Second Factor dialog the controller drives — so with `TWOFACTOR_CODE`
+  set the old behavior was to wait out the full `TWOFA_EXIT_INTERVAL`
+  and report a generic timeout. `handle_2fa` now detects the passkey
+  flow (`_detect_passkey_flow`) and emits `ALERT_2FA_FAILED
+  reason="passkey/WebAuthn 2FA flow - unattended login not supported"`
+  with remediation, plus a fallback hint on the timeout path when the
+  TOTP dialog never appears at all.
+  - **Deliberately does not drive the ceremony.** Automating WebAuthn
+    would require importing the user's passkey private key into the
+    container; the project won't custody that. Unattended login isn't
+    possible for a passkey-forced account — the resolution is
+    account-side (switch back to Mobile Authenticator if IBKR still
+    offers it) or attended login via VNC.
+  - Note: on arm64, Gateway currently ships no jxbrowser build, so the
+    passkey flow can't run there regardless — an upstream IBKR
+    installer gap (tracked in gnzsnz/ib-gateway-docker#440 for the
+    dependency side). Reported by @jpike88.
+
+### Validation
+
+- New unit coverage: `_detect_passkey_flow` (signature matching, case
+  insensitivity, no false positive on a normal login window set) and a
+  `handle_2fa` orchestration test (passkey window → fail-loud with the
+  dedicated reason, no TOTP typed). Not live-validated — no
+  passkey-forced account available; the window-title signature is
+  provisional pending a real `WINDOW` dump (invited in #22). The
+  timeout-path fallback diagnostic covers the case where the signature
+  doesn't match.
+
 ## [0.8.0] - 2026-08-16
 
 ### Changed

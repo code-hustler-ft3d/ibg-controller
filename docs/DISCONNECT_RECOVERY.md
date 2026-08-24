@@ -235,6 +235,14 @@ via VNC and enter the code manually.
    the one matching `TWOFACTOR_CODE` in Client Portal → Settings →
    User Settings → Security → Secure Login System, or drop to a
    single method.
+5. **Passkey / WebAuthn account** — reason `"passkey/WebAuthn 2FA flow
+   - unattended login not supported"`. IBKR moved the account off TOTP
+   onto a passkey; Gateway opens a browser (jxbrowser) expecting a
+   hardware security key, which a headless container can't present.
+   There is no unattended recovery: switch the account back to Mobile
+   Authenticator if IBKR still offers it, or log in attended via VNC.
+   On arm64, Gateway currently ships no jxbrowser build at all, so the
+   flow can't even run — an upstream IBKR installer gap (issue #22).
 
 ### Recovery
 
