@@ -548,8 +548,9 @@ ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login 
    security key instead of the TOTP dialog. A headless container can't
    satisfy that, so unattended login isn't possible. Forced on some
    regions (Hong Kong, Japan as of 2026-08). The controller does not
-   drive the ceremony (that would require holding the passkey private
-   key).
+   drive the ceremony — emulating a WebAuthn authenticator is out of
+   scope for this tool (and can't run on arm64, which ships no
+   jxbrowser build).
 
 **What the operator should do**: for reasons 1–4, connect via VNC
 (`vnc://<container-host>:5900`) and enter the TOTP manually, or

@@ -101,9 +101,13 @@ real product.
   hardware security key, which a headless container can't present. The
   controller detects this and fails loudly (`ALERT_2FA_FAILED
   reason="passkey/WebAuthn 2FA flow ..."`) instead of hanging — it does
-  not drive the ceremony, which would mean importing your passkey
-  private key into the container. If the account still offers Mobile
-  Authenticator, switch to it; otherwise log in attended via VNC. See
+  not drive the ceremony. Emulating a WebAuthn authenticator (a
+  FIDO2/USB device or a browser debug channel) is a different job than
+  driving Gateway's dialogs and out of scope for this tool; it also
+  can't run on arm64, which ships no jxbrowser build. If the account
+  still offers Mobile Authenticator, switch to it; otherwise log in
+  attended via VNC, or run your own authenticator alongside the
+  container. See
   [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22).
 - **Accounts with more than one method**: Gateway pre-picks one, and
   the dialog shape varies by account — some get a code dialog

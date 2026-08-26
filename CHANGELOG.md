@@ -21,11 +21,13 @@ and the project follows [Semantic Versioning](https://semver.org/).
   with remediation, plus a fallback hint on the timeout path when the
   TOTP dialog never appears at all.
   - **Deliberately does not drive the ceremony.** Automating WebAuthn
-    would require importing the user's passkey private key into the
-    container; the project won't custody that. Unattended login isn't
-    possible for a passkey-forced account — the resolution is
-    account-side (switch back to Mobile Authenticator if IBKR still
-    offers it) or attended login via VNC.
+    means emulating an authenticator (a FIDO2/uhid device or a browser
+    debug channel) — a different job than driving Gateway's Swing
+    dialogs, out of scope for this stdlib-only tool, and unable to run
+    on arm64 regardless. Unattended login isn't possible for a
+    passkey-forced account — the resolution is account-side (switch back
+    to Mobile Authenticator if IBKR still offers it), attended login via
+    VNC, or an authenticator you run yourself alongside the container.
   - Note: on arm64, Gateway currently ships no jxbrowser build, so the
     passkey flow can't run there regardless — an upstream IBKR
     installer gap (tracked in gnzsnz/ib-gateway-docker#440 for the

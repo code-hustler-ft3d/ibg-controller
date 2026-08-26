@@ -1743,8 +1743,9 @@ def handle_2fa(app):
         # container has no way to present. Detect it and fail loudly
         # rather than waiting out the full timeout for a TOTP dialog that
         # will never appear (issue #22). We do NOT drive the ceremony:
-        # that would mean importing the user's passkey private key into
-        # the container, which we deliberately don't do.
+        # emulating a WebAuthn authenticator (a FIDO2/uhid device or a
+        # browser debug channel) is out of scope for this controller and
+        # can't run on arm64 anyway.
         passkey_hit = _detect_passkey_flow(windows)
         if passkey_hit is not None:
             log.error(
