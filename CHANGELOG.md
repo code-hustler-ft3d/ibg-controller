@@ -6,6 +6,38 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **`ALERT_AUTO_RESTART` grep-contract token** — `status=adopted`
+  (INFO) or `failed_no_agent` / `failed_jvm_exited` / `failed_login` /
+  `failed_api_timeout` (WARNING), one line per adoption attempt. See
+  [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+- **`AUTO_RESTART_ADOPT`** (default `yes`) — set to `no` to restore the
+  always-relaunch behaviour; **`AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`**
+  (default `90`) — how long to wait for the self-restarted JVM's agent;
+  and **`AUTO_RESTART_PROBE_SECONDS`** (default `15`) — how long to
+  probe the agent socket when no `restarter.log` was written. The probe
+  plus a 5 s late-log grace is the only added latency, and only on clean
+  exits.
+
+### Changed
+
+- **Upstream base bumped 10.45.1g → 10.45.1j** (still the gnzsnz
+  `:stable` line; digest `sha256:91165c07…`). Three upstream patch
+  releases, and on arm64 it drops 112 MB of dead weight: 10.45.1g's
+  aarch64 image carried `jxbrowser-linux64-8.9.4.jar`, whose
+  `libtoolkit.so` is an x86-64 ELF binary that cannot execute there. It
+  was a side effect of the pre-#397 build, which assembled aarch64
+  images from IBKR's **x64** installer plus a Zulu JRE. Upstream
+  gnzsnz/ib-gateway-docker#397 moved aarch64 to IBKR's native arm
+  installer, first available at 10.45.1h.
+- The arm64 Java runtime changes with it: 10.45.1g used
+  `/usr/local/zulu17…`, while 10.45.1j uses install4j's own JRE
+  registry (`/usr/local/i4j_jres/…`) with no Zulu present. The
+  `release-image.yml` comment describing arm64 as Zulu-based is
+  corrected.
+- CI matrix gains 10.45.1j.
+
 ### Fixed
 
 - **Gateway's own daily auto-restart no longer races the controller
@@ -86,21 +118,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
   - Reported, diagnosed, and prototyped in production by
     @maciejlaska.
 
-### Added
-
-- **`ALERT_AUTO_RESTART` grep-contract token** — `status=adopted`
-  (INFO) or `failed_no_agent` / `failed_jvm_exited` / `failed_login` /
-  `failed_api_timeout` (WARNING), one line per adoption attempt. See
-  [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
-- **`AUTO_RESTART_ADOPT`** (default `yes`) — set to `no` to restore the
-  always-relaunch behaviour; **`AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`**
-  (default `90`) — how long to wait for the self-restarted JVM's agent;
-  and **`AUTO_RESTART_PROBE_SECONDS`** (default `15`) — how long to
-  probe the agent socket when no `restarter.log` was written. The probe
-  plus a 5 s late-log grace is the only added latency, and only on clean
-  exits.
-
-### Fixed (found by that validation)
+### Fixed during validation
 
 - **A dead adopted JVM could look alive indefinitely.** `_AdoptedProcess`
   inferred liveness from `os.kill(pid, 0)` plus `/proc`. Where `/proc`
@@ -180,6 +198,15 @@ and the project follows [Semantic Versioning](https://semver.org/).
   changes, documented by IBC and reported in production by the issue
   reporter. `monitor_loop`'s adopted-exit branch is exercised only
   indirectly, through `_recover_jvm_or_escalate`.
+
+- `tests/integration/gateway_autorestart_drill.py` run against a
+  controller image built on 10.45.1j: **17/17**, so the launcher, agent
+  injection and the issue #23 restart-adoption path all work on the
+  changed arm64 build. The same drill passes on 10.45.1g and on
+  10.50.1e.
+- Login, 2FA and the dialog handlers are unchanged by this bump but are
+  not re-verified against a real account here; they are exercised on
+  10.45.x in production.
 
 ## [0.8.1] - 2026-08-24
 
