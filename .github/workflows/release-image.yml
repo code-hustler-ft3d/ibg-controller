@@ -13,8 +13,10 @@ name: Release image
 #     default GITHUB_TOKEN.
 #   - The `platforms` list below controls architectures. We publish
 #     linux/amd64 + linux/arm64: upstream gnzsnz/ib-gateway ships both
-#     (amd64 uses install4j JRE, arm64 uses Zulu), and the Dockerfile's
-#     ATK bridge step handles both JRE layouts. Keep this list in sync
+#     (both now use install4j's own JRE registry; arm64 used a separate
+#     Zulu JRE only before 10.45.1h, when upstream switched aarch64 to
+#     IBKR's native arm installer in gnzsnz/ib-gateway-docker#397), and
+#     the Dockerfile's ATK bridge step handles both layouts. Keep in sync
 #     with `docker-compose` consumers that pin --platform.
 #   - If you rename the workflow file, update docs/SECURITY.md's
 #     cosign verification example — the `--certificate-identity`
@@ -143,8 +145,8 @@ jobs:
           # image label — keep it in lockstep with the digest pin above so a
           # `docker inspect` reports the exact bundled Gateway build.
           build-args: |
-            UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1g@sha256:827d7a5b8454ec19cff2abe0ae6983f15bde4a11c5d5dff4cd74d67ace85a3f2
-            IB_GATEWAY_VERSION=10.45.1g
+            UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1j@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
+            IB_GATEWAY_VERSION=10.45.1j
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Embed buildx provenance so `docker buildx imagetools inspect`

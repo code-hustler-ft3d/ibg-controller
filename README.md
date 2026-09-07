@@ -65,7 +65,7 @@ Deeper guides:
 | Requirement | Notes |
 |---|---|
 | Linux `amd64`/`arm64` | Ubuntu 24.04 base tested |
-| IB Gateway 10.x | Release images pin **10.45.1g** (gnzsnz `:stable` line) |
+| IB Gateway 10.x | Release images pin **10.45.1j** (gnzsnz `:stable` line) |
 | Python 3.10+ | Runtime; stdlib only, no pip installs |
 | JDK 17+ | Build time only — runtime uses Gateway's bundled Zulu JRE |
 | `python3`, `matchbox-window-manager` | The only packages added on top of the upstream image |

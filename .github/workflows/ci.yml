@@ -152,6 +152,7 @@ jobs:
         upstream:
           - ghcr.io/gnzsnz/ib-gateway:10.45.1c
           - ghcr.io/gnzsnz/ib-gateway:10.45.1g
+          - ghcr.io/gnzsnz/ib-gateway:10.45.1j
     steps:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
