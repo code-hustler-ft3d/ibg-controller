@@ -514,10 +514,10 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
         self.assertIsNone(new.poll(), "adopted JVM was killed")
 
     def test_adopts_via_the_socket_probe_when_no_restarter_log_exists(self):
-        # Verified 2026-09-06 against a real install: Gateway 10.45.1g's
-        # .install4j/restarter writes no restarter.log, while the issue
-        # #23 reporter's 10.45.1j box does. Detection must not depend on
-        # the log alone, or the fix silently never engages.
+        # The restarter writes its log to a path relative to its working
+        # directory (-Dinstall4j.alternativeLogfile=./.install4j/...),
+        # so it is expected but not guaranteed to land where we look.
+        # Detection must not depend on the log alone.
         self._running_then_killed()
         new = self._start_jvm(api=True)
         self.assertFalse(os.path.exists(self.restarter_log))

@@ -243,13 +243,20 @@ install4j brought up, adopted it, and reports the outcome here.
   case.
 - **`agent_socket`** — no usable `restarter.log`, but after a clean exit
   a live Gateway JVM the controller never spawned was already answering
-  on the agent socket within `AUTO_RESTART_PROBE_SECONDS`. Not every
-  install4j build writes the log (verified: Gateway 10.45.1g's restarter
-  writes none; the issue #23 reporter's 10.45.1j writes one), so this is
-  the fallback that keeps the fix working where the log never appears.
-  Only a running JVM can answer that socket, so a reply from a PID that
-  isn't ours is direct evidence — and launching a second instance in
-  that state is precisely the issue #23 bug. One line per adoption attempt that gets as far as
+  on the agent socket within `AUTO_RESTART_PROBE_SECONDS`. The restarter
+  writes its log to a path *relative* to its working directory, so the
+  log is expected but not guaranteed; this is the fallback that keeps
+  the fix working where it doesn't appear. Only a running JVM can answer
+  that socket, so a reply from a PID that isn't ours is direct evidence
+  — and launching a second instance in that state is precisely the issue
+  #23 bug.
+- **`install4j_restarter`** — install4j's restarter was itself found
+  holding the agent socket. It is a JVM that inherits the same
+  `-javaagent`, so it binds the socket and answers `GET_PID` with its
+  own PID for the seconds it lives. That is conclusive evidence of a
+  self-restart. The controller identifies it by its
+  `-Dinstall4j.alternativeLogfile` flag, never adopts it, and waits for
+  the Gateway JVM it launches. One line per adoption attempt that gets as far as
 waiting for the new JVM; an attempt that stops earlier (no fresh
 `restarter.log`) emits none, and neither does an unexpected exception
 inside the path (that one is logged as `Recovery: self-restart

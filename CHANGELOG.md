@@ -28,17 +28,32 @@ and the project follows [Semantic Versioning](https://semver.org/).
     wall-clock comparison against `AUTO_RESTART_TIME`, which would have
     to guess which timezone Gateway's Lock-and-Exit field is in and
     would fire on any code-0 exit that landed in the window.
-  - **`restarter.log` is not guaranteed to exist.** Verified against a
-    real install on 2026-09-06: Gateway 10.45.1g ships
-    `.install4j/restarter` and runs it, but no `restarter.log` is
-    written, while the reporter's 10.45.1j box writes one with install4j
-    action-log content. So after a clean exit with no usable log the
-    controller asks a more direct question for up to
-    `AUTO_RESTART_PROBE_SECONDS` (default 15): is a live Gateway JVM
-    that we never spawned already answering on our agent socket? Only a
-    running JVM can answer it, and launching a second instance in that
-    state is exactly this bug. `ALERT_AUTO_RESTART` reports which signal
-    fired via `detected_via=restarter_log|agent_socket`.
+  - **`restarter.log`'s location depends on the working directory.**
+    The restarter writes it via `-Dinstall4j.alternativeLogfile=`
+    `./.install4j/restarter.log` — a *relative* path, resolved against
+    the working directory it inherits from Gateway's JVM. Gateway runs
+    with its install directory as the working directory (verified in a
+    running container), so in a real auto-restart the log does land
+    exactly where this code looks for it. But nothing guarantees that
+    for every install, so the log is the primary signal, not the only
+    one: after a clean exit with no usable log the controller asks a
+    more direct question for up to `AUTO_RESTART_PROBE_SECONDS`
+    (default 15) — is a live Gateway JVM we never spawned already
+    answering on our agent socket? Only a running JVM can answer it,
+    and launching a second instance in that state is exactly this bug.
+  - **The restarter is itself a JVM, and it loads our agent.** Verified
+    2026-09-06 by running the real `.install4j/restarter` binary: it
+    inherits `INSTALL4J_ADD_VM_PARAMS` from the JVM that spawned it, so
+    it loads `-javaagent:gateway-input-agent.jar`, binds the agent
+    socket, and answers `GET_PID` with *its own* PID for the couple of
+    seconds it lives. Adoption now identifies it by the
+    `-Dinstall4j.alternativeLogfile` flag that Gateway's own JVM does
+    not carry (`i4jruntime.jar` is not a discriminator — Gateway's
+    cmdline contains it too) and waits for the Gateway JVM it launches
+    instead of adopting a process that is about to exit. Seeing the
+    restarter on the socket is itself conclusive evidence of a
+    self-restart. `ALERT_AUTO_RESTART` reports which signal fired via
+    `detected_via=restarter_log|agent_socket|install4j_restarter`.
   - If it was just written: no relaunch. The controller waits for the
     instance install4j is bringing up (it inherits
     `INSTALL4J_ADD_VM_PARAMS` through the restarter, so its agent binds
@@ -128,11 +143,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
   a bounded detection budget, a stale log being ignored, an adopted JVM
   dying before its API port, and the same restart not being adopted
   twice.
+- **The load-bearing assumption is now verified rather than assumed.**
+  The fix rests on the restarted Gateway inheriting
+  `INSTALL4J_ADD_VM_PARAMS`, hence loading the agent and reporting a new
+  PID on the same socket. Running the real `.install4j/restarter` binary
+  in a container off the release image confirms the inheritance
+  directly: given a deliberately bogus `-javaagent` value the
+  restarter's own VM refused to start, and given the real agent jar it
+  logged `[gateway-input-agent] listening on <socket>` and answered
+  `GET_PID`. The environment does propagate through the restarter chain.
 - Path assumptions checked against a real install (Gateway 10.45.1g in
   the maintainer's running container): `.install4j/restarter` sits where
-  the code looks for it, and a deployment using `AUTO_LOGOFF_TIME`
-  rather than `AUTO_RESTART_TIME` has never written a `restarter.log` —
-  the unchanged-behaviour case.
+  the code looks for it, Gateway's working directory is the install
+  directory the relative log path resolves against, and a deployment
+  using `AUTO_LOGOFF_TIME` rather than `AUTO_RESTART_TIME` has never
+  written a `restarter.log` — the unchanged-behaviour case.
 - Gateway's real auto-restart itself is still not reproduced here — no
   maintainer deployment sets `AUTO_RESTART_TIME`, and the reporter
   reports their own equivalent patch working on the first night in

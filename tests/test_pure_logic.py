@@ -2483,6 +2483,61 @@ class TestInstall4jRestarterAge(unittest.TestCase):
             self.assertIsNotNone(gc._install4j_restarter_age())
 
 
+class TestInstall4jRestarterDiscrimination(unittest.TestCase):
+    """install4j's restarter is itself a JVM that inherits
+    INSTALL4J_ADD_VM_PARAMS, so it loads our agent and answers GET_PID
+    with its own PID for the seconds it lives. Adopting it would mean
+    monitoring a process that exits immediately. Both fixtures below are
+    real cmdlines captured 2026-09-06 — the restarter from running the
+    binary in a container off the release image, Gateway from the live
+    container's JVM."""
+
+    RESTARTER = (
+        "/usr/local/zulu17.60.17-ca-fx-jre17.0.16-linux_aarch64/bin/java "
+        "--add-opens java.desktop/java.awt=ALL-UNNAMED "
+        "-Dinstall4j.alternativeLogfile=./.install4j/restarter.log "
+        "-javaagent:/home/ibgateway/gateway-input-agent.jar=/tmp/probe.sock "
+        "-Djava.security.manager=allow -classpath "
+        "/home/ibgateway/Jts/ibgateway/10.45.1g/.install4j/i4jruntime.jar:"
+        "/home/ibgateway/Jts/ibgateway/10.45.1g/.install4j/launcher3257f6f9.jar "
+        "install4j.App1256852828Id640 640 11 /tmp/marker.sh ")
+
+    GATEWAY = (
+        "/usr/local/zulu17.60.17-ca-fx-jre17.0.16-linux_aarch64/bin/java "
+        "-splash:/home/ibgateway/Jts/ibgateway/10.45.1g/.install4j/s_clyey9.png "
+        "--add-opens=java.base/java.util=ALL-UNNAMED "
+        "-javaagent:/home/ibgateway/gateway-input-agent.jar="
+        "/tmp/gateway-input-live.sock -classpath "
+        "/home/ibgateway/Jts/ibgateway/10.45.1g/.install4j/i4jruntime.jar "
+        "-VjtsConfigDir=/home/ibgateway/Jts_live -VinstallerType=standalone ")
+
+    def test_identifies_the_restarter(self):
+        self.assertTrue(gc._cmdline_is_install4j_restarter(self.RESTARTER))
+
+    def test_does_not_mistake_gateway_for_the_restarter(self):
+        # Both carry i4jruntime.jar and our -javaagent, so neither is a
+        # usable discriminator; only the restarter's own log flag is.
+        self.assertFalse(gc._cmdline_is_install4j_restarter(self.GATEWAY))
+        self.assertIn("i4jruntime.jar", self.GATEWAY)
+        self.assertIn("gateway-input-agent.jar", self.GATEWAY)
+
+    def test_unknown_cmdline_is_not_the_restarter(self):
+        # No /proc (macOS) must read as "not the restarter", leaving the
+        # adoption retry to cover it rather than refusing to adopt.
+        self.assertFalse(gc._cmdline_is_install4j_restarter(None))
+        self.assertFalse(gc._cmdline_is_install4j_restarter(""))
+
+    def test_own_process_is_not_the_restarter(self):
+        self.assertFalse(gc._is_install4j_restarter_pid(os.getpid()))
+
+    def test_cmdline_of_a_missing_pid_is_none(self):
+        self.assertIsNone(gc._process_cmdline(2 ** 22 + 12345))
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "needs Linux /proc")
+    def test_reads_a_real_cmdline(self):
+        self.assertIn("python", (gc._process_cmdline(os.getpid()) or "").lower())
+
+
 class TestAdoptedProcess(unittest.TestCase):
     """_AdoptedProcess must look enough like subprocess.Popen for
     monitor_loop, _teardown_jvm_for_restart, shutdown() and the health
@@ -2664,8 +2719,30 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(gc.JVM_PID, 5020)
         # The probe result is reused; no second wait for the same JVM.
-        mocks["_wait_for_self_restarted_agent"].assert_called_once_with(27, 5)
+        wait = mocks["_wait_for_self_restarted_agent"]
+        wait.assert_called_once()
+        self.assertEqual(wait.call_args[0][:2], (27, 5))
         mocks["signal_ready"].assert_called_once()
+
+    def test_restarter_on_the_socket_counts_as_detection(self):
+        # The restarter answering our socket is conclusive evidence of a
+        # self-restart even with no usable restarter.log — but it must
+        # not itself be adopted; we wait for the Gateway JVM it launches.
+        gc._AUTO_RESTART_PROBE_SECONDS = 5
+        stack = self._adopting(age=None)
+
+        def wait(old, timeout, exclude=(), seen_restarter=None):
+            if seen_restarter is not None and not seen_restarter:
+                seen_restarter.append(99)      # restarter seen, no Gateway yet
+                return None
+            return 5020                         # Gateway's JVM arrives
+
+        stack[1] = patch.object(gc, "_wait_for_self_restarted_agent",
+                                side_effect=wait)
+        result, mocks = self._run(stack)
+        self.assertTrue(result)
+        self.assertEqual(gc.JVM_PID, 5020)
+        self.assertEqual(mocks["_wait_for_self_restarted_agent"].call_count, 2)
 
     def test_socket_probe_finding_nothing_falls_through(self):
         gc._AUTO_RESTART_PROBE_SECONDS = 5

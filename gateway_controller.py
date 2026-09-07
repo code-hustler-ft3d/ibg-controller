@@ -3019,6 +3019,49 @@ def _install4j_restarter_log_path():
                         "restarter.log")
 
 
+# install4j's restarter is itself a JVM launched from the same
+# i4jruntime.jar Gateway uses, and it inherits INSTALL4J_ADD_VM_PARAMS
+# from the JVM that spawned it — so it loads OUR agent and binds OUR
+# socket for the couple of seconds it lives, answering GET_PID with its
+# own PID. Verified 2026-09-06 against the real binary: the restarter
+# logged "[gateway-input-agent] listening on <socket>" and reported its
+# own pid. Adopting it as if it were Gateway would mean monitoring a
+# process that exits immediately.
+#
+# The discriminator is -Dinstall4j.alternativeLogfile, which the
+# restarter sets to point at its own log and Gateway's JVM does not
+# carry (confirmed against both live Gateway JVMs in a running
+# container). i4jruntime.jar is NOT a discriminator — Gateway's own
+# cmdline contains it too.
+_INSTALL4J_RESTARTER_MARKER = "install4j.alternativeLogfile"
+
+
+def _cmdline_is_install4j_restarter(cmdline):
+    """True if this process cmdline is install4j's restarter JVM rather
+    than Gateway itself. ``cmdline`` is the NUL-joined /proc cmdline."""
+    if not cmdline:
+        return False
+    return _INSTALL4J_RESTARTER_MARKER in cmdline
+
+
+def _process_cmdline(pid):
+    """Return a process's cmdline as a space-joined string, or ``None``
+    where /proc is unavailable (macOS) or the process is gone."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (OSError, ValueError):
+        return None
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+
+
+def _is_install4j_restarter_pid(pid):
+    """True only when we can positively identify ``pid`` as install4j's
+    restarter. Unknown (no /proc) reads as False so behaviour off Linux
+    is unchanged — the adoption retry still covers it."""
+    return _cmdline_is_install4j_restarter(_process_cmdline(pid))
+
+
 def _install4j_restarter_mtime():
     """mtime of install4j's ``restarter.log``, or ``None`` if unreadable."""
     path = _install4j_restarter_log_path()
@@ -3055,13 +3098,20 @@ def _install4j_restarter_age(now=None):
     return max(age, 0.0)
 
 
-def _wait_for_self_restarted_agent(old_pid, timeout, exclude=()):
+def _wait_for_self_restarted_agent(old_pid, timeout, exclude=(),
+                                   seen_restarter=None):
     """Poll the agent socket until a JVM with a PID other than ``old_pid``
     (and not in ``exclude``) answers ``GET_PID``. Returns the new PID, or
     ``None`` on timeout.
 
     ``exclude`` carries PIDs already tried and found dead, so a second
     attempt doesn't re-adopt a transient JVM from the restarter chain.
+
+    install4j's restarter answers on this socket too (it inherits the
+    ``-javaagent`` and binds it for the seconds it lives). It is skipped
+    rather than adopted, and its PID is appended to ``seen_restarter``
+    if a list is passed — seeing it at all is conclusive evidence that
+    Gateway is restarting itself.
 
     The self-restarted JVM inherits ``INSTALL4J_ADD_VM_PARAMS`` through
     the restarter, so it loads the same ``-javaagent`` with the same
@@ -3076,7 +3126,15 @@ def _wait_for_self_restarted_agent(old_pid, timeout, exclude=()):
             pid = agent_get_pid()
             if (pid is not None and pid != old_pid and pid not in exclude
                     and pid > 1 and pid != os.getpid()):
-                return pid
+                if _is_install4j_restarter_pid(pid):
+                    if seen_restarter is not None and pid not in seen_restarter:
+                        seen_restarter.append(pid)
+                        log.info(f"AUTORESTART: install4j's restarter "
+                                 f"(pid={pid}) is holding the agent socket — "
+                                 "Gateway is definitely restarting itself; "
+                                 "waiting for the Gateway JVM it launches")
+                else:
+                    return pid
         time.sleep(0.5)
     return None
 
@@ -3110,6 +3168,7 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
             age = _install4j_restarter_age()
 
     first_candidate = None
+    seen_restarter = []
     if age is None:
         # No usable restarter.log. On a crash, stop here — that is a
         # genuine failure and the relaunch path owns it.
@@ -3123,14 +3182,17 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                  f"{AGENT_SOCKET} for up to {_AUTO_RESTART_PROBE_SECONDS}s "
                  "in case Gateway restarted itself anyway")
         first_candidate = _wait_for_self_restarted_agent(
-            old_pid, _AUTO_RESTART_PROBE_SECONDS)
-        if first_candidate is None:
+            old_pid, _AUTO_RESTART_PROBE_SECONDS,
+            seen_restarter=seen_restarter)
+        if first_candidate is None and not seen_restarter:
             return False
-        detected_via = "agent_socket"
-        log.warning(f"AUTORESTART: a Gateway JVM we did not spawn "
-                    f"(pid={first_candidate}) is already answering on "
-                    f"{AGENT_SOCKET} — treating this as Gateway's own "
-                    "restart and NOT launching a second instance")
+        detected_via = ("install4j_restarter" if seen_restarter
+                        else "agent_socket")
+        who = ("install4j's restarter" if seen_restarter
+               else "a Gateway JVM we did not spawn")
+        log.warning(f"AUTORESTART: {who} is on {AGENT_SOCKET} — treating "
+                    "this as Gateway's own restart and NOT launching a "
+                    "second instance")
     else:
         detected_via = "restarter_log"
 
@@ -3176,7 +3238,8 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
         else:
             wait_budget = max(1.0, adopt_deadline - time.monotonic())
             new_pid = _wait_for_self_restarted_agent(
-                old_pid, wait_budget, exclude=tried)
+                old_pid, wait_budget, exclude=tried,
+                seen_restarter=seen_restarter)
         if new_pid is None or new_pid in tried:
             _alert(log.warning, "failed_no_agent", "none",
                    f"no new Gateway JVM answered on {AGENT_SOCKET} within "
