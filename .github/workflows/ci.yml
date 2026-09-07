@@ -142,10 +142,21 @@ jobs:
     # upstream tags so we catch breakage from an upstream layout change
     # (JRE path, apt package rename, userid shift) before users do.
     #
-    # The matrix covers the two Gateway versions we actively verify
-    # against — the previously shipped pin (10.45.1c) and the current
-    # stable now pinned in release-image.yml (10.45.1g). Add a new entry
-    # here when bumping verified versions in README.md / docs/FROM_IBC.md.
+    # The matrix covers the Gateway versions we verify against: two
+    # earlier pins (10.45.1c, 10.45.1g), the current stable pinned in
+    # release-image.yml (10.45.1j), and the head of upstream's `latest`
+    # channel (10.50.1e), which is a different Gateway minor. Add a new
+    # entry here when bumping verified versions in README.md /
+    # docs/FROM_IBC.md.
+    #
+    # Version tags, never the floating `:stable` / `:latest`, so a PR
+    # run stays deterministic and upstream moving a channel can't turn
+    # an unrelated PR red.
+    #
+    # The `latest`-channel entry answers "does the image still build and
+    # boot on the newer Gateway line" (issue #24) — it is a build and
+    # smoke check only. Login, 2FA and the dialog handlers are verified
+    # against 10.45.x; nothing here claims they are verified on 10.50.
     strategy:
       fail-fast: false
       matrix:
@@ -153,6 +164,7 @@ jobs:
           - ghcr.io/gnzsnz/ib-gateway:10.45.1c
           - ghcr.io/gnzsnz/ib-gateway:10.45.1g
           - ghcr.io/gnzsnz/ib-gateway:10.45.1j
+          - ghcr.io/gnzsnz/ib-gateway:10.50.1e
     steps:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4

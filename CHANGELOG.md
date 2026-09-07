@@ -37,6 +37,17 @@ and the project follows [Semantic Versioning](https://semver.org/).
   `release-image.yml` comment describing arm64 as Zulu-based is
   corrected.
 - CI matrix gains 10.45.1j.
+- **CI now builds against upstream's `latest` channel as well (issue
+  #24).** The `gateway-version-matrix` job gains
+  `ghcr.io/gnzsnz/ib-gateway:10.50.1e`, so a layout change on the newer
+  Gateway line surfaces here rather than in someone's build. Build and
+  boot only — login, 2FA and the dialog handlers are verified against
+  10.45.x, and nothing here claims otherwise. Version tags, never the
+  floating `:stable` / `:latest`, so PR runs stay deterministic.
+- The `Dockerfile` header and `docs/FROM_IBC.md` document building
+  against any gnzsnz base, including the `latest` channel, via
+  `--build-arg UPSTREAM_IMAGE=`. No repo change is needed to do this;
+  the recipe was simply undocumented.
 
 ### Fixed
 

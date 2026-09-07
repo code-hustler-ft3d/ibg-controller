@@ -11,6 +11,18 @@
 #   docker build -t ibg-controller:local \
 #     --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1c@sha256:... .
 #
+# Any gnzsnz base works, including their `latest` channel if you want a
+# newer Gateway than the stable line carries (issue #24). This layer is
+# three apt packages and four COPYs, so it is a pull plus about a
+# minute, not a rebuild of the upstream image:
+#
+#   docker build -t ibg-controller:edge \
+#     --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:latest \
+#     --build-arg IB_GATEWAY_VERSION=10.50.1e .
+#
+# CI builds against that line too, but only as a build-and-boot check —
+# the login, 2FA and dialog paths are verified against 10.45.x.
+#
 # Build prerequisites: run `make` in the repo root first to populate
 # dist/ with the agent jar and the controller .py, then `docker build .`
 # from the same directory.
