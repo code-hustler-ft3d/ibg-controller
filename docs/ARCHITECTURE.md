@@ -272,7 +272,14 @@ Why each was added:
     transparently swap them mid-loop). Checks JVM exit every iteration,
     heartbeats the API port every 30s, triggers `attempt_reauth()`
     after three consecutive port-closed heartbeats + a visible login
-    dialog.
+    dialog. On JVM exit, `_recover_jvm_or_escalate()` first asks
+    whether install4j's `restarter.log` (next to the launcher) was just
+    written — Gateway's own `AUTO_RESTART_TIME` restart (issue #23). If
+    so it adopts the JVM install4j brings up (`_AdoptedProcess`, a
+    Popen-shaped stand-in for a process the controller didn't spawn;
+    the new JVM inherits `INSTALL4J_ADD_VM_PARAMS` and so binds the
+    same agent socket) instead of relaunching; otherwise the v0.5.10
+    maintenance-window guard and `do_restart_in_place()` follow.
 
 ### 6. Dual mode (`TRADING_MODE=both`) dispatch (v0.2)
 

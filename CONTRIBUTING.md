@@ -81,7 +81,7 @@ LICENSE                   ← MIT
 
 ## Testing
 
-Two layers:
+Three layers:
 
 **Unit suite** — `tests/`, stdlib `unittest` only, no pip installs:
 
@@ -98,6 +98,35 @@ the `agent_*` socket wrappers with `unittest.mock.patch.object` — see
 `tests/test_pure_logic.py` for the house patterns. New logic should
 follow the same shape: keep decisions in small pure helpers, test them
 directly, and mock the agent boundary for flow tests.
+
+**Integration drills** — `tests/integration/`, run by hand against a
+real Gateway install in a **throwaway container**, never against one
+holding a live session. They use no credentials and never authenticate,
+so no IBKR session slot is touched:
+
+```
+docker run -d --name ibg-drill --entrypoint sleep \
+  -v "$PWD":/repo:ro ghcr.io/<owner>/ibg-controller:<tag> 3600
+docker exec -d ibg-drill sh -c 'Xvfb :1 -screen 0 1024x768x24 &'
+docker exec -e DISPLAY=:1 -e TRADING_MODE=paper \
+  -e TWS_SETTINGS_PATH=/home/ibgateway/Jts_paper \
+  -e GATEWAY_INPUT_AGENT_SOCKET=/tmp/gateway-input-paper.sock \
+  ibg-drill python3 /repo/tests/integration/gateway_autorestart_drill.py
+```
+
+`gateway_autorestart_drill.py` is the model: it exercises Gateway's own
+daily restart (issue #23) by launching the real JVM through the real
+install4j launcher and invoking the real `.install4j/restarter`. Reach
+for this layer when a change depends on how Gateway or install4j
+actually behaves as a *process* — launcher chains, PID identity,
+environment inheritance, the agent socket handoff. Mocked tests cannot
+falsify assumptions in that territory; this drill has already caught
+two defects that the unit suite passed clean.
+
+Each check prints `[PASS]`/`[FAIL]` with a one-line reason, and the
+docstring records what was observed and when. Anything the drill has to
+stand in for (an API port that only opens after a real login, say) must
+be called out there rather than quietly patched.
 
 **Live validation** — end-to-end truth (real dialog wording, window
 timing, IBKR server-side behavior) requires a real IB account +
