@@ -16,6 +16,12 @@ What's covered:
   - generate_totp: regression test against RFC 6238 SHA1 test vectors
     using a monkey-patched time.time()
   - api_port_for_mode: returns 4001 for live, 4002 for paper
+  - Issue #23 self-restart adoption: _install4j_restarter_age
+    (tempdir launcher layout), _AdoptedProcess (real throwaway child
+    processes; /proc-only cases skipped off Linux),
+    _adopt_self_restarted_gateway orchestration (collaborators
+    mocked), _recover_jvm_or_escalate ordering, attempt_reauth /
+    _redrive_login split
 
 What's NOT covered by this file (tracked separately):
   - jts.ini writer (side effects on filesystem — needs tempdir fixture)
@@ -24,7 +30,9 @@ What's NOT covered by this file (tracked separately):
 """
 
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
@@ -2387,6 +2395,520 @@ class _capture_controller_errors:
         import logging
         logging.getLogger("controller").removeHandler(self.handler)
         return False
+
+
+# ── Issue #23: Gateway self-restart adoption ───────────────────────────
+
+def _sleeper():
+    """Spawn a throwaway child that idles until killed."""
+    return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+
+class TestInstall4jRestarterAge(unittest.TestCase):
+    """_install4j_restarter_age is the only trigger for self-restart
+    detection: seconds since install4j last wrote
+    <launcher dir>/.install4j/restarter.log, or None when the file is
+    missing / stale / the launcher is unknown."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = os.path.join(self.tmp.name, "ibgateway", "10.45.1j")
+        os.makedirs(os.path.join(d, ".install4j"))
+        self.launcher = os.path.join(d, "ibgateway")
+        open(self.launcher, "w").close()
+        self.log_path = os.path.join(d, ".install4j", "restarter.log")
+        self._orig_launcher = gc._GATEWAY_LAUNCHER_PATH
+        gc._GATEWAY_LAUNCHER_PATH = self.launcher
+
+    def tearDown(self):
+        gc._GATEWAY_LAUNCHER_PATH = self._orig_launcher
+        self.tmp.cleanup()
+
+    def _write_log(self, age_seconds=0):
+        with open(self.log_path, "w") as f:
+            f.write("[INFO] Finished\n")
+        t = time.time() - age_seconds
+        os.utime(self.log_path, (t, t))
+
+    def test_log_path_sits_next_to_launcher(self):
+        self.assertEqual(gc._install4j_restarter_log_path(), self.log_path)
+
+    def test_missing_log_is_none(self):
+        self.assertIsNone(gc._install4j_restarter_age())
+
+    def test_fresh_log_reports_age(self):
+        self._write_log(age_seconds=3)
+        age = gc._install4j_restarter_age()
+        self.assertIsNotNone(age)
+        self.assertGreaterEqual(age, 0.0)
+        self.assertLess(age, 10.0)
+
+    def test_stale_log_is_none(self):
+        # Yesterday's restart (or a file left on a persistent volume)
+        # must not be mistaken for a restart in progress.
+        self._write_log(age_seconds=gc._AUTO_RESTART_DETECT_WINDOW_SECONDS + 60)
+        self.assertIsNone(gc._install4j_restarter_age())
+
+    def test_future_mtime_clamps_to_zero(self):
+        self._write_log(age_seconds=-30)
+        self.assertEqual(gc._install4j_restarter_age(), 0.0)
+
+    def test_far_future_log_is_none(self):
+        # Clock skew between the container and a persistent settings
+        # volume must not make every clean exit look like a restart.
+        self._write_log(age_seconds=-(gc._AUTO_RESTART_DETECT_WINDOW_SECONDS + 60))
+        self.assertIsNone(gc._install4j_restarter_age())
+
+    def test_unknown_launcher_is_none(self):
+        gc._GATEWAY_LAUNCHER_PATH = None
+        with patch.object(gc, "find_gateway_launcher", return_value=None):
+            self.assertIsNone(gc._install4j_restarter_log_path())
+            self.assertIsNone(gc._install4j_restarter_age())
+
+    def test_falls_back_to_launcher_discovery(self):
+        gc._GATEWAY_LAUNCHER_PATH = None
+        self._write_log()
+        with patch.object(gc, "find_gateway_launcher",
+                          return_value=self.launcher):
+            self.assertIsNotNone(gc._install4j_restarter_age())
+
+
+class TestAdoptedProcess(unittest.TestCase):
+    """_AdoptedProcess must look enough like subprocess.Popen for
+    monitor_loop, _teardown_jvm_for_restart, shutdown() and the health
+    snapshot: pid / poll() / returncode / terminate() / kill() / wait().
+    The exit status of a non-child is not observable, so a gone process
+    reports the _EXIT_STATUS_UNOBSERVABLE sentinel — never 0."""
+
+    def test_live_process_polls_none(self):
+        p = _sleeper()
+        try:
+            a = gc._AdoptedProcess(p.pid)
+            self.assertEqual(a.pid, p.pid)
+            self.assertIsNone(a.poll())
+            self.assertIsNone(a.returncode)
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_terminate_then_wait_reports_unobservable_exit(self):
+        p = _sleeper()
+        a = gc._AdoptedProcess(p.pid)
+        a.terminate()
+        p.wait(timeout=10)  # reap so it's not a zombie on Linux
+        self.assertEqual(a.wait(timeout=5), gc._EXIT_STATUS_UNOBSERVABLE)
+        self.assertEqual(a.poll(), gc._EXIT_STATUS_UNOBSERVABLE)
+        self.assertIsNotNone(a.poll())
+        self.assertNotEqual(a.returncode, 0)
+
+    def test_wait_times_out_while_alive(self):
+        p = _sleeper()
+        try:
+            a = gc._AdoptedProcess(p.pid)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                a.wait(timeout=0.3)
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_kill_is_honoured(self):
+        p = _sleeper()
+        a = gc._AdoptedProcess(p.pid)
+        a.kill()
+        p.wait(timeout=10)
+        self.assertEqual(a.poll(), gc._EXIT_STATUS_UNOBSERVABLE)
+
+    def test_signals_are_withheld_when_identity_no_longer_matches(self):
+        # The adopted PID is not our child: between adoption and teardown
+        # the kernel can recycle it. Signalling then would kill an
+        # unrelated process.
+        p = _sleeper()
+        try:
+            a = gc._AdoptedProcess(p.pid)
+            with patch.object(gc._AdoptedProcess, "_alive", lambda self: False), \
+                 patch.object(gc.os, "kill") as kill:
+                a.terminate()
+                a.kill()
+                kill.assert_not_called()
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_signals_to_gone_process_do_not_raise(self):
+        p = _sleeper()
+        pid = p.pid
+        p.kill()
+        p.wait()
+        a = gc._AdoptedProcess(pid)
+        a.terminate()
+        a.kill()
+        self.assertEqual(a.poll(), gc._EXIT_STATUS_UNOBSERVABLE)
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "needs Linux /proc")
+    def test_unreaped_zombie_counts_as_exited(self):
+        # In the container the self-restarted JVM is reparented to
+        # run.sh; if its exit were ever left unreaped, os.kill(pid, 0)
+        # would still succeed on the zombie. /proc's state must win.
+        p = _sleeper()
+        a = gc._AdoptedProcess(p.pid)
+        p.kill()
+        time.sleep(0.5)  # dead but deliberately not yet reaped
+        try:
+            self.assertEqual(a.poll(), gc._EXIT_STATUS_UNOBSERVABLE)
+        finally:
+            p.wait()
+
+    @unittest.skipUnless(os.path.isdir("/proc"), "needs Linux /proc")
+    def test_proc_stat_parses_state_and_starttime(self):
+        stat = gc._proc_stat(os.getpid())
+        self.assertIsNotNone(stat)
+        state, starttime = stat
+        self.assertIn(state, ("R", "S", "D"))
+        self.assertIsInstance(starttime, int)
+
+    def test_proc_stat_missing_is_none(self):
+        self.assertIsNone(gc._proc_stat(2 ** 22 + 12345))
+
+
+class TestAdoptSelfRestartedGateway(unittest.TestCase):
+    """_adopt_self_restarted_gateway orchestration: only acts on a
+    fresh restarter.log, waits for the NEW JVM's agent, repoints the
+    globals before waiting on the API port, and reports True only when
+    the adopted Gateway is serving (port open, or login re-driven)."""
+
+    _GLOBALS = ("GATEWAY_PROC", "CURRENT_APP", "JVM_PID",
+                "_command_server_app",
+                "_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS",
+                "_AUTO_RESTART_API_TIMEOUT_SECONDS",
+                "_AUTO_RESTART_DETECT_GRACE_SECONDS")
+
+    def setUp(self):
+        self._saved = {k: getattr(gc, k) for k in self._GLOBALS}
+        gc.GATEWAY_PROC = None
+        gc.CURRENT_APP = None
+        gc._command_server_app = None
+        gc.JVM_PID = 27
+        gc._AUTO_RESTART_ADOPT_TIMEOUT_SECONDS = 1
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 2
+        gc._AUTO_RESTART_DETECT_GRACE_SECONDS = 0
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(gc, k, v)
+
+    def _adopting(self, **overrides):
+        """Patch the collaborators for a successful adoption; override
+        individual ones per test."""
+        cfg = dict(
+            age=1.0, new_pid=5020, alive=True, port_open=True,
+            texts=set(), buttons=set(), redrive=True,
+        )
+        cfg.update(overrides)
+        stack = [
+            patch.object(gc, "_install4j_restarter_age", return_value=cfg["age"]),
+            patch.object(gc, "_wait_for_self_restarted_agent",
+                         return_value=cfg["new_pid"]),
+            patch.object(gc._AdoptedProcess, "_alive", return_value=cfg["alive"]),
+            patch.object(gc, "is_api_port_open", return_value=cfg["port_open"]),
+            patch.object(gc, "agent_list",
+                         return_value=(cfg["texts"], cfg["buttons"])),
+            patch.object(gc, "agent_windows", return_value=[]),
+            patch.object(gc, "agent_click", return_value=True),
+            patch.object(gc, "_redrive_login", return_value=cfg["redrive"]),
+            patch.object(gc, "signal_ready"),
+        ]
+        return stack
+
+    def _run(self, stack, exit_code=0):
+        mocks = {}
+        for p in stack:
+            m = p.start()
+            self.addCleanup(p.stop)
+            mocks[p.attribute] = m
+        result = gc._adopt_self_restarted_gateway("JVM exited with code 0",
+                                                   exit_code=exit_code)
+        return result, mocks
+
+    def test_not_a_self_restart_returns_false_untouched(self):
+        result, mocks = self._run(self._adopting(age=None))
+        self.assertFalse(result)
+        mocks["_wait_for_self_restarted_agent"].assert_not_called()
+        self.assertIsNone(gc.GATEWAY_PROC)
+        self.assertEqual(gc.JVM_PID, 27)
+
+    def test_grace_recheck_catches_restarter_write_after_exit(self):
+        # The restarter's first write can trail the code-0 exit by a
+        # couple of seconds; a short re-check window covers it.
+        gc._AUTO_RESTART_DETECT_GRACE_SECONDS = 3
+        ages = iter([None, None, 1.0])
+        stack = self._adopting()
+        stack[0] = patch.object(gc, "_install4j_restarter_age",
+                                side_effect=lambda: next(ages, 1.0))
+        result, mocks = self._run(stack)
+        self.assertTrue(result)
+        self.assertGreaterEqual(mocks["_install4j_restarter_age"].call_count, 3)
+
+    def test_no_grace_for_nonzero_exit(self):
+        # A crash (non-zero code) is not a self-restart candidate;
+        # don't spend the grace window on it.
+        gc._AUTO_RESTART_DETECT_GRACE_SECONDS = 3
+        result, mocks = self._run(self._adopting(age=None), exit_code=1)
+        self.assertFalse(result)
+        self.assertEqual(mocks["_install4j_restarter_age"].call_count, 1)
+
+    def test_no_new_agent_falls_through_without_adopting(self):
+        result, mocks = self._run(self._adopting(new_pid=None))
+        self.assertFalse(result)
+        self.assertIsNone(gc.GATEWAY_PROC)
+        self.assertEqual(gc.JVM_PID, 27)
+        mocks["signal_ready"].assert_not_called()
+
+    def test_adopts_when_api_port_opens(self):
+        result, mocks = self._run(self._adopting())
+        self.assertTrue(result)
+        self.assertIsInstance(gc.GATEWAY_PROC, gc._AdoptedProcess)
+        self.assertEqual(gc.GATEWAY_PROC.pid, 5020)
+        self.assertEqual(gc.JVM_PID, 5020)
+        self.assertEqual(gc.CURRENT_APP.get_process_id(), 5020)
+        self.assertIs(gc._command_server_app, gc.CURRENT_APP)
+        mocks["signal_ready"].assert_called_once()
+        mocks["_redrive_login"].assert_not_called()
+        wait = mocks["_wait_for_self_restarted_agent"]
+        wait.assert_called_once()
+        self.assertEqual(wait.call_args[0][0], 27)      # old pid
+        self.assertIn("exclude", wait.call_args[1])
+
+    def test_login_dialog_means_session_not_preserved_and_is_driven(self):
+        result, mocks = self._run(self._adopting(
+            port_open=False, texts={"Username", "Password"}))
+        self.assertTrue(result)
+        mocks["_redrive_login"].assert_called_once()
+        self.assertEqual(
+            mocks["_redrive_login"].call_args[0][0].get_process_id(), 5020)
+        # _redrive_login signals readiness itself; adoption must not
+        # double-signal.
+        mocks["signal_ready"].assert_not_called()
+
+    def test_login_failure_falls_through_with_proc_repointed(self):
+        result, mocks = self._run(self._adopting(
+            port_open=False, texts={"Username"}, redrive=False))
+        self.assertFalse(result)
+        # The adopted instance is left as GATEWAY_PROC so the fallback's
+        # teardown terminates it instead of no-op'ing on a dead Popen.
+        self.assertIsInstance(gc.GATEWAY_PROC, gc._AdoptedProcess)
+        self.assertEqual(gc.GATEWAY_PROC.pid, 5020)
+
+    def test_api_timeout_falls_through_with_proc_repointed(self):
+        result, mocks = self._run(self._adopting(port_open=False))
+        self.assertFalse(result)
+        self.assertIsInstance(gc.GATEWAY_PROC, gc._AdoptedProcess)
+        mocks["signal_ready"].assert_not_called()
+
+    def test_adopted_jvm_dying_falls_through(self):
+        result, mocks = self._run(self._adopting(alive=False, port_open=True))
+        self.assertFalse(result)
+        mocks["signal_ready"].assert_not_called()
+
+    def test_same_restarter_log_is_not_adopted_twice(self):
+        # The log stays "fresh" for 120s. An adopted JVM that dies inside
+        # that window is a failed restart, not a second self-restart —
+        # going through the adoption wait again just delays recovery.
+        saved = gc._LAST_ADOPTED_RESTART_MTIME
+        try:
+            stack = self._adopting()
+            stack.append(patch.object(gc, "_install4j_restarter_mtime",
+                                      return_value=1234.5))
+            gc._LAST_ADOPTED_RESTART_MTIME = 1234.5
+            result, mocks = self._run(stack)
+            self.assertFalse(result)
+            mocks["_wait_for_self_restarted_agent"].assert_not_called()
+        finally:
+            gc._LAST_ADOPTED_RESTART_MTIME = saved
+
+    def test_records_restarter_mtime_when_it_acts(self):
+        saved = gc._LAST_ADOPTED_RESTART_MTIME
+        try:
+            gc._LAST_ADOPTED_RESTART_MTIME = None
+            stack = self._adopting()
+            stack.append(patch.object(gc, "_install4j_restarter_mtime",
+                                      return_value=999.0))
+            result, _ = self._run(stack)
+            self.assertTrue(result)
+            self.assertEqual(gc._LAST_ADOPTED_RESTART_MTIME, 999.0)
+        finally:
+            gc._LAST_ADOPTED_RESTART_MTIME = saved
+
+    def test_retries_when_first_candidate_dies(self):
+        # install4j's restarter chain can briefly expose a JVM that isn't
+        # the replacement Gateway. Falling straight through to a relaunch
+        # on the first dead candidate would re-create the issue #23 race.
+        gc._AUTO_RESTART_ADOPT_TIMEOUT_SECONDS = 8
+        stack = self._adopting()
+        stack[1] = patch.object(gc, "_wait_for_self_restarted_agent",
+                                side_effect=[5020, 5021])
+        stack[2] = patch.object(gc._AdoptedProcess, "_alive",
+                                lambda self: self.pid != 5020)
+        result, mocks = self._run(stack)
+        self.assertTrue(result)
+        self.assertEqual(mocks["_wait_for_self_restarted_agent"].call_count, 2)
+        self.assertEqual(gc.JVM_PID, 5021)
+        # The dead candidate must not be offered again.
+        self.assertIn(5020, mocks["_wait_for_self_restarted_agent"]
+                      .call_args[1]["exclude"])
+
+    def test_maintenance_guard_applies_before_a_full_relogin(self):
+        # Adoption itself needs no auth, so it runs ahead of the v0.5.10
+        # guard — but this branch does re-auth, inside the window where
+        # IBKR's auth server is still draining.
+        stack = self._adopting(port_open=False, texts={"Username"})
+        stack.append(patch.object(gc, "_is_ibkr_maintenance_window",
+                                  return_value=True))
+        stack.append(patch.object(gc, "_apply_maintenance_recovery_delay"))
+        result, mocks = self._run(stack)
+        self.assertTrue(result)
+        mocks["_apply_maintenance_recovery_delay"].assert_called_once()
+        mocks["_redrive_login"].assert_called_once()
+
+    def test_disclaimers_dismissed_while_waiting(self):
+        opened = iter([False, True])
+        stack = self._adopting(buttons={"Accept"})
+        stack[3] = patch.object(gc, "is_api_port_open",
+                                side_effect=lambda *a, **k: next(opened, True))
+        with patch.object(gc, "SAFE_DISMISS_BUTTONS", ["Accept"]):
+            result, mocks = self._run(stack)
+        self.assertTrue(result)
+        mocks["agent_click"].assert_called_with("Accept")
+
+
+class TestRecoverAdoptsSelfRestartFirst(unittest.TestCase):
+    """_recover_jvm_or_escalate ordering for issue #23: adoption runs
+    before the maintenance-window guard and the fast restart, only when
+    the old JVM is gone and AUTO_RESTART_ADOPT is on; every adoption
+    failure falls through to the previous behaviour."""
+
+    def setUp(self):
+        self._saved = {k: getattr(gc, k) for k in
+                       ("GATEWAY_PROC", "_AUTO_RESTART_ADOPT")}
+        gc.GATEWAY_PROC = None
+        gc._AUTO_RESTART_ADOPT = True
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(gc, k, v)
+
+    def test_adoption_success_skips_relaunch(self):
+        with patch.object(gc, "_adopt_self_restarted_gateway",
+                          return_value=True) as adopt, \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=True), \
+             patch.object(gc, "_apply_maintenance_recovery_delay") as delay, \
+             patch.object(gc, "do_restart_in_place") as restart, \
+             patch.object(gc, "_escalate_to_jvm_restart") as escalate:
+            self.assertTrue(gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=0))
+            adopt.assert_called_once_with("JVM exited with code 0", exit_code=0)
+            delay.assert_not_called()   # ordered BEFORE the 8-min guard
+            restart.assert_not_called()
+            escalate.assert_not_called()
+
+    def test_adoption_failure_falls_through_to_fast_restart(self):
+        with patch.object(gc, "_adopt_self_restarted_gateway",
+                          return_value=False), \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=False), \
+             patch.object(gc, "do_restart_in_place", return_value=True) as restart, \
+             patch.object(gc, "_teardown_jvm_for_restart") as teardown:
+            self.assertTrue(gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=0))
+            restart.assert_called_once()
+            teardown.assert_not_called()  # nothing was adopted
+
+    def test_half_adopted_instance_is_torn_down_before_fallback(self):
+        adopted = MagicMock(spec=gc._AdoptedProcess)
+        adopted.pid = 5020
+        adopted.poll.return_value = None
+
+        def _adopt_but_fail(reason, *, exit_code=None):
+            gc.GATEWAY_PROC = adopted
+            return False
+
+        with patch.object(gc, "_adopt_self_restarted_gateway",
+                          side_effect=_adopt_but_fail), \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=False), \
+             patch.object(gc, "do_restart_in_place", return_value=True) as restart, \
+             patch.object(gc, "_teardown_jvm_for_restart") as teardown:
+            self.assertTrue(gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=0))
+            teardown.assert_called_once()
+            restart.assert_called_once()
+
+    def test_adoption_exception_falls_through(self):
+        with patch.object(gc, "_adopt_self_restarted_gateway",
+                          side_effect=RuntimeError("boom")), \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=False), \
+             patch.object(gc, "do_restart_in_place", return_value=True) as restart:
+            self.assertTrue(gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=0))
+            restart.assert_called_once()
+
+    def test_env_kill_switch_disables_adoption(self):
+        gc._AUTO_RESTART_ADOPT = False
+        with patch.object(gc, "_adopt_self_restarted_gateway") as adopt, \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=False), \
+             patch.object(gc, "do_restart_in_place", return_value=True):
+            self.assertTrue(gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=0))
+            adopt.assert_not_called()
+
+    def test_alive_jvm_skips_adoption(self):
+        # "monitor_loop re-auth failed" arrives with the JVM still up;
+        # adoption only makes sense once the old JVM is gone.
+        gc.GATEWAY_PROC = MagicMock()
+        gc.GATEWAY_PROC.poll.return_value = None
+        with patch.object(gc, "_adopt_self_restarted_gateway") as adopt, \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=False), \
+             patch.object(gc, "do_restart_in_place", return_value=True):
+            self.assertTrue(gc._recover_jvm_or_escalate("monitor_loop re-auth failed"))
+            adopt.assert_not_called()
+
+    def test_unobservable_exit_gets_maintenance_guard(self):
+        # An adopted JVM's exit code can't be observed; treat it like 0
+        # for the v0.5.10 guard (conservative). A real crash (non-zero)
+        # still bypasses the guard.
+        with patch.object(gc, "_adopt_self_restarted_gateway", return_value=False), \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=True), \
+             patch.object(gc, "_apply_maintenance_recovery_delay") as delay, \
+             patch.object(gc, "do_restart_in_place", return_value=True):
+            gc._recover_jvm_or_escalate(
+                "adopted Gateway JVM exited",
+                exit_code=gc._EXIT_STATUS_UNOBSERVABLE)
+            delay.assert_called_once()
+            delay.reset_mock()
+            gc._recover_jvm_or_escalate("JVM exited with code 1", exit_code=1)
+            delay.assert_not_called()
+
+    def test_env_parse_defaults_on(self):
+        self.assertIs(gc._coerce_yes_no("yes") is not False, True)
+        self.assertIs(gc._coerce_yes_no("no") is not False, False)
+        # Unrecognised values must not silently disable the fix.
+        self.assertIs(gc._coerce_yes_no("banana") is not False, True)
+
+
+class TestAttemptReauthSplit(unittest.TestCase):
+    """attempt_reauth keeps its contract after the _redrive_login split:
+    no login dialog => True without driving anything; dialog => the
+    result of _redrive_login."""
+
+    def test_no_dialog_is_noop_true(self):
+        with patch.object(gc, "agent_list", return_value=(set(), set())), \
+             patch.object(gc, "_redrive_login") as redrive:
+            self.assertTrue(gc.attempt_reauth(None))
+            redrive.assert_not_called()
+
+    def test_dialog_delegates_to_redrive(self):
+        app = object()
+        with patch.object(gc, "agent_list", return_value=({"Username"}, set())), \
+             patch.object(gc, "_redrive_login", return_value=False) as redrive:
+            self.assertFalse(gc.attempt_reauth(app))
+            redrive.assert_called_once_with(app)
 
 
 if __name__ == "__main__":

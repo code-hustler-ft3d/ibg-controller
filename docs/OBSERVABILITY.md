@@ -63,7 +63,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 | `mode` | `"live"` \| `"paper"` | The `TRADING_MODE` this controller is driving. |
 | `state` | string | Controller state machine position. One of `INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`, `POST_LOGIN`, `TWO_FA`, `DISCLAIMERS`, `API_WAIT`, `CONFIG`, `COMMAND_SERVER`, `READY`, `MONITORING`. |
 | `jvm_pid` | int \| null | OS PID of the Gateway JVM. `null` before agent discovery completes. |
-| `jvm_alive` | bool | `true` iff the controller's `subprocess.Popen` handle reports the JVM hasn't exited. |
+| `jvm_alive` | bool | `true` iff the controller's handle on the Gateway JVM reports it hasn't exited. Normally a `subprocess.Popen`; after Gateway's own auto-restart it is a signal-based stand-in for a JVM the controller didn't spawn (issue #23), which reports liveness but not an exit code. |
 | `api_port` | int | `4001` (live) or `4002` (paper). |
 | `api_port_open` | bool | TCP-probe of `127.0.0.1:api_port` inside the container. **Note**: this probes the Gateway's real listener directly, *not* the socat forwarder — so this is the true authenticated-and-serving signal. |
 | `last_auth_success_ts` | float \| null | Wall-clock `time.time()` of the most recent successful auth. `null` until the first success in this process's lifetime. |
@@ -218,6 +218,61 @@ took longer than the configured delay — consider tuning
 **Recommended debounce**: none needed for paging (don't page). For
 INFO-tier visibility dashboards, no debounce — frequency itself is
 useful signal.
+
+### `ALERT_AUTO_RESTART`
+
+```
+ALERT_AUTO_RESTART mode=live status=adopted old_pid=27 new_pid=5020 elapsed_seconds=3 reason="API port 4001 open — session preserved across Gateway's auto-restart, no login and no second factor required"
+ALERT_AUTO_RESTART mode=live status=adopted old_pid=27 new_pid=5020 elapsed_seconds=94 reason="session not preserved; full login re-driven on the adopted JVM"
+ALERT_AUTO_RESTART mode=live status=failed_no_agent old_pid=27 new_pid=none elapsed_seconds=90 reason="no new Gateway JVM answered on /tmp/gateway-input-live.sock within 90s; falling back to a controller-driven relaunch"
+ALERT_AUTO_RESTART mode=live status=failed_api_timeout old_pid=27 new_pid=5020 elapsed_seconds=183 reason="API port 4001 did not open within 180s of adoption and no login dialog appeared; falling back to a controller-driven relaunch"
+```
+
+**When fired**: the Gateway JVM exited and install4j's
+`.install4j/restarter.log` (next to the launcher) had an mtime inside
+the last 120 s, and differed from the one the previous adoption
+attempt acted on — Gateway restarted *itself*, which is what
+`AUTO_RESTART_TIME` (Configure → Lock and Exit → Set Auto Restart
+Time) does every day. Instead of relaunching, the controller waited
+for the instance install4j brought up, adopted it, and reports the
+outcome here. One line per adoption attempt that gets as far as
+waiting for the new JVM; an attempt that stops earlier (no fresh
+`restarter.log`) emits none, and neither does an unexpected exception
+inside the path (that one is logged as `Recovery: self-restart
+adoption raised …`). Added with the issue #23 fix.
+
+**`status=` values**:
+
+| status | level | meaning |
+|---|---|---|
+| `adopted` | INFO | The self-restarted Gateway is serving again. `reason` says whether the session was preserved (API port opened with no login — the normal case) or a login dialog appeared and the full login was re-driven on the adopted JVM (e.g. IBKR's weekly full re-authentication). |
+| `failed_no_agent` | WARNING | No JVM with a new PID answered on the agent socket within `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`. The controller fell back to its own relaunch (`do_restart_in_place`). If install4j's instance then turns up *after* the fallback started, you are back in the pre-fix two-instance race for that night — check for a second `ibgateway` process if the following login fails. |
+| `failed_jvm_exited` | WARNING | The adopted JVM died before its API port opened. Fell back to a relaunch. |
+| `failed_login` | WARNING | A login dialog appeared on the adopted JVM and the re-driven login failed. A more specific token (`ALERT_LOGIN_FAILED`, `ALERT_2FA_FAILED`) usually precedes it, but not every failure path emits one. The adopted instance is torn down, then the controller falls back to a relaunch. |
+| `failed_api_timeout` | WARNING | Adopted, but the API port did not open within 180 s and no login dialog appeared. The adopted instance is torn down, then the controller falls back to a relaunch. |
+
+**What it means**: `status=adopted` is the benign nightly signal — a
+session-preserving restart that cost a few seconds and no second
+factor. Any `failed_*` status means the pre-fix behaviour (relaunch +
+cold login, and a 2FA push on IB Key accounts) took over for that
+night; the following `RESTART:` lines and tokens describe how that
+went.
+
+**What the operator should do**: nothing on `adopted`. On repeated
+`failed_no_agent`, check that the self-restarted JVM is actually
+coming up (`ps`, `/tmp/jvm_console_${TRADING_MODE}.log`) and consider
+raising `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` on a slow host. On
+repeated `failed_api_timeout`, look at the adopted JVM's windows in
+the `AUTORESTART: API port ... still closed` progress lines. If the
+adoption path itself is suspected, `AUTO_RESTART_ADOPT=no` restores
+the always-relaunch behaviour.
+
+**Log level**: `INFO` for `adopted`, `WARNING` for the `failed_*`
+statuses. Grep on the prefix and read `status=`.
+
+**Recommended debounce**: none. One line per night per mode is the
+expected rate with `AUTO_RESTART_TIME` set; zero is expected without
+it.
 
 ### `ALERT_JVM_RESTART_EXHAUSTED`
 
@@ -608,6 +663,8 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | `CCP_COOLDOWN_MULTIPLIER` | `1.5` | Multiplicative factor applied per restart attempt: attempt-1 = base, attempt-2 = base×1.5, attempt-3 = base×2.25, etc., capped at `CCP_COOLDOWN_MAX_SECONDS`. Set to `1.0` to restore the v0.5.4-and-earlier fixed-duration behaviour. Added v0.5.5. |
 | `CLEAN_LOGOUT_TIMEOUT_SECONDS` | `15` | Seconds to wait for the Gateway JVM to exit after dispatching `WindowEvent.WINDOW_CLOSING` (the v0.5.6 clean-logout path). Gateway's WindowListener performs a CCP session-close, which can take a few seconds (network round-trip to IBKR + state flush). If this expires, the controller falls through to the SIGTERM path. Shorten (e.g. `7`) if Docker's `--stop-timeout` is tight; lengthen on slow-network hosts. Added v0.5.6. |
 | `CCP_LOCKOUT_MAX_JVM_RESTARTS` | `0` | Number of SIGKILL-capable JVM teardown cycles `_escalate_to_jvm_restart` will attempt before giving up. Default `0` = halt immediately and emit `ALERT_CCP_PERSISTENT_HALT` (v0.5.9's new behaviour; rationale: the retry loop can compound the lockout it's trying to clear by re-stranding slots on each teardown). Set to `5` to restore pre-v0.5.9 auto-retry behaviour. Supersedes the internal `_JVM_RESTART_MAX_ATTEMPTS` constant when set positive. Added v0.5.9. |
+| `AUTO_RESTART_ADOPT` | `yes` | When the Gateway JVM exits right after install4j's restarter ran (Gateway's own `AUTO_RESTART_TIME` restart), adopt the instance install4j brings up instead of launching a second one — no login, no second factor. `no` restores the always-relaunch behaviour that raced the restarter (issue #23). Added with the issue #23 fix. |
+| `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` | `90` | How long to wait for the self-restarted JVM's agent to answer with a new PID before giving up on adoption and falling back to a relaunch (`ALERT_AUTO_RESTART status=failed_no_agent`). The issue #23 reporter observed 0-3 s on their host; the default leaves room for slower ones. Added with the issue #23 fix. |
 
 ## Example integrations
 
@@ -709,8 +766,10 @@ teardown diagnostic) in v0.5.6 with three initial `status=` values,
 and `ALERT_CCP_PERSISTENT_HALT` (ERROR-level, halt-and-page) plus
 four additional `ALERT_CLEAN_LOGOUT` `status=` values
 (`safe_no_session`, `zombie_slot_cannot_release`,
-`cancelled_pending_2fa`, `failed_cancel_2fa`) in v0.5.9 — all under
-the same stability contract. Breaking changes will be called out in
+`cancelled_pending_2fa`, `failed_cancel_2fa`) in v0.5.9, and
+`ALERT_AUTO_RESTART` (INFO on `status=adopted`, WARNING on the
+`failed_*` statuses) with the issue #23 fix — all under the same
+stability contract. Breaking changes will be called out in
 the CHANGELOG and accompany a minor version bump. Adding new fields
 to `/health`, new `ALERT_*` tokens, or new `status=` values to
 existing tokens is not a breaking change.

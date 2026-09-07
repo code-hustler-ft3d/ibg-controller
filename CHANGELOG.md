@@ -4,6 +4,99 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Gateway's own daily auto-restart no longer races the controller
+  into a cold login (issue #23).** With `AUTO_RESTART_TIME` set,
+  Gateway restarts *itself* at that time: the JVM spawns install4j's
+  `.install4j/restarter`, which shuts the calling launcher down and
+  re-executes it, and the replacement re-uses the session credentials
+  — no login, no second factor. `monitor_loop` saw that code-0 exit as
+  a crash and `do_restart_in_place` launched a **second** Gateway ~2 s
+  before install4j launched its own: two instances on one display and
+  one settings dir, the agent drove the wrong window, login failed,
+  the controller halted, and the container's restart policy brought
+  it back as a cold login — a fresh IB Key push every night (the
+  reporter measured 23 container restarts and 1-2 h without a session
+  per night over five days; an otherwise identical paper container
+  with no auto-restart time ran 13 days clean).
+  - On a JVM exit the controller now checks the mtime of install4j's
+    `restarter.log` next to the launcher. That file being freshly
+    written is the restarter's own statement that it ran — the only
+    trigger used. Not a wall-clock comparison against
+    `AUTO_RESTART_TIME`, which would have to guess which timezone
+    Gateway's Lock-and-Exit field is in and would fire on any code-0
+    exit that landed in the window.
+  - If it was just written: no relaunch. The controller waits for the
+    instance install4j is bringing up (it inherits
+    `INSTALL4J_ADD_VM_PARAMS` through the restarter, so its agent binds
+    the same socket and reports its PID), adopts it as `GATEWAY_PROC`
+    through a Popen-shaped stand-in (`os.kill(pid, 0)` liveness,
+    zombie- and PID-reuse-aware via `/proc`), and resumes monitoring
+    as soon as the API port is open. The reporter's equivalent patch
+    in their production: three seconds, no login dialog, no push, no
+    container restart.
+  - If the session was **not** preserved and a login dialog appears
+    instead (e.g. IBKR's weekly full re-authentication), the existing
+    re-auth pipeline is driven on the adopted JVM.
+  - If the first JVM to answer dies before its API port opens, the
+    controller looks once more for another instance from the restarter
+    chain before giving up, and never re-offers a PID it already found
+    dead.
+  - Fail-safe: no `restarter.log`, a stale or far-future one, one that
+    hasn't changed since the last adoption attempt (so a JVM that dies
+    inside the 120 s freshness window is treated as a real failure, not
+    another self-restart), no new PID within
+    `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (default 90), or an API port
+    that never opens — each falls through to the previous behaviour
+    (`do_restart_in_place`), tearing down a half-adopted instance first
+    so it isn't left running alongside the relaunch.
+  - Adoption is ordered ahead of the v0.5.10 maintenance-window guard:
+    `AUTO_RESTART_TIME` commonly sits inside that window, and an
+    8-minute sleep is pointless when there is nothing to re-auth. The
+    guard still applies on the branch that *does* re-auth (session not
+    preserved).
+  - Reported, diagnosed, and prototyped in production by
+    @maciejlaska.
+
+### Added
+
+- **`ALERT_AUTO_RESTART` grep-contract token** — `status=adopted`
+  (INFO) or `failed_no_agent` / `failed_jvm_exited` / `failed_login` /
+  `failed_api_timeout` (WARNING), one line per adoption attempt. See
+  [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+- **`AUTO_RESTART_ADOPT`** (default `yes`) — set to `no` to restore the
+  always-relaunch behaviour, and **`AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`**
+  (default `90`) — how long to wait for the self-restarted JVM's agent.
+
+### Validation
+
+- New unit coverage: `_install4j_restarter_age` (fresh / stale /
+  missing / future-dated log, unknown launcher, discovery fallback),
+  `_AdoptedProcess` against real child processes (live, terminated,
+  killed, gone-before-adoption, wait timeout; unreaped-zombie and
+  `/proc` parsing on Linux), `_adopt_self_restarted_gateway`
+  orchestration (not a self-restart, grace re-check for a late
+  restarter write, no grace on non-zero exits, no new agent, adopted
+  via API port, login dialog re-driven, the maintenance guard applying
+  to that re-login, login failure and API timeout leaving the adopted
+  instance in place for teardown, adopted JVM dying, retry onto a
+  second candidate from the restarter chain, the same restarter.log
+  not being adopted twice, disclaimer dismissal while waiting),
+  `_recover_jvm_or_escalate`
+  ordering (adoption before the maintenance guard and the fast
+  restart; half-adopted teardown; exception fall-through; env
+  kill-switch; alive-JVM skip; unobservable exit status treated like
+  0 by the guard), and the `attempt_reauth` / `_redrive_login` split.
+- The adoption path is harness-validated only in this repo — no
+  maintainer deployment runs `AUTO_RESTART_TIME`. The reporter reports
+  their own equivalent patch working on the first night in production
+  (issue #23). Confirmation from a real `AUTO_RESTART_TIME` deployment
+  is invited. `monitor_loop`'s adopted-exit branch is exercised only
+  indirectly, through `_recover_jvm_or_escalate`.
+
 ## [0.8.1] - 2026-08-24
 
 ### Added
