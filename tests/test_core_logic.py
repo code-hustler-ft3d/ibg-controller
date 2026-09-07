@@ -16,8 +16,9 @@ import sys
 import tempfile
 import threading
 import time
+import subprocess
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def _load_module():
@@ -336,6 +337,246 @@ class TestDualModeEnvResolution(unittest.TestCase):
             self.assertIn("IBKR Gateway", gc.APP_NAME_CANDIDATES)
         elif gc.GATEWAY_OR_TWS == "tws":
             self.assertIn("Trader Workstation", gc.APP_NAME_CANDIDATES)
+
+
+# ── Issue #23: end-to-end auto-restart adoption ────────────────────────
+
+# A stand-in for a Gateway JVM carrying the input agent. Binds the
+# agent's Unix socket the way GatewayInputAgent does (deleteIfExists +
+# bind) and answers the part of the protocol the adoption path uses;
+# optionally opens a TCP port standing in for Gateway's API port. Run as
+# a real child process so the tests exercise real PIDs, real signals and
+# the real _AdoptedProcess rather than mocks.
+_FAKE_JVM = r"""
+import os, socket, sys, threading
+
+def serve(path, texts):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(path); s.listen(8)
+    while True:
+        conn, _ = s.accept()
+        try:
+            buf = b""
+            while b"\n" not in buf:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            cmd = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip().split(" ", 1)[0]
+            if cmd == "PING":
+                conn.sendall(b"OK pong\n")
+            elif cmd == "GET_PID":
+                conn.sendall(("OK %d\n" % os.getpid()).encode())
+            elif cmd == "LIST":
+                conn.sendall(("".join("text %s\n" % t for t in texts) + "END\n").encode())
+            elif cmd in ("WINDOWS", "LABELS"):
+                conn.sendall(b"END\n")
+            else:
+                conn.sendall(b"ERR unsupported\n")
+        except Exception:
+            pass
+        finally:
+            conn.close()
+
+args = [a for a in sys.argv[1:] if not a.startswith("--")]
+texts = ["Username", "Password"] if "--login-dialog" in sys.argv else []
+threading.Thread(target=serve, args=(args[0], texts), daemon=True).start()
+if len(args) > 1 and args[1] != "-":
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", int(args[1]))); srv.listen(8)
+    while True:
+        c, _ = srv.accept(); c.close()
+else:
+    threading.Event().wait()
+"""
+
+
+class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
+    """Issue #23 adoption driven end to end: real child processes, a real
+    Unix agent socket, a real TCP port, the real agent client and the
+    real _AdoptedProcess. Only Gateway itself is substituted.
+
+    The unit tests in test_pure_logic.py mock the collaborators, so they
+    can only prove the orchestration branches. These prove the mechanism:
+    that a JVM the controller never spawned can be found on the inherited
+    socket, adopted, and monitored — and that every failure path still
+    ends in the pre-issue-#23 relaunch.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.procs = []
+        self.addCleanup(self._kill_all)
+
+        install = os.path.join(self.tmp.name, "ibgateway", "10.45.1j")
+        os.makedirs(os.path.join(install, ".install4j"))
+        self.launcher = os.path.join(install, "ibgateway")
+        open(self.launcher, "w").close()
+        self.restarter_log = os.path.join(install, ".install4j", "restarter.log")
+        self.fake = os.path.join(self.tmp.name, "fake_jvm.py")
+        with open(self.fake, "w") as f:
+            f.write(_FAKE_JVM)
+        self.sock = os.path.join(self.tmp.name, "agent.sock")
+        self.ready = os.path.join(self.tmp.name, "ready")
+
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        self.api_port = probe.getsockname()[1]
+        probe.close()
+
+        for p in (
+            patch.object(gc, "AGENT_SOCKET", self.sock),
+            patch.object(gc, "READY_FILE", self.ready),
+            patch.object(gc, "_GATEWAY_LAUNCHER_PATH", self.launcher),
+            patch.object(gc, "api_port_for_mode", lambda: self.api_port),
+            patch.object(gc, "_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS", 15),
+            patch.object(gc, "_AUTO_RESTART_API_TIMEOUT_SECONDS", 15),
+            patch.object(gc, "_AUTO_RESTART_PROBE_SECONDS", 3),
+            patch.object(gc, "_AUTO_RESTART_DETECT_GRACE_SECONDS", 1),
+            patch.object(gc, "_is_ibkr_maintenance_window", lambda *a, **k: False),
+            patch.object(gc, "GATEWAY_PROC", None),
+            patch.object(gc, "JVM_PID", None),
+            patch.object(gc, "CURRENT_APP", None),
+            patch.object(gc, "_LAST_ADOPTED_RESTART_MTIME", None),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _kill_all(self):
+        for p in self.procs:
+            try:
+                p.kill()
+                p.wait(timeout=5)
+            except Exception:
+                pass
+
+    def _start_jvm(self, api=False, login_dialog=False):
+        args = [sys.executable, self.fake, self.sock,
+                str(self.api_port) if api else "-"]
+        if login_dialog:
+            args.append("--login-dialog")
+        p = subprocess.Popen(args)
+        self.procs.append(p)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if os.path.exists(self.sock) and gc.agent_wait_ready(timeout=1):
+                if gc.agent_get_pid() == p.pid:
+                    return p
+            time.sleep(0.1)
+        self.fail("fake JVM never answered on the agent socket")
+
+    def _running_then_killed(self):
+        """Bring up a JVM, register it as the controller's, then kill it —
+        i.e. what install4j's restarter does to the calling launcher."""
+        a = self._start_jvm()
+        gc.GATEWAY_PROC, gc.JVM_PID = a, a.pid
+        a.kill()
+        a.wait(timeout=10)
+        return a
+
+    def _write_restarter_log(self, age_seconds=0):
+        with open(self.restarter_log, "w") as f:
+            f.write("[INFO] ExecuteLauncherAction [ID 3018]: Launching x\n")
+        if age_seconds:
+            t = time.time() - age_seconds
+            os.utime(self.restarter_log, (t, t))
+
+    def _recover(self, exit_code=0):
+        """Real recovery entry point, with the relaunch path spied on."""
+        calls = []
+        with patch.object(gc, "do_restart_in_place",
+                          side_effect=lambda: (calls.append(1), True)[1]):
+            t0 = time.monotonic()
+            ok = gc._recover_jvm_or_escalate(
+                "JVM exited with code 0", exit_code=exit_code)
+        return ok, len(calls), time.monotonic() - t0
+
+    def test_adopts_the_self_restarted_jvm_and_never_launches_a_second(self):
+        self._running_then_killed()
+        self._write_restarter_log()
+        new = self._start_jvm(api=True)          # install4j's replacement
+
+        ok, relaunches, _ = self._recover()
+
+        self.assertTrue(ok)
+        self.assertEqual(relaunches, 0, "launched a second Gateway — issue #23")
+        self.assertIsInstance(gc.GATEWAY_PROC, gc._AdoptedProcess)
+        self.assertEqual(gc.GATEWAY_PROC.pid, new.pid)
+        self.assertEqual(gc.JVM_PID, new.pid)
+        self.assertIsNone(gc.GATEWAY_PROC.poll())
+        self.assertTrue(os.path.exists(self.ready))
+        self.assertIsNone(new.poll(), "adopted JVM was killed")
+
+    def test_adopts_via_the_socket_probe_when_no_restarter_log_exists(self):
+        # Verified 2026-09-06 against a real install: Gateway 10.45.1g's
+        # .install4j/restarter writes no restarter.log, while the issue
+        # #23 reporter's 10.45.1j box does. Detection must not depend on
+        # the log alone, or the fix silently never engages.
+        self._running_then_killed()
+        new = self._start_jvm(api=True)
+        self.assertFalse(os.path.exists(self.restarter_log))
+
+        ok, relaunches, _ = self._recover()
+
+        self.assertTrue(ok)
+        self.assertEqual(relaunches, 0)
+        self.assertEqual(gc.GATEWAY_PROC.pid, new.pid)
+
+    def test_genuine_crash_still_falls_through_to_the_relaunch(self):
+        self._running_then_killed()              # nothing comes back up
+
+        ok, relaunches, elapsed = self._recover()
+
+        self.assertTrue(ok)
+        self.assertEqual(relaunches, 1)
+        self.assertLess(elapsed, 12, "detection budget is not bounded")
+
+    def test_stale_restarter_log_does_not_trigger_adoption(self):
+        self._running_then_killed()
+        self._write_restarter_log(
+            age_seconds=gc._AUTO_RESTART_DETECT_WINDOW_SECONDS + 600)
+
+        _, relaunches, _ = self._recover()
+
+        self.assertEqual(relaunches, 1)
+
+    def test_adopted_jvm_dying_before_its_api_port_falls_through(self):
+        self._running_then_killed()
+        self._write_restarter_log()
+        dying = self._start_jvm(api=False)       # binds socket, no API port
+
+        killer = threading.Timer(1.0, dying.kill)
+        killer.start()
+        self.addCleanup(killer.cancel)
+        with patch.object(gc, "_AUTO_RESTART_API_TIMEOUT_SECONDS", 6), \
+             patch.object(gc, "_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS", 4):
+            _, relaunches, elapsed = self._recover()
+        self.assertLess(elapsed, 20, "retry budget is not bounded")
+
+        self.assertEqual(relaunches, 1)
+        self.assertIsNotNone(dying.poll())
+
+    def test_the_same_restart_is_not_adopted_twice(self):
+        self._running_then_killed()
+        self._write_restarter_log()
+        new = self._start_jvm(api=True)
+        ok, _, _ = self._recover()
+        self.assertTrue(ok)
+
+        # The adopted instance now dies inside the log's freshness window.
+        new.kill()
+        new.wait(timeout=10)
+        _, relaunches, elapsed = self._recover(
+            exit_code=gc._EXIT_STATUS_UNOBSERVABLE)
+
+        self.assertEqual(relaunches, 1)
+        self.assertLess(elapsed, 12, "waited on an already-handled restart")
 
 
 if __name__ == "__main__":

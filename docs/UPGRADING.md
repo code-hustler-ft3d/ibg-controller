@@ -87,7 +87,15 @@ anything from you.
   in a cold login every night. **Default-on behaviour change.** If you
   need the old behaviour, set `AUTO_RESTART_ADOPT=no`.
   - New env vars: `AUTO_RESTART_ADOPT` (default `yes`),
-    `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (default `90`).
+    `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (default `90`),
+    `AUTO_RESTART_PROBE_SECONDS` (default `15`).
+  - **Small added latency on clean exits.** When a code-0 exit leaves no
+    fresh `restarter.log`, the controller spends up to 5 s re-checking
+    for a late one and up to `AUTO_RESTART_PROBE_SECONDS` asking the
+    agent socket whether a Gateway JVM it didn't spawn is already
+    running, before falling through to the relaunch. Worst case ~20 s
+    added to a clean-exit recovery; crashes (non-zero exit) are
+    unaffected. Set `AUTO_RESTART_PROBE_SECONDS=0` to drop the probe.
   - New log token: `ALERT_AUTO_RESTART` (INFO on `status=adopted`,
     WARNING on the `failed_*` statuses). Grep-by-prefix monitors need
     no change; add it if you want nightly visibility.
@@ -98,9 +106,9 @@ anything from you.
     `AUTORESTART:` lines above it.
   - Pure Python, no agent-jar change — pull the new image or, if you
     build from source, `make`.
-  - Does not apply if you don't set `AUTO_RESTART_TIME`: with no
-    Gateway self-restart there is no `restarter.log`, and every exit
-    takes the existing recovery path unchanged.
+  - If you don't set `AUTO_RESTART_TIME`, Gateway never restarts
+    itself, so neither signal fires and every exit takes the existing
+    recovery path — apart from the added detection delay above.
 
 ### v0.8.1
 

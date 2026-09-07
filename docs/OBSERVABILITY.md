@@ -222,20 +222,34 @@ useful signal.
 ### `ALERT_AUTO_RESTART`
 
 ```
-ALERT_AUTO_RESTART mode=live status=adopted old_pid=27 new_pid=5020 elapsed_seconds=3 reason="API port 4001 open — session preserved across Gateway's auto-restart, no login and no second factor required"
-ALERT_AUTO_RESTART mode=live status=adopted old_pid=27 new_pid=5020 elapsed_seconds=94 reason="session not preserved; full login re-driven on the adopted JVM"
-ALERT_AUTO_RESTART mode=live status=failed_no_agent old_pid=27 new_pid=none elapsed_seconds=90 reason="no new Gateway JVM answered on /tmp/gateway-input-live.sock within 90s; falling back to a controller-driven relaunch"
-ALERT_AUTO_RESTART mode=live status=failed_api_timeout old_pid=27 new_pid=5020 elapsed_seconds=183 reason="API port 4001 did not open within 180s of adoption and no login dialog appeared; falling back to a controller-driven relaunch"
+ALERT_AUTO_RESTART mode=live status=adopted detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=3 reason="API port 4001 open — session preserved across Gateway's auto-restart, no login and no second factor required"
+ALERT_AUTO_RESTART mode=live status=adopted detected_via=agent_socket old_pid=27 new_pid=5020 elapsed_seconds=6 reason="API port 4001 open — session preserved across Gateway's auto-restart, no login and no second factor required"
+ALERT_AUTO_RESTART mode=live status=adopted detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=94 reason="session not preserved; full login re-driven on the adopted JVM"
+ALERT_AUTO_RESTART mode=live status=failed_no_agent detected_via=restarter_log old_pid=27 new_pid=none elapsed_seconds=90 reason="no new Gateway JVM answered on /tmp/gateway-input-live.sock within 90s; falling back to a controller-driven relaunch"
+ALERT_AUTO_RESTART mode=live status=failed_api_timeout detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=183 reason="API port 4001 did not open within 180s of adoption and no login dialog appeared; falling back to a controller-driven relaunch"
 ```
 
-**When fired**: the Gateway JVM exited and install4j's
-`.install4j/restarter.log` (next to the launcher) had an mtime inside
-the last 120 s, and differed from the one the previous adoption
-attempt acted on — Gateway restarted *itself*, which is what
-`AUTO_RESTART_TIME` (Configure → Lock and Exit → Set Auto Restart
-Time) does every day. Instead of relaunching, the controller waited
-for the instance install4j brought up, adopted it, and reports the
-outcome here. One line per adoption attempt that gets as far as
+**When fired**: the Gateway JVM exited and the controller concluded
+Gateway was restarting *itself* — which is what `AUTO_RESTART_TIME`
+(Configure → Lock and Exit → Set Auto Restart Time) makes it do every
+day. Instead of relaunching, the controller waited for the instance
+install4j brought up, adopted it, and reports the outcome here.
+
+`detected_via=` says which signal fired:
+
+- **`restarter_log`** — install4j's `.install4j/restarter.log` (next to
+  the launcher) has an mtime inside the last 120 s and differs from the
+  one the previous adoption attempt acted on. The fast, unambiguous
+  case.
+- **`agent_socket`** — no usable `restarter.log`, but after a clean exit
+  a live Gateway JVM the controller never spawned was already answering
+  on the agent socket within `AUTO_RESTART_PROBE_SECONDS`. Not every
+  install4j build writes the log (verified: Gateway 10.45.1g's restarter
+  writes none; the issue #23 reporter's 10.45.1j writes one), so this is
+  the fallback that keeps the fix working where the log never appears.
+  Only a running JVM can answer that socket, so a reply from a PID that
+  isn't ours is direct evidence — and launching a second instance in
+  that state is precisely the issue #23 bug. One line per adoption attempt that gets as far as
 waiting for the new JVM; an attempt that stops earlier (no fresh
 `restarter.log`) emits none, and neither does an unexpected exception
 inside the path (that one is logged as `Recovery: self-restart
@@ -664,6 +678,7 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | `CLEAN_LOGOUT_TIMEOUT_SECONDS` | `15` | Seconds to wait for the Gateway JVM to exit after dispatching `WindowEvent.WINDOW_CLOSING` (the v0.5.6 clean-logout path). Gateway's WindowListener performs a CCP session-close, which can take a few seconds (network round-trip to IBKR + state flush). If this expires, the controller falls through to the SIGTERM path. Shorten (e.g. `7`) if Docker's `--stop-timeout` is tight; lengthen on slow-network hosts. Added v0.5.6. |
 | `CCP_LOCKOUT_MAX_JVM_RESTARTS` | `0` | Number of SIGKILL-capable JVM teardown cycles `_escalate_to_jvm_restart` will attempt before giving up. Default `0` = halt immediately and emit `ALERT_CCP_PERSISTENT_HALT` (v0.5.9's new behaviour; rationale: the retry loop can compound the lockout it's trying to clear by re-stranding slots on each teardown). Set to `5` to restore pre-v0.5.9 auto-retry behaviour. Supersedes the internal `_JVM_RESTART_MAX_ATTEMPTS` constant when set positive. Added v0.5.9. |
 | `AUTO_RESTART_ADOPT` | `yes` | When the Gateway JVM exits right after install4j's restarter ran (Gateway's own `AUTO_RESTART_TIME` restart), adopt the instance install4j brings up instead of launching a second one — no login, no second factor. `no` restores the always-relaunch behaviour that raced the restarter (issue #23). Added with the issue #23 fix. |
+| `AUTO_RESTART_PROBE_SECONDS` | `15` | When a clean JVM exit leaves no fresh `restarter.log`, how long to ask the agent socket whether a Gateway JVM the controller didn't spawn is already running (`ALERT_AUTO_RESTART detected_via=agent_socket`). Set to `0` to detect self-restarts only via `restarter.log`. This is the worst-case delay added to a genuine crash recovery on a clean exit, alongside the 5 s late-log grace. Added with the issue #23 fix. |
 | `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` | `90` | How long to wait for the self-restarted JVM's agent to answer with a new PID before giving up on adoption and falling back to a relaunch (`ALERT_AUTO_RESTART status=failed_no_agent`). The issue #23 reporter observed 0-3 s on their host; the default leaves room for slower ones. Added with the issue #23 fix. |
 
 ## Example integrations

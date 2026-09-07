@@ -24,11 +24,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
   with no auto-restart time ran 13 days clean).
   - On a JVM exit the controller now checks the mtime of install4j's
     `restarter.log` next to the launcher. That file being freshly
-    written is the restarter's own statement that it ran — the only
-    trigger used. Not a wall-clock comparison against
-    `AUTO_RESTART_TIME`, which would have to guess which timezone
-    Gateway's Lock-and-Exit field is in and would fire on any code-0
-    exit that landed in the window.
+    written is the restarter's own statement that it ran. Not a
+    wall-clock comparison against `AUTO_RESTART_TIME`, which would have
+    to guess which timezone Gateway's Lock-and-Exit field is in and
+    would fire on any code-0 exit that landed in the window.
+  - **`restarter.log` is not guaranteed to exist.** Verified against a
+    real install on 2026-09-06: Gateway 10.45.1g ships
+    `.install4j/restarter` and runs it, but no `restarter.log` is
+    written, while the reporter's 10.45.1j box writes one with install4j
+    action-log content. So after a clean exit with no usable log the
+    controller asks a more direct question for up to
+    `AUTO_RESTART_PROBE_SECONDS` (default 15): is a live Gateway JVM
+    that we never spawned already answering on our agent socket? Only a
+    running JVM can answer it, and launching a second instance in that
+    state is exactly this bug. `ALERT_AUTO_RESTART` reports which signal
+    fired via `detected_via=restarter_log|agent_socket`.
   - If it was just written: no relaunch. The controller waits for the
     instance install4j is bringing up (it inherits
     `INSTALL4J_ADD_VM_PARAMS` through the restarter, so its agent binds
@@ -68,8 +78,25 @@ and the project follows [Semantic Versioning](https://semver.org/).
   `failed_api_timeout` (WARNING), one line per adoption attempt. See
   [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
 - **`AUTO_RESTART_ADOPT`** (default `yes`) — set to `no` to restore the
-  always-relaunch behaviour, and **`AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`**
-  (default `90`) — how long to wait for the self-restarted JVM's agent.
+  always-relaunch behaviour; **`AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`**
+  (default `90`) — how long to wait for the self-restarted JVM's agent;
+  and **`AUTO_RESTART_PROBE_SECONDS`** (default `15`) — how long to
+  probe the agent socket when no `restarter.log` was written. The probe
+  plus a 5 s late-log grace is the only added latency, and only on clean
+  exits.
+
+### Fixed (found by that validation)
+
+- **A dead adopted JVM could look alive indefinitely.** `_AdoptedProcess`
+  inferred liveness from `os.kill(pid, 0)` plus `/proc`. Where `/proc`
+  is absent, or the exit is left unreaped, a dead JVM still answered
+  "alive", so teardown spent its full `JVM_TEARDOWN_GRACE_SECONDS`
+  SIGTERM wait and then a SIGKILL on a process that had already exited —
+  turning a 6 s failure path into a 40 s one and emitting a spurious
+  `ALERT_JVM_UNCLEAN_SHUTDOWN`. Liveness now attempts a `WNOHANG` reap
+  first (a no-op in production, where the JVM is install4j's child, not
+  ours) before the signal and `/proc` checks. Caught by the end-to-end
+  tests below, not by the mocked unit tests.
 
 ### Validation
 
@@ -90,12 +117,27 @@ and the project follows [Semantic Versioning](https://semver.org/).
   restart; half-adopted teardown; exception fall-through; env
   kill-switch; alive-JVM skip; unobservable exit status treated like
   0 by the guard), and the `attempt_reauth` / `_redrive_login` split.
-- The adoption path is harness-validated only in this repo — no
-  maintainer deployment runs `AUTO_RESTART_TIME`. The reporter reports
-  their own equivalent patch working on the first night in production
-  (issue #23). Confirmation from a real `AUTO_RESTART_TIME` deployment
-  is invited. `monitor_loop`'s adopted-exit branch is exercised only
-  indirectly, through `_recover_jvm_or_escalate`.
+- **End-to-end coverage with real processes**
+  (`TestAutoRestartAdoptionEndToEnd`): a stand-in Gateway JVM binds the
+  agent's Unix socket the way the real agent does and optionally opens
+  an API port, so adoption runs against real PIDs, real signals, a real
+  socket and the real `_AdoptedProcess` — only Gateway itself is
+  substituted. Covers the self-restart being adopted with no second
+  launch, adoption via the socket probe when no `restarter.log` is
+  written, a genuine crash still falling through to the relaunch inside
+  a bounded detection budget, a stale log being ignored, an adopted JVM
+  dying before its API port, and the same restart not being adopted
+  twice.
+- Path assumptions checked against a real install (Gateway 10.45.1g in
+  the maintainer's running container): `.install4j/restarter` sits where
+  the code looks for it, and a deployment using `AUTO_LOGOFF_TIME`
+  rather than `AUTO_RESTART_TIME` has never written a `restarter.log` —
+  the unchanged-behaviour case.
+- Gateway's real auto-restart itself is still not reproduced here — no
+  maintainer deployment sets `AUTO_RESTART_TIME`, and the reporter
+  reports their own equivalent patch working on the first night in
+  production (issue #23). `monitor_loop`'s adopted-exit branch is
+  exercised only indirectly, through `_recover_jvm_or_escalate`.
 
 ## [0.8.1] - 2026-08-24
 

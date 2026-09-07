@@ -2038,6 +2038,16 @@ class TestRecoverJvmMaintenanceGuard(unittest.TestCase):
     recovery environment.
     """
 
+    def setUp(self):
+        # These test the v0.5.10 guard, not issue #23 adoption. Without
+        # this patch each one runs the real adoption path first and pays
+        # its full detection budget (grace + socket probe) on a host that
+        # has neither a restarter.log nor an agent socket.
+        p = patch.object(gc, "_adopt_self_restarted_gateway",
+                         return_value=False)
+        p.start()
+        self.addCleanup(p.stop)
+
     def test_code_0_in_window_calls_delay_before_restart(self):
         call_order = []
         with patch("gateway_controller._is_ibkr_maintenance_window",
@@ -2544,11 +2554,14 @@ class TestAdoptedProcess(unittest.TestCase):
         a.kill()
         self.assertEqual(a.poll(), gc._EXIT_STATUS_UNOBSERVABLE)
 
-    @unittest.skipUnless(os.path.isdir("/proc"), "needs Linux /proc")
     def test_unreaped_zombie_counts_as_exited(self):
         # In the container the self-restarted JVM is reparented to
         # run.sh; if its exit were ever left unreaped, os.kill(pid, 0)
-        # would still succeed on the zombie. /proc's state must win.
+        # would still succeed on the zombie. /proc's state must win —
+        # and where there is no /proc, the WNOHANG reap must. Without
+        # one of the two a dead JVM looks alive forever and teardown
+        # burns its whole SIGTERM grace on it (caught by the end-to-end
+        # adoption tests in test_core_logic.py).
         p = _sleeper()
         a = gc._AdoptedProcess(p.pid)
         p.kill()
@@ -2580,7 +2593,8 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
                 "_command_server_app",
                 "_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS",
                 "_AUTO_RESTART_API_TIMEOUT_SECONDS",
-                "_AUTO_RESTART_DETECT_GRACE_SECONDS")
+                "_AUTO_RESTART_DETECT_GRACE_SECONDS",
+                "_AUTO_RESTART_PROBE_SECONDS")
 
     def setUp(self):
         self._saved = {k: getattr(gc, k) for k in self._GLOBALS}
@@ -2591,6 +2605,9 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         gc._AUTO_RESTART_ADOPT_TIMEOUT_SECONDS = 1
         gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 2
         gc._AUTO_RESTART_DETECT_GRACE_SECONDS = 0
+        # Off by default here so each test says explicitly whether it is
+        # exercising the restarter.log path or the socket-probe fallback.
+        gc._AUTO_RESTART_PROBE_SECONDS = 0
 
     def tearDown(self):
         for k, v in self._saved.items():
@@ -2630,11 +2647,40 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         return result, mocks
 
     def test_not_a_self_restart_returns_false_untouched(self):
+        # No restarter.log and the probe disabled: nothing to adopt.
         result, mocks = self._run(self._adopting(age=None))
         self.assertFalse(result)
         mocks["_wait_for_self_restarted_agent"].assert_not_called()
         self.assertIsNone(gc.GATEWAY_PROC)
         self.assertEqual(gc.JVM_PID, 27)
+
+    def test_socket_probe_adopts_when_no_restarter_log_is_written(self):
+        # Verified 2026-09-06 on Gateway 10.45.1g: the install4j restarter
+        # ships but writes no restarter.log. A live JVM answering our
+        # agent socket that we did not spawn is direct evidence of a
+        # self-restart, so adoption must not depend on the log alone.
+        gc._AUTO_RESTART_PROBE_SECONDS = 5
+        result, mocks = self._run(self._adopting(age=None))
+        self.assertTrue(result)
+        self.assertEqual(gc.JVM_PID, 5020)
+        # The probe result is reused; no second wait for the same JVM.
+        mocks["_wait_for_self_restarted_agent"].assert_called_once_with(27, 5)
+        mocks["signal_ready"].assert_called_once()
+
+    def test_socket_probe_finding_nothing_falls_through(self):
+        gc._AUTO_RESTART_PROBE_SECONDS = 5
+        result, _ = self._run(self._adopting(age=None, new_pid=None))
+        self.assertFalse(result)
+        self.assertIsNone(gc.GATEWAY_PROC)
+        self.assertEqual(gc.JVM_PID, 27)
+
+    def test_socket_probe_skipped_on_a_crash(self):
+        # A non-zero exit is a crash, not a self-restart: the relaunch
+        # path owns it and must not be delayed by the probe.
+        gc._AUTO_RESTART_PROBE_SECONDS = 5
+        result, mocks = self._run(self._adopting(age=None), exit_code=1)
+        self.assertFalse(result)
+        mocks["_wait_for_self_restarted_agent"].assert_not_called()
 
     def test_grace_recheck_catches_restarter_write_after_exit(self):
         # The restarter's first write can trail the code-0 exit by a

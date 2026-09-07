@@ -2761,6 +2761,18 @@ _AUTO_RESTART_ADOPT_TIMEOUT_SECONDS = int(os.environ.get(
 # its own TimeZone, the container another) and would fire on any code-0
 # exit that happened to land in the window.
 _AUTO_RESTART_DETECT_WINDOW_SECONDS = 120
+# Not every install4j build writes restarter.log. Verified 2026-09-06 on
+# Gateway 10.45.1g: the .install4j/restarter binary ships and runs, but
+# invoking it produces no restarter.log, while the issue #23 reporter's
+# 10.45.1j box writes one with install4j action-log content. So the log
+# is the fast, unambiguous signal — not the only one. When it is absent
+# or stale after a clean exit, the controller spends this long asking
+# the agent socket a more direct question: is a live Gateway JVM that we
+# did not spawn already answering on it? A yes means Gateway restarted
+# itself no matter what install4j logged, and launching a second
+# instance is precisely the issue #23 bug.
+_AUTO_RESTART_PROBE_SECONDS = int(os.environ.get(
+    "AUTO_RESTART_PROBE_SECONDS", "15"))
 # After a clean (code-0) exit, keep re-checking restarter.log for this
 # long before concluding the exit was not a self-restart: the
 # restarter's first write can trail the JVM exit by a couple of seconds
@@ -2929,6 +2941,19 @@ class _AdoptedProcess:
         self._starttime = stat[1] if stat is not None else None
 
     def _alive(self):
+        # If this PID happens to be our child after all (it isn't in
+        # production, where install4j spawned it — but it is in the
+        # end-to-end tests), reap it so its exit is observable. On a
+        # non-child this raises ECHILD and we fall through to the
+        # signal- and /proc-based checks below. Without this, a dead
+        # JVM on a host with no /proc looks alive forever and teardown
+        # burns its full SIGTERM grace on a process that is already gone.
+        try:
+            reaped, _ = os.waitpid(self.pid, os.WNOHANG)
+            if reaped == self.pid:
+                return False
+        except (ChildProcessError, OSError):
+            pass
         try:
             os.kill(self.pid, 0)
         except ProcessLookupError:
@@ -3076,17 +3101,42 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
     global _LAST_ADOPTED_RESTART_MTIME
 
     old_pid = JVM_PID
+    clean_exit = exit_code in (0, _EXIT_STATUS_UNOBSERVABLE)
     age = _install4j_restarter_age()
-    if age is None and exit_code in (0, _EXIT_STATUS_UNOBSERVABLE):
+    if age is None and clean_exit:
         grace_deadline = time.monotonic() + _AUTO_RESTART_DETECT_GRACE_SECONDS
         while age is None and time.monotonic() < grace_deadline:
             time.sleep(0.5)
             age = _install4j_restarter_age()
+
+    first_candidate = None
     if age is None:
-        return False
+        # No usable restarter.log. On a crash, stop here — that is a
+        # genuine failure and the relaunch path owns it.
+        if not clean_exit or _AUTO_RESTART_PROBE_SECONDS <= 0:
+            return False
+        # On a clean exit, ask the agent socket directly before
+        # relaunching. Only a running JVM answers it (a dead one leaves
+        # the socket file behind but nothing listening), so a reply from
+        # a PID that is not ours is positive evidence of a self-restart.
+        log.info("AUTORESTART: no fresh install4j restarter.log; probing "
+                 f"{AGENT_SOCKET} for up to {_AUTO_RESTART_PROBE_SECONDS}s "
+                 "in case Gateway restarted itself anyway")
+        first_candidate = _wait_for_self_restarted_agent(
+            old_pid, _AUTO_RESTART_PROBE_SECONDS)
+        if first_candidate is None:
+            return False
+        detected_via = "agent_socket"
+        log.warning(f"AUTORESTART: a Gateway JVM we did not spawn "
+                    f"(pid={first_candidate}) is already answering on "
+                    f"{AGENT_SOCKET} — treating this as Gateway's own "
+                    "restart and NOT launching a second instance")
+    else:
+        detected_via = "restarter_log"
 
     mtime = _install4j_restarter_mtime()
-    if mtime is not None and mtime == _LAST_ADOPTED_RESTART_MTIME:
+    if (detected_via == "restarter_log" and mtime is not None
+            and mtime == _LAST_ADOPTED_RESTART_MTIME):
         # Same restart we already handled: the adopted JVM came up and
         # then died inside the 120s freshness window. That's a failure
         # of the restarted instance, not a restart in progress — go
@@ -3096,17 +3146,19 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                  "failure, not another self-restart")
         return False
 
-    log.info(f"AUTORESTART: install4j restarter ran {age:.0f}s ago "
-             f"({_install4j_restarter_log_path()})")
-    log.warning(f"AUTORESTART: Gateway is restarting itself — NOT launching "
-                f"a second instance (old pid={old_pid}); waiting up to "
-                f"{_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS}s for the new JVM's "
-                f"agent on {AGENT_SOCKET}")
-    _LAST_ADOPTED_RESTART_MTIME = mtime
+    if detected_via == "restarter_log":
+        log.info(f"AUTORESTART: install4j restarter ran {age:.0f}s ago "
+                 f"({_install4j_restarter_log_path()})")
+        log.warning(f"AUTORESTART: Gateway is restarting itself — NOT "
+                    f"launching a second instance (old pid={old_pid}); "
+                    f"waiting up to {_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS}s "
+                    f"for the new JVM's agent on {AGENT_SOCKET}")
+        _LAST_ADOPTED_RESTART_MTIME = mtime
     t0 = time.monotonic()
 
     def _alert(level, status, new_pid, why):
         level(f"ALERT_AUTO_RESTART mode={TRADING_MODE} status={status} "
+              f"detected_via={detected_via} "
               f"old_pid={old_pid} new_pid={new_pid} "
               f"elapsed_seconds={time.monotonic() - t0:.0f} "
               f"reason=\"{why}\"")
@@ -3119,9 +3171,12 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
     tried = set()
     adopt_deadline = time.monotonic() + _AUTO_RESTART_ADOPT_TIMEOUT_SECONDS
     while True:
-        wait_budget = max(1.0, adopt_deadline - time.monotonic())
-        new_pid = _wait_for_self_restarted_agent(
-            old_pid, wait_budget, exclude=tried)
+        if first_candidate is not None:
+            new_pid, first_candidate = first_candidate, None
+        else:
+            wait_budget = max(1.0, adopt_deadline - time.monotonic())
+            new_pid = _wait_for_self_restarted_agent(
+                old_pid, wait_budget, exclude=tried)
         if new_pid is None or new_pid in tried:
             _alert(log.warning, "failed_no_agent", "none",
                    f"no new Gateway JVM answered on {AGENT_SOCKET} within "

@@ -412,10 +412,19 @@ brought it back as a cold login — with an IB Key push every night and
 
 ### Recovery
 
-Automatic. The controller only trusts install4j's own evidence — the
-mtime of `restarter.log` next to the launcher — never the wall-clock
-versus `AUTO_RESTART_TIME` (whose timezone it cannot know). Every
-failure inside the adoption path (no `restarter.log`, a stale one, no
+Automatic, and never on a wall-clock comparison against
+`AUTO_RESTART_TIME` (whose timezone the controller cannot know). Two
+signals, in order:
+
+1. **install4j's own evidence** — the mtime of `restarter.log` next to
+   the launcher.
+2. **A live JVM the controller didn't spawn**, answering on the agent
+   socket within `AUTO_RESTART_PROBE_SECONDS` of a clean exit. Not
+   every install4j build writes `restarter.log` (Gateway 10.45.1g's
+   restarter writes none), so this fallback keeps the fix working where
+   the log never appears.
+
+Every failure inside the adoption path (neither signal, a stale log, no
 new JVM within `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`, an API port that
 never opens) falls through to the previous behaviour, i.e. the fast
 in-place relaunch, after tearing down any half-adopted instance.
