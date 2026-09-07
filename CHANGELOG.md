@@ -158,11 +158,28 @@ and the project follows [Semantic Versioning](https://semver.org/).
   directory the relative log path resolves against, and a deployment
   using `AUTO_LOGOFF_TIME` rather than `AUTO_RESTART_TIME` has never
   written a `restarter.log` — the unchanged-behaviour case.
-- Gateway's real auto-restart itself is still not reproduced here — no
-  maintainer deployment sets `AUTO_RESTART_TIME`, and the reporter
-  reports their own equivalent patch working on the first night in
-  production (issue #23). `monitor_loop`'s adopted-exit branch is
-  exercised only indirectly, through `_recover_jvm_or_escalate`.
+- **Driven against a real Gateway and the real restarter**
+  (`tests/integration/gateway_autorestart_drill.py`, 17/17 on Gateway
+  10.45.1g, 2026-09-07). The drill launches Gateway through its real
+  install4j launcher with the real agent, invokes
+  `.install4j/restarter` with the environment Gateway itself carries,
+  and runs the recovery path against whatever comes up. Observed: the
+  restarter inherits `INSTALL4J_ADD_VM_PARAMS` and loads the agent; it
+  holds the agent socket for about a second between the old JVM dying
+  and the replacement binding it (the window the restarter
+  discrimination exists for, now observed rather than hypothesised);
+  and the controller adopts the replacement — a JVM it never spawned —
+  in 0.5 s, with `do_restart_in_place` never called and exactly one
+  Gateway left running. No credentials are used and nothing
+  authenticates, so no session slot is touched. Not part of `make
+  test`; it needs a Gateway install, an X display and ~2 minutes.
+- One fact the drill stands in for: with no credentials the replacement
+  Gateway sits at its login dialog and never opens its API port, so
+  "the session is preserved across the restart" is asserted rather than
+  observed. That is IBKR behaviour the controller neither causes nor
+  changes, documented by IBC and reported in production by the issue
+  reporter. `monitor_loop`'s adopted-exit branch is exercised only
+  indirectly, through `_recover_jvm_or_escalate`.
 
 ## [0.8.1] - 2026-08-24
 
