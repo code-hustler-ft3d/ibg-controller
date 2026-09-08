@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -457,16 +457,33 @@ def agent_gettext(name):
     return None
 
 
-def agent_click(name):
-    """Click an AbstractButton by accessible name. Returns True on success."""
+def _login_button_labels(mode=None):
+    """Return ``(expected, fallback)`` Log In button labels for a trading
+    mode. Gateway renames the button: "Log In" on live, "Paper Log In"
+    on paper. Probing the expected one first keeps the routine case off
+    the ERROR log (see the call site in ``handle_login``)."""
+    if (mode if mode is not None else TRADING_MODE) == "paper":
+        return ("Paper Log In", "Log In")
+    return ("Log In", "Paper Log In")
+
+
+def agent_click(name, quiet=False):
+    """Click an AbstractButton by accessible name. Returns True on success.
+
+    ``quiet=True`` demotes a failed click to DEBUG. Use it only where a
+    miss is an expected outcome the caller handles — probing a button
+    whose label varies, for instance — so that real failures stay at
+    ERROR and log-scraping alert rules don't fire on routine probes.
+    """
+    level = log.debug if quiet else log.error
     try:
         resp = _agent_request(f"CLICK {name}")
     except Exception as e:
-        log.error(f"agent CLICK {name!r}: {type(e).__name__}: {e}")
+        level(f"agent CLICK {name!r}: {type(e).__name__}: {e}")
         return False
     if resp.startswith("OK"):
         return True
-    log.error(f"agent CLICK {name!r}: {resp}")
+    level(f"agent CLICK {name!r}: {resp}")
     return False
 
 
@@ -1197,7 +1214,13 @@ def handle_login(app):
     # Log In button. Gateway renames the button based on trading mode:
     #   Live Trading  → "Log In"
     #   Paper Trading → "Paper Log In"
-    if not (agent_click("Log In") or agent_click("Paper Log In")):
+    # Try the label this mode is expected to use first, and probe quietly:
+    # before v0.9.0 every paper login emitted a spurious
+    # `agent CLICK 'Log In': ERR not_found` at ERROR level immediately
+    # before succeeding on the second label, which false-positived any
+    # "ERROR means page someone" rule.
+    expected, fallback = _login_button_labels()
+    if not (agent_click(expected, quiet=True) or agent_click(fallback)):
         log.error("Log In / Paper Log In button click failed via agent")
         # Diagnostic: dump the login window's component tree via the agent.
         # This is an ERROR-level (always-emitted) dump of the login frame,

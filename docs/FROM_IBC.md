@@ -166,9 +166,11 @@ make                         # builds agent jar + stages controller
 docker build -t ibg-controller:local .
 ```
 
-The shipped `Dockerfile` extends `ghcr.io/gnzsnz/ib-gateway:stable`.
-For reproducible builds, pin to a digest via `--build-arg
-UPSTREAM_IMAGE=...@sha256:...`.
+The shipped `Dockerfile` defaults to the same digest-pinned base the
+release images use, so a bare `docker build .` reproduces what we
+publish. Override `--build-arg UPSTREAM_IMAGE=...` only to build
+against a different Gateway; if you do, pass `IB_GATEWAY_VERSION` too
+so the image label reports what it actually contains.
 
 Any gnzsnz base works. To build against their `latest` channel instead
 of `stable` — a newer Gateway line, e.g. for the in-app browser the

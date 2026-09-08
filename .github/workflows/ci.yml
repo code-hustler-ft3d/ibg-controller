@@ -185,8 +185,14 @@ jobs:
 
       - name: Build image against ${{ matrix.upstream }}
         run: |
+          # Pass IB_GATEWAY_VERSION too: since v0.9.0 the Dockerfile's
+          # ARG defaults are the release pin, so without this a matrix
+          # image built on another base would carry the release version
+          # in its label and misreport what it actually contains.
+          MATRIX_UPSTREAM='${{ matrix.upstream }}'
           docker build \
-            --build-arg UPSTREAM_IMAGE=${{ matrix.upstream }} \
+            --build-arg UPSTREAM_IMAGE="$MATRIX_UPSTREAM" \
+            --build-arg IB_GATEWAY_VERSION="${MATRIX_UPSTREAM##*:}" \
             -t ibg-controller:matrix-test .
 
       - name: Container-level module-load smoke test
