@@ -19,6 +19,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
   probe the agent socket when no `restarter.log` was written. The probe
   plus a 5 s late-log grace is the only added latency, and only on clean
   exits.
+- added passkey dialog handling
 
 ### Changed
 
