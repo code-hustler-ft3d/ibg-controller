@@ -4,6 +4,261 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-09-07
+
+### Added
+
+- **`ALERT_AUTO_RESTART` grep-contract token** — `status=adopted`
+  (INFO) or `failed_no_agent` / `failed_jvm_exited` / `failed_login` /
+  `failed_api_timeout` (WARNING), one line per adoption attempt. See
+  [docs/OBSERVABILITY.md](docs/OBSERVABILITY.md).
+- **`AUTO_RESTART_ADOPT`** (default `yes`) — set to `no` to restore the
+  always-relaunch behaviour; **`AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`**
+  (default `90`) — how long to wait for the self-restarted JVM's agent;
+  and **`AUTO_RESTART_PROBE_SECONDS`** (default `15`) — how long to
+  probe the agent socket when no `restarter.log` was written. The probe
+  plus a 5 s late-log grace is the only added latency, and only on clean
+  exits.
+
+### Changed
+
+- **Upstream base bumped 10.45.1g → 10.45.1j** (still the gnzsnz
+  `:stable` line; digest `sha256:91165c07…`). Three upstream patch
+  releases, and on arm64 it drops 112 MB of dead weight: 10.45.1g's
+  aarch64 image carried `jxbrowser-linux64-8.9.4.jar`, whose
+  `libtoolkit.so` is an x86-64 ELF binary that cannot execute there. It
+  was a side effect of the pre-#397 build, which assembled aarch64
+  images from IBKR's **x64** installer plus a Zulu JRE. Upstream
+  gnzsnz/ib-gateway-docker#397 moved aarch64 to IBKR's native arm
+  installer, first available at 10.45.1h.
+- The arm64 Java runtime changes with it: 10.45.1g used
+  `/usr/local/zulu17…`, while 10.45.1j uses install4j's own JRE
+  registry (`/usr/local/i4j_jres/…`) with no Zulu present. The
+  `release-image.yml` comment describing arm64 as Zulu-based is
+  corrected.
+- CI matrix gains 10.45.1j.
+- **CI now builds against upstream's `latest` channel as well (issue
+  #24).** The `gateway-version-matrix` job gains
+  `ghcr.io/gnzsnz/ib-gateway:10.50.1e`, so a layout change on the newer
+  Gateway line surfaces here rather than in someone's build. Build and
+  boot only — login, 2FA and the dialog handlers are verified against
+  10.45.x, and nothing here claims otherwise. Version tags, never the
+  floating `:stable` / `:latest`, so PR runs stay deterministic.
+- The `Dockerfile` header and `docs/FROM_IBC.md` document building
+  against any gnzsnz base, including the `latest` channel, via
+  `--build-arg UPSTREAM_IMAGE=`. No repo change is needed to do this;
+  the recipe was simply undocumented.
+
+### Fixed
+
+- **A bare `docker build .` no longer silently builds the wrong base.**
+  `UPSTREAM_IMAGE` defaulted to the moving `:stable` tag, so a local
+  build picked up whatever `:stable` sat in the Docker cache — in the
+  2026-09-07 pre-release spike, a five-month-old base — and labelled it
+  `IB_GATEWAY_VERSION=unknown`. A maintainer could therefore "validate"
+  a Gateway version that never ran. The Dockerfile's ARG defaults are
+  now the release pin itself, making the Dockerfile the single source of
+  truth: `release-image.yml` passes no build args and inherits them, and
+  a bare build reproduces the published image. The CI matrix passes
+  `IB_GATEWAY_VERSION` alongside its `UPSTREAM_IMAGE` override so
+  matrix images still report what they actually contain.
+- **Paper logins no longer emit a spurious `ERROR`.** `handle_login`
+  probed `"Log In"` before `"Paper Log In"`, so every paper login logged
+  `agent CLICK 'Log In': ERR not_found` at ERROR level immediately
+  before succeeding — enough to false-positive an "ERROR means page
+  someone" rule. The mode's expected label is now tried first, and the
+  probe uses a new `quiet=` argument on `agent_click` that demotes an
+  expected miss to DEBUG. Real failures stay at ERROR.
+
+
+- **Gateway's own daily auto-restart no longer races the controller
+  into a cold login (issue #23).** With `AUTO_RESTART_TIME` set,
+  Gateway restarts *itself* at that time: the JVM spawns install4j's
+  `.install4j/restarter`, which shuts the calling launcher down and
+  re-executes it, and the replacement re-uses the session credentials
+  — no login, no second factor. `monitor_loop` saw that code-0 exit as
+  a crash and `do_restart_in_place` launched a **second** Gateway ~2 s
+  before install4j launched its own: two instances on one display and
+  one settings dir, the agent drove the wrong window, login failed,
+  the controller halted, and the container's restart policy brought
+  it back as a cold login — a fresh IB Key push every night (the
+  reporter measured 23 container restarts and 1-2 h without a session
+  per night over five days; an otherwise identical paper container
+  with no auto-restart time ran 13 days clean).
+  - On a JVM exit the controller now checks the mtime of install4j's
+    `restarter.log` next to the launcher. That file being freshly
+    written is the restarter's own statement that it ran. Not a
+    wall-clock comparison against `AUTO_RESTART_TIME`, which would have
+    to guess which timezone Gateway's Lock-and-Exit field is in and
+    would fire on any code-0 exit that landed in the window.
+  - **`restarter.log`'s location depends on the working directory.**
+    The restarter writes it via `-Dinstall4j.alternativeLogfile=`
+    `./.install4j/restarter.log` — a *relative* path, resolved against
+    the working directory it inherits from Gateway's JVM. Gateway runs
+    with its install directory as the working directory (verified in a
+    running container), so in a real auto-restart the log does land
+    exactly where this code looks for it. But nothing guarantees that
+    for every install, so the log is the primary signal, not the only
+    one: after a clean exit with no usable log the controller asks a
+    more direct question for up to `AUTO_RESTART_PROBE_SECONDS`
+    (default 15) — is a live Gateway JVM we never spawned already
+    answering on our agent socket? Only a running JVM can answer it,
+    and launching a second instance in that state is exactly this bug.
+  - **The restarter is itself a JVM, and it loads our agent.** Verified
+    2026-09-06 by running the real `.install4j/restarter` binary: it
+    inherits `INSTALL4J_ADD_VM_PARAMS` from the JVM that spawned it, so
+    it loads `-javaagent:gateway-input-agent.jar`, binds the agent
+    socket, and answers `GET_PID` with *its own* PID for the couple of
+    seconds it lives. Adoption now identifies it by the
+    `-Dinstall4j.alternativeLogfile` flag that Gateway's own JVM does
+    not carry (`i4jruntime.jar` is not a discriminator — Gateway's
+    cmdline contains it too) and waits for the Gateway JVM it launches
+    instead of adopting a process that is about to exit. Seeing the
+    restarter on the socket is itself conclusive evidence of a
+    self-restart. `ALERT_AUTO_RESTART` reports which signal fired via
+    `detected_via=restarter_log|agent_socket|install4j_restarter`.
+  - If it was just written: no relaunch. The controller waits for the
+    instance install4j is bringing up (it inherits
+    `INSTALL4J_ADD_VM_PARAMS` through the restarter, so its agent binds
+    the same socket and reports its PID), adopts it as `GATEWAY_PROC`
+    through a Popen-shaped stand-in (`os.kill(pid, 0)` liveness,
+    zombie- and PID-reuse-aware via `/proc`), and resumes monitoring
+    as soon as the API port is open. The reporter's equivalent patch
+    in their production: three seconds, no login dialog, no push, no
+    container restart.
+  - If the session was **not** preserved and a login dialog appears
+    instead (e.g. IBKR's weekly full re-authentication), the existing
+    re-auth pipeline is driven on the adopted JVM.
+  - If the first JVM to answer dies before its API port opens, the
+    controller looks once more for another instance from the restarter
+    chain before giving up, and never re-offers a PID it already found
+    dead.
+  - Fail-safe: no `restarter.log`, a stale or far-future one, one that
+    hasn't changed since the last adoption attempt (so a JVM that dies
+    inside the 120 s freshness window is treated as a real failure, not
+    another self-restart), no new PID within
+    `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (default 90), or an API port
+    that never opens — each falls through to the previous behaviour
+    (`do_restart_in_place`), tearing down a half-adopted instance first
+    so it isn't left running alongside the relaunch.
+  - Adoption is ordered ahead of the v0.5.10 maintenance-window guard:
+    `AUTO_RESTART_TIME` commonly sits inside that window, and an
+    8-minute sleep is pointless when there is nothing to re-auth. The
+    guard still applies on the branch that *does* re-auth (session not
+    preserved).
+  - Reported, diagnosed, and prototyped in production by
+    @maciejlaska.
+
+### Fixed during validation
+
+- **A dead adopted JVM could look alive indefinitely.** `_AdoptedProcess`
+  inferred liveness from `os.kill(pid, 0)` plus `/proc`. Where `/proc`
+  is absent, or the exit is left unreaped, a dead JVM still answered
+  "alive", so teardown spent its full `JVM_TEARDOWN_GRACE_SECONDS`
+  SIGTERM wait and then a SIGKILL on a process that had already exited —
+  turning a 6 s failure path into a 40 s one and emitting a spurious
+  `ALERT_JVM_UNCLEAN_SHUTDOWN`. Liveness now attempts a `WNOHANG` reap
+  first (a no-op in production, where the JVM is install4j's child, not
+  ours) before the signal and `/proc` checks. Caught by the end-to-end
+  tests below, not by the mocked unit tests.
+
+### Validation
+
+- **Live-spiked on a real dual-mode account 2026-09-07 (Gateway
+  10.45.1j, arm64), the maintainer spike `CONTRIBUTING.md` requires
+  before release.** Both modes reached `MONITORING` (live 18:48:41,
+  paper 18:49:29), API ports 4001/4002 open, `/health` healthy for
+  both, and **zero `ALERT_*` tokens of any kind**. The previously
+  unverified surface all passed on the new base: agent injected into
+  install4j's JRE, login dialog discovered, 2FA method prompt matched
+  and TOTP typed, disclaimers dismissed. The outgoing container
+  released both IBKR session slots cleanly (`ALERT_CLEAN_LOGOUT
+  status=succeeded`) before the swap.
+- install4j's bundled JRE on 10.45.1j is Zulu 17.0.17, so the agent's
+  `--release 17` bytecode still matches the runtime it loads into.
+- Still pending at release time: the first `AUTO_LOGOFF_TIME` cycle on
+  10.45.1j. Expect one new INFO line per mode (`AUTORESTART: no fresh
+  install4j restarter.log; probing …`) and ~20 s of added detection
+  delay before the normal in-place restart. No `ALERT_AUTO_RESTART`
+  should appear: with `AUTO_RESTART_TIME` unset, install4j's restarter
+  never runs.
+
+
+- New unit coverage: `_install4j_restarter_age` (fresh / stale /
+  missing / future-dated log, unknown launcher, discovery fallback),
+  `_AdoptedProcess` against real child processes (live, terminated,
+  killed, gone-before-adoption, wait timeout; unreaped-zombie and
+  `/proc` parsing on Linux), `_adopt_self_restarted_gateway`
+  orchestration (not a self-restart, grace re-check for a late
+  restarter write, no grace on non-zero exits, no new agent, adopted
+  via API port, login dialog re-driven, the maintenance guard applying
+  to that re-login, login failure and API timeout leaving the adopted
+  instance in place for teardown, adopted JVM dying, retry onto a
+  second candidate from the restarter chain, the same restarter.log
+  not being adopted twice, disclaimer dismissal while waiting),
+  `_recover_jvm_or_escalate`
+  ordering (adoption before the maintenance guard and the fast
+  restart; half-adopted teardown; exception fall-through; env
+  kill-switch; alive-JVM skip; unobservable exit status treated like
+  0 by the guard), and the `attempt_reauth` / `_redrive_login` split.
+- **End-to-end coverage with real processes**
+  (`TestAutoRestartAdoptionEndToEnd`): a stand-in Gateway JVM binds the
+  agent's Unix socket the way the real agent does and optionally opens
+  an API port, so adoption runs against real PIDs, real signals, a real
+  socket and the real `_AdoptedProcess` — only Gateway itself is
+  substituted. Covers the self-restart being adopted with no second
+  launch, adoption via the socket probe when no `restarter.log` is
+  written, a genuine crash still falling through to the relaunch inside
+  a bounded detection budget, a stale log being ignored, an adopted JVM
+  dying before its API port, and the same restart not being adopted
+  twice.
+- **The load-bearing assumption is now verified rather than assumed.**
+  The fix rests on the restarted Gateway inheriting
+  `INSTALL4J_ADD_VM_PARAMS`, hence loading the agent and reporting a new
+  PID on the same socket. Running the real `.install4j/restarter` binary
+  in a container off the release image confirms the inheritance
+  directly: given a deliberately bogus `-javaagent` value the
+  restarter's own VM refused to start, and given the real agent jar it
+  logged `[gateway-input-agent] listening on <socket>` and answered
+  `GET_PID`. The environment does propagate through the restarter chain.
+- Path assumptions checked against a real install (Gateway 10.45.1g in
+  the maintainer's running container): `.install4j/restarter` sits where
+  the code looks for it, Gateway's working directory is the install
+  directory the relative log path resolves against, and a deployment
+  using `AUTO_LOGOFF_TIME` rather than `AUTO_RESTART_TIME` has never
+  written a `restarter.log` — the unchanged-behaviour case.
+- **Driven against a real Gateway and the real restarter**
+  (`tests/integration/gateway_autorestart_drill.py`, 17/17 on Gateway
+  10.45.1g, 2026-09-07). The drill launches Gateway through its real
+  install4j launcher with the real agent, invokes
+  `.install4j/restarter` with the environment Gateway itself carries,
+  and runs the recovery path against whatever comes up. Observed: the
+  restarter inherits `INSTALL4J_ADD_VM_PARAMS` and loads the agent; it
+  holds the agent socket for about a second between the old JVM dying
+  and the replacement binding it (the window the restarter
+  discrimination exists for, now observed rather than hypothesised);
+  and the controller adopts the replacement — a JVM it never spawned —
+  in 0.5 s, with `do_restart_in_place` never called and exactly one
+  Gateway left running. No credentials are used and nothing
+  authenticates, so no session slot is touched. Not part of `make
+  test`; it needs a Gateway install, an X display and ~2 minutes.
+- One fact the drill stands in for: with no credentials the replacement
+  Gateway sits at its login dialog and never opens its API port, so
+  "the session is preserved across the restart" is asserted rather than
+  observed. That is IBKR behaviour the controller neither causes nor
+  changes, documented by IBC and reported in production by the issue
+  reporter. `monitor_loop`'s adopted-exit branch is exercised only
+  indirectly, through `_recover_jvm_or_escalate`.
+
+- `tests/integration/gateway_autorestart_drill.py` run against a
+  controller image built on 10.45.1j: **17/17**, so the launcher, agent
+  injection and the issue #23 restart-adoption path all work on the
+  changed arm64 build. The same drill passes on 10.45.1g and on
+  10.50.1e.
+- Login, 2FA and the dialog handlers are unchanged by this bump but are
+  not re-verified against a real account here; they are exercised on
+  10.45.x in production.
+
 ## [0.8.1] - 2026-08-24
 
 ### Added

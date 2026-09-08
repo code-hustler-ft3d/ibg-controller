@@ -4,24 +4,40 @@
 # (agent jar + Python controller) and swaps upstream's run.sh for the
 # controller-aware variant shipped alongside.
 #
-# UPSTREAM_IMAGE defaults to the :stable moving tag for low-friction
-# local builds. Production consumers should pin a digest via --build-arg
-# so rebuilds are reproducible, e.g.:
+# UPSTREAM_IMAGE defaults to the SAME digest-pinned base the release
+# workflow publishes, so a bare `docker build .` reproduces the shipped
+# image. This is the single source of truth for the pin — release-image.yml
+# passes no build args and inherits these defaults. Bump both ARGs together.
 #
-#   docker build -t ibg-controller:local \
-#     --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1c@sha256:... .
+# It used to default to the moving `:stable` tag, which was a trap: a bare
+# build silently picked up whatever `:stable` happened to be in the local
+# cache (a five-month-old base, in one 2026-09-07 pre-release spike) and
+# labelled it `unknown`, so a maintainer could "validate" a version that
+# never ran.
+#
+# Any gnzsnz base works, including their `latest` channel if you want a
+# newer Gateway than the stable line carries (issue #24). This layer is
+# three apt packages and four COPYs, so it is a pull plus about a
+# minute, not a rebuild of the upstream image:
+#
+#   docker build -t ibg-controller:edge \
+#     --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:latest \
+#     --build-arg IB_GATEWAY_VERSION=10.50.1e .
+#
+# CI builds against that line too, but only as a build-and-boot check —
+# the login, 2FA and dialog paths are verified against 10.45.x.
 #
 # Build prerequisites: run `make` in the repo root first to populate
 # dist/ with the agent jar and the controller .py, then `docker build .`
 # from the same directory.
 
-ARG UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:stable
+ARG UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1j@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
 FROM ${UPSTREAM_IMAGE}
 
 # Re-declare post-FROM so they're in scope for the LABEL below (a build ARG
 # declared before FROM is only visible to the FROM instruction itself).
 ARG UPSTREAM_IMAGE
-ARG IB_GATEWAY_VERSION=unknown
+ARG IB_GATEWAY_VERSION=10.45.1j
 
 # Self-describing image: record the bundled IB Gateway version and the exact
 # upstream base so `docker inspect` (and the GHCR page) report them without

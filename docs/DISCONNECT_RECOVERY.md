@@ -358,6 +358,9 @@ the controller recovers by relaunching.
 
 The controller's `_recover_jvm_or_escalate` helper (v0.4.7+) handles
 this automatically:
+0. If install4j's `restarter.log` was just written, this was Gateway's
+   own auto-restart, not a crash — adopt the new instance instead of
+   relaunching (see the next scenario).
 1. Fast in-place restart (`do_restart_in_place`) — no cool-down.
 2. If the fast path fails, fall through to
    `_escalate_to_jvm_restart` (v0.4.6 silent cool-down).
@@ -365,6 +368,72 @@ this automatically:
    scenario above.
 
 Operator action is only needed if the exhausted token fires.
+
+---
+
+## Scenario: Gateway's own daily auto-restart (`AUTO_RESTART_TIME`)
+
+**TL;DR**: with an auto-restart time configured, Gateway restarts
+*itself* every day and keeps the session — no login, no second
+factor. The controller adopts the new JVM instead of launching its
+own. No operator action needed; `ALERT_AUTO_RESTART status=adopted`
+once per night per mode is the expected signal.
+
+### Symptoms
+
+- Monitor logs show, at the configured time:
+  ```
+  Gateway JVM exited with code 0
+  AUTORESTART: install4j restarter ran 0s ago (/home/ibgateway/Jts/ibgateway/10.45.1j/.install4j/restarter.log)
+  AUTORESTART: Gateway is restarting itself — NOT launching a second instance (old pid=27); waiting up to 90s for the new JVM's agent on /tmp/gateway-input-live.sock
+  AUTORESTART: adopted Gateway pid=5020 (was 27) after 0s
+  ALERT_AUTO_RESTART mode=live status=adopted old_pid=27 new_pid=5020 elapsed_seconds=3 reason="API port 4001 open — session preserved across Gateway's auto-restart, no login and no second factor required"
+  ```
+- `/health` flips to `unhealthy` for a few seconds (`jvm_alive:
+  false`, then a new `jvm_pid`) and back to `healthy`.
+- On the night of IBKR's weekly full re-authentication the session is
+  *not* preserved: a login dialog appears on the self-restarted JVM
+  and the controller drives the normal re-auth pipeline on it
+  (`status=adopted` with `reason="session not preserved; ..."`, and a
+  second factor is required as usual).
+
+### Root cause
+
+Gateway's Lock-and-Exit "Set Auto Restart Time" makes the JVM spawn
+install4j's `.install4j/restarter`, which shuts the calling launcher
+down and re-executes it. The replacement re-uses the session
+credentials. Before the issue #23 fix the controller treated the
+code-0 exit as a crash and launched a **second** Gateway about two
+seconds before install4j launched its own: two instances on one X
+display and one settings dir, the agent drove the wrong window,
+login failed, the controller halted, and the container restart policy
+brought it back as a cold login — with an IB Key push every night and
+1-2 h without a usable session.
+
+### Recovery
+
+Automatic, and never on a wall-clock comparison against
+`AUTO_RESTART_TIME` (whose timezone the controller cannot know). Two
+signals, in order:
+
+1. **install4j's own evidence** — the mtime of `restarter.log` next to
+   the launcher.
+2. **A live JVM the controller didn't spawn**, answering on the agent
+   socket within `AUTO_RESTART_PROBE_SECONDS` of a clean exit. Not
+   every install4j build writes `restarter.log` (Gateway 10.45.1g's
+   restarter writes none), so this fallback keeps the fix working where
+   the log never appears.
+
+Every failure inside the adoption path (neither signal, a stale log, no
+new JVM within `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`, an API port that
+never opens) falls through to the previous behaviour, i.e. the fast
+in-place relaunch, after tearing down any half-adopted instance.
+
+If the adopted path misbehaves in your deployment, set
+`AUTO_RESTART_ADOPT=no` to restore always-relaunch (and expect the
+nightly cold login back). Diagnostics: the `ALERT_AUTO_RESTART`
+`status=` value, the `AUTORESTART:` progress lines, and install4j's
+`restarter.log` itself.
 
 ---
 
@@ -446,6 +515,7 @@ to outlast the drain in your region.
 |---|---|---|---|
 | Short API port flap | ✅ next monitor cycle | ❌ not needed | `/health` flips briefly |
 | Gateway JVM crash | ✅ in-place restart | ❌ not needed | `jvm_alive: false` in `/health` |
+| Gateway's own daily auto-restart | ✅ adopts the new JVM | ❌ not needed | `ALERT_AUTO_RESTART status=adopted` at `AUTO_RESTART_TIME` |
 | IBKR daily maintenance window | ✅ 8-min delay + re-auth | ❌ not needed | `ALERT_IBKR_MAINTENANCE_RECOVERY` at ~23:45 ET |
 | CCP rate limiter tripped (genuine) | ✅ silent cool-down | ❌ not needed (wait up to 20 min) | `ccp_backoff_seconds > 0` |
 | **CCP lockout — concurrent/stranded session** | ❌ cannot auto-recover | ✅ log into IBKR Mobile (force-kicks TWS slot; web Portal does NOT) | `ALERT_CCP_PERSISTENT` + `ccp_lockout_streak >= 3` |

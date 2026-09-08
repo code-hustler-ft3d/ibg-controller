@@ -79,8 +79,9 @@ import javax.swing.tree.TreePath;
  *     invokeAndWait.
  *
  * External dependencies: only the JDK standard library + the Swing
- * and accessibility APIs bundled with Gateway's Zulu JRE. No
- * transitive jars.
+ * and accessibility APIs bundled with Gateway's own JRE (Zulu 17 on
+ * Gateway 10.45.x, Zulu 25 on 10.50.x — the agent targets release 17
+ * bytecode, which both run). No transitive jars.
  */
 public class GatewayInputAgent {
 

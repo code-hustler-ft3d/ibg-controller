@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.8.1"
+__version__ = "0.9.0"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -234,6 +234,18 @@ TEST_MODE = os.environ.get("CONTROLLER_TEST_MODE", "") == "1"
 # AT-SPI desktop tree in dual-mode containers where two 'IBKR Gateway'
 # apps are present simultaneously. Stays None until the agent is up.
 JVM_PID = None
+
+# Absolute path of the install4j launcher script the controller spawned
+# (set by launch_gateway). Used to find install4j's
+# ``.install4j/restarter.log`` next to it when deciding whether a JVM
+# exit was Gateway's own daily auto-restart (issue #23).
+_GATEWAY_LAUNCHER_PATH = None
+
+# mtime of the install4j restarter.log that the last adoption attempt
+# acted on. A restarter.log stays "fresh" for 120s, so without this an
+# adopted JVM that dies inside that window would send the controller
+# through a second pointless adoption wait for the same restart.
+_LAST_ADOPTED_RESTART_MTIME = None
 
 # The Gateway JVM subprocess and its AT-SPI application accessible.
 # Made module-global so the Phase 2.4 command server's RESTART handler
@@ -445,16 +457,33 @@ def agent_gettext(name):
     return None
 
 
-def agent_click(name):
-    """Click an AbstractButton by accessible name. Returns True on success."""
+def _login_button_labels(mode=None):
+    """Return ``(expected, fallback)`` Log In button labels for a trading
+    mode. Gateway renames the button: "Log In" on live, "Paper Log In"
+    on paper. Probing the expected one first keeps the routine case off
+    the ERROR log (see the call site in ``handle_login``)."""
+    if (mode if mode is not None else TRADING_MODE) == "paper":
+        return ("Paper Log In", "Log In")
+    return ("Log In", "Paper Log In")
+
+
+def agent_click(name, quiet=False):
+    """Click an AbstractButton by accessible name. Returns True on success.
+
+    ``quiet=True`` demotes a failed click to DEBUG. Use it only where a
+    miss is an expected outcome the caller handles — probing a button
+    whose label varies, for instance — so that real failures stay at
+    ERROR and log-scraping alert rules don't fire on routine probes.
+    """
+    level = log.debug if quiet else log.error
     try:
         resp = _agent_request(f"CLICK {name}")
     except Exception as e:
-        log.error(f"agent CLICK {name!r}: {type(e).__name__}: {e}")
+        level(f"agent CLICK {name!r}: {type(e).__name__}: {e}")
         return False
     if resp.startswith("OK"):
         return True
-    log.error(f"agent CLICK {name!r}: {resp}")
+    level(f"agent CLICK {name!r}: {resp}")
     return False
 
 
@@ -995,10 +1024,12 @@ def launch_gateway():
         that would otherwise route Gateway's writes to /root/Jts (which
         fails for the non-root ibgateway user)
     """
+    global _GATEWAY_LAUNCHER_PATH
     launcher = find_gateway_launcher()
     if launcher is None:
         log.error(f"No Gateway launcher found under {TWS_PATH}/ibgateway")
         sys.exit(1)
+    _GATEWAY_LAUNCHER_PATH = launcher
     log.info(f"Gateway launcher: {launcher}")
     log.info(f"Gateway config dir (jtsConfigDir): {JTS_CONFIG_DIR}")
 
@@ -1183,7 +1214,13 @@ def handle_login(app):
     # Log In button. Gateway renames the button based on trading mode:
     #   Live Trading  → "Log In"
     #   Paper Trading → "Paper Log In"
-    if not (agent_click("Log In") or agent_click("Paper Log In")):
+    # Try the label this mode is expected to use first, and probe quietly:
+    # before v0.9.0 every paper login emitted a spurious
+    # `agent CLICK 'Log In': ERR not_found` at ERROR level immediately
+    # before succeeding on the second label, which false-positived any
+    # "ERROR means page someone" rule.
+    expected, fallback = _login_button_labels()
+    if not (agent_click(expected, quiet=True) or agent_click(fallback)):
         log.error("Log In / Paper Log In button click failed via agent")
         # Diagnostic: dump the login window's component tree via the agent.
         # This is an ERROR-level (always-emitted) dump of the login frame,
@@ -2809,6 +2846,66 @@ _CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS = int(os.environ.get(
     "CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS",
     str(_CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS_DEFAULT)))
 
+# Issue #23: Gateway's own daily auto-restart (Configure → Lock and Exit →
+# "Set Auto Restart Time", i.e. AUTO_RESTART_TIME). At that time the JVM
+# spawns install4j's `.install4j/restarter`, which shuts the calling
+# launcher down and re-executes it; the replacement re-uses the current
+# session's credentials, so no login and no second factor are needed.
+# monitor_loop saw that code-0 exit as a crash and do_restart_in_place
+# launched a SECOND Gateway ~2s before install4j launched its own — two
+# instances on one display and one settings dir, the agent drove the
+# wrong window, login failed, the controller halted and the container
+# restarted into a cold login (and a 2FA push) every night. The fix:
+# when install4j's restarter.log was just written, don't launch
+# anything — wait for the instance install4j is bringing up, adopt it
+# (it inherits INSTALL4J_ADD_VM_PARAMS through the restarter, so its
+# agent binds our socket and reports its PID) and resume monitoring.
+#
+# AUTO_RESTART_ADOPT=no restores the previous always-relaunch behaviour.
+# Every failure inside the adoption path falls through to the
+# controller-driven restart, so the worst case is the old behaviour
+# plus the adopt timeout.
+_AUTO_RESTART_ADOPT = _coerce_yes_no(
+    os.environ.get("AUTO_RESTART_ADOPT", "yes")) is not False
+# How long to wait for the self-restarted JVM's agent to report a new
+# PID over the inherited agent socket. Measured ~0-3s in production
+# (issue #23); the default leaves room for slow hosts.
+_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS = int(os.environ.get(
+    "AUTO_RESTART_ADOPT_TIMEOUT_SECONDS", "90"))
+# restarter.log must have been written this recently for a JVM exit to
+# count as a self-restart. The trigger is install4j's own file, not the
+# wall-clock vs AUTO_RESTART_TIME: that comparison would have to guess
+# which timezone Gateway's Lock-and-Exit field is in (jts.ini carries
+# its own TimeZone, the container another) and would fire on any code-0
+# exit that happened to land in the window.
+_AUTO_RESTART_DETECT_WINDOW_SECONDS = 120
+# Not every install4j build writes restarter.log. Verified 2026-09-06 on
+# Gateway 10.45.1g: the .install4j/restarter binary ships and runs, but
+# invoking it produces no restarter.log, while the issue #23 reporter's
+# 10.45.1j box writes one with install4j action-log content. So the log
+# is the fast, unambiguous signal — not the only one. When it is absent
+# or stale after a clean exit, the controller spends this long asking
+# the agent socket a more direct question: is a live Gateway JVM that we
+# did not spawn already answering on it? A yes means Gateway restarted
+# itself no matter what install4j logged, and launching a second
+# instance is precisely the issue #23 bug.
+_AUTO_RESTART_PROBE_SECONDS = int(os.environ.get(
+    "AUTO_RESTART_PROBE_SECONDS", "15"))
+# After a clean (code-0) exit, keep re-checking restarter.log for this
+# long before concluding the exit was not a self-restart: the
+# restarter's first write can trail the JVM exit by a couple of seconds
+# and monitor_loop polls every 5s.
+_AUTO_RESTART_DETECT_GRACE_SECONDS = 5
+# After adoption, how long to wait for the API port (session preserved)
+# or a login dialog (session not preserved, e.g. IBKR's weekly full
+# re-authentication) before falling back to a relaunch.
+_AUTO_RESTART_API_TIMEOUT_SECONDS = 180
+# Exit status reported by _AdoptedProcess for a JVM the controller did
+# not spawn: waitpid() only works on children, so the real code is not
+# observable. Deliberately not an int so it can never be mistaken for a
+# real exit code.
+_EXIT_STATUS_UNOBSERVABLE = "unobservable"
+
 
 def _compute_adaptive_cooldown(attempt, base_seconds, multiplier, max_seconds):
     """Pure-logic helper: scale the CCP cool-down by restart-attempt index.
@@ -2913,6 +3010,437 @@ def _apply_maintenance_recovery_delay(reason):
     log.info("Maintenance-window delay complete; proceeding with recovery")
 
 
+# ── Gateway self-restart adoption (issue #23) ──────────────────────────
+
+def _proc_stat(pid):
+    """Return ``(state, starttime)`` from ``/proc/<pid>/stat``, or ``None``
+    when /proc is unavailable (macOS test hosts) or the entry is gone.
+
+    ``state`` is the kernel's one-letter process state (``Z`` = zombie);
+    ``starttime`` is the process start time in clock ticks since boot,
+    which together with the PID identifies one process instance.
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as f:
+            raw = f.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    # Field 2 (comm) is parenthesised and may contain spaces; split
+    # after the LAST ')' so rest[0] is field 3 (state) and rest[19] is
+    # field 22 (starttime).
+    try:
+        rest = raw[raw.rindex(")") + 2:].split()
+        return rest[0], int(rest[19])
+    except (ValueError, IndexError):
+        return None
+
+
+class _AdoptedProcess:
+    """Popen-shaped stand-in for a Gateway JVM the controller did not spawn.
+
+    Issue #23: after Gateway's own daily auto-restart the replacement JVM
+    is install4j's child, not ours, so there is no ``subprocess.Popen``
+    to poll. This class gives ``GATEWAY_PROC`` the surface the rest of
+    the controller uses (``pid``, ``poll()``, ``returncode``,
+    ``terminate()``, ``kill()``, ``wait()``) backed by signals:
+    ``os.kill(pid, 0)`` for liveness, plus ``/proc`` (when present) to
+    treat a zombie as exited and to detect PID reuse via the kernel
+    start time captured at adoption.
+
+    ``waitpid`` only works on children, so the real exit status is not
+    observable: ``poll()`` / ``returncode`` report
+    ``_EXIT_STATUS_UNOBSERVABLE`` once the process is gone.
+    """
+
+    def __init__(self, pid):
+        self.pid = int(pid)
+        self.returncode = None
+        stat = _proc_stat(self.pid)
+        self._starttime = stat[1] if stat is not None else None
+
+    def _alive(self):
+        # If this PID happens to be our child after all (it isn't in
+        # production, where install4j spawned it — but it is in the
+        # end-to-end tests), reap it so its exit is observable. On a
+        # non-child this raises ECHILD and we fall through to the
+        # signal- and /proc-based checks below. Without this, a dead
+        # JVM on a host with no /proc looks alive forever and teardown
+        # burns its full SIGTERM grace on a process that is already gone.
+        try:
+            reaped, _ = os.waitpid(self.pid, os.WNOHANG)
+            if reaped == self.pid:
+                return False
+        except (ChildProcessError, OSError):
+            pass
+        try:
+            os.kill(self.pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Exists but we may not signal it; let /proc decide below
+            # (a PID reused by another user's process fails the
+            # start-time check).
+            pass
+        stat = _proc_stat(self.pid)
+        if stat is None:
+            return True  # no /proc: trust kill(0)
+        state, starttime = stat
+        if state in ("Z", "X"):
+            return False
+        if self._starttime is not None and starttime != self._starttime:
+            return False  # PID reused by a different process
+        return True
+
+    def poll(self):
+        if self.returncode is None and not self._alive():
+            self.returncode = _EXIT_STATUS_UNOBSERVABLE
+        return self.returncode
+
+    def wait(self, timeout=None):
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while self.poll() is None:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise subprocess.TimeoutExpired(f"pid {self.pid}", timeout)
+            time.sleep(0.1)
+        return self.returncode
+
+    def _signal(self, sig):
+        # Identity check first: this PID is not our child, so between
+        # adoption and here the kernel could have recycled it onto an
+        # unrelated process. _alive() compares /proc start time against
+        # the one captured at adoption.
+        if not self._alive():
+            return
+        try:
+            os.kill(self.pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    def terminate(self):
+        self._signal(signal.SIGTERM)
+
+    def kill(self):
+        self._signal(signal.SIGKILL)
+
+    def __repr__(self):
+        return f"<_AdoptedProcess pid={self.pid} returncode={self.returncode!r}>"
+
+
+def _install4j_restarter_log_path():
+    """Path of install4j's ``restarter.log`` for the launcher we spawned
+    (``<launcher dir>/.install4j/restarter.log``), or ``None`` if no
+    launcher is known."""
+    launcher = _GATEWAY_LAUNCHER_PATH or find_gateway_launcher()
+    if not launcher:
+        return None
+    return os.path.join(os.path.dirname(launcher), ".install4j",
+                        "restarter.log")
+
+
+# install4j's restarter is itself a JVM launched from the same
+# i4jruntime.jar Gateway uses, and it inherits INSTALL4J_ADD_VM_PARAMS
+# from the JVM that spawned it — so it loads OUR agent and binds OUR
+# socket for the couple of seconds it lives, answering GET_PID with its
+# own PID. Verified 2026-09-06 against the real binary: the restarter
+# logged "[gateway-input-agent] listening on <socket>" and reported its
+# own pid. Adopting it as if it were Gateway would mean monitoring a
+# process that exits immediately.
+#
+# The discriminator is -Dinstall4j.alternativeLogfile, which the
+# restarter sets to point at its own log and Gateway's JVM does not
+# carry (confirmed against both live Gateway JVMs in a running
+# container). i4jruntime.jar is NOT a discriminator — Gateway's own
+# cmdline contains it too.
+_INSTALL4J_RESTARTER_MARKER = "install4j.alternativeLogfile"
+
+
+def _cmdline_is_install4j_restarter(cmdline):
+    """True if this process cmdline is install4j's restarter JVM rather
+    than Gateway itself. ``cmdline`` is the NUL-joined /proc cmdline."""
+    if not cmdline:
+        return False
+    return _INSTALL4J_RESTARTER_MARKER in cmdline
+
+
+def _process_cmdline(pid):
+    """Return a process's cmdline as a space-joined string, or ``None``
+    where /proc is unavailable (macOS) or the process is gone."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            raw = f.read()
+    except (OSError, ValueError):
+        return None
+    return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace")
+
+
+def _is_install4j_restarter_pid(pid):
+    """True only when we can positively identify ``pid`` as install4j's
+    restarter. Unknown (no /proc) reads as False so behaviour off Linux
+    is unchanged — the adoption retry still covers it."""
+    return _cmdline_is_install4j_restarter(_process_cmdline(pid))
+
+
+def _install4j_restarter_mtime():
+    """mtime of install4j's ``restarter.log``, or ``None`` if unreadable."""
+    path = _install4j_restarter_log_path()
+    if path is None:
+        return None
+    try:
+        return os.stat(path).st_mtime
+    except OSError:
+        return None
+
+
+def _install4j_restarter_age(now=None):
+    """Seconds since install4j's restarter last wrote its log, or ``None``
+    if the log is missing or older than
+    ``_AUTO_RESTART_DETECT_WINDOW_SECONDS``.
+
+    install4j having just written that file is the restarter's own
+    statement that it ran — the only trigger used for self-restart
+    detection (issue #23). A stale file from yesterday's restart, or one
+    left behind on a persistent settings volume, is ignored.
+    """
+    mtime = _install4j_restarter_mtime()
+    if mtime is None:
+        return None
+    age = (time.time() if now is None else now) - mtime
+    if age > _AUTO_RESTART_DETECT_WINDOW_SECONDS:
+        return None
+    if age < -_AUTO_RESTART_DETECT_WINDOW_SECONDS:
+        # Dated far in the future — a clock skew between the container
+        # and the settings volume, not a restart in progress. Treating
+        # it as fresh would send every clean exit through the adoption
+        # wait forever.
+        return None
+    return max(age, 0.0)
+
+
+def _wait_for_self_restarted_agent(old_pid, timeout, exclude=(),
+                                   seen_restarter=None):
+    """Poll the agent socket until a JVM with a PID other than ``old_pid``
+    (and not in ``exclude``) answers ``GET_PID``. Returns the new PID, or
+    ``None`` on timeout.
+
+    ``exclude`` carries PIDs already tried and found dead, so a second
+    attempt doesn't re-adopt a transient JVM from the restarter chain.
+
+    install4j's restarter answers on this socket too (it inherits the
+    ``-javaagent`` and binds it for the seconds it lives). It is skipped
+    rather than adopted, and its PID is appended to ``seen_restarter``
+    if a list is passed — seeing it at all is conclusive evidence that
+    Gateway is restarting itself.
+
+    The self-restarted JVM inherits ``INSTALL4J_ADD_VM_PARAMS`` through
+    the restarter, so it loads the same ``-javaagent`` with the same
+    socket path, and the agent's own ``Files.deleteIfExists`` + bind
+    replaces the dead JVM's socket file. This side must NOT unlink the
+    socket: doing so after the new agent has bound would orphan its
+    listener and the controller could never reach the adopted JVM.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if agent_wait_ready(timeout=1):
+            pid = agent_get_pid()
+            if (pid is not None and pid != old_pid and pid not in exclude
+                    and pid > 1 and pid != os.getpid()):
+                if _is_install4j_restarter_pid(pid):
+                    if seen_restarter is not None and pid not in seen_restarter:
+                        seen_restarter.append(pid)
+                        log.info(f"AUTORESTART: install4j's restarter "
+                                 f"(pid={pid}) is holding the agent socket — "
+                                 "Gateway is definitely restarting itself; "
+                                 "waiting for the Gateway JVM it launches")
+                else:
+                    return pid
+        time.sleep(0.5)
+    return None
+
+
+def _adopt_self_restarted_gateway(reason, *, exit_code=None):
+    """Issue #23: if the JVM exit that triggered recovery was Gateway's
+    own daily auto-restart, adopt the instance install4j is bringing up
+    instead of launching a second one.
+
+    Returns True when the adopted Gateway is serving again (API port
+    open because the session was preserved, or re-login driven when it
+    was not) and monitoring can resume. Returns False to fall through
+    to the controller-driven restart. By then ``GATEWAY_PROC`` may point
+    at the adopted instance so the fallback's teardown terminates it
+    first, instead of no-op'ing on the dead ``Popen`` and leaving two
+    Gateways up. Expected failure modes never raise.
+
+    Emits ``ALERT_AUTO_RESTART`` with ``status=adopted`` (INFO) or one
+    of the ``failed_*`` statuses (WARNING); see docs/OBSERVABILITY.md.
+    """
+    global GATEWAY_PROC, CURRENT_APP, JVM_PID, _command_server_app
+    global _LAST_ADOPTED_RESTART_MTIME
+
+    old_pid = JVM_PID
+    clean_exit = exit_code in (0, _EXIT_STATUS_UNOBSERVABLE)
+    age = _install4j_restarter_age()
+    if age is None and clean_exit:
+        grace_deadline = time.monotonic() + _AUTO_RESTART_DETECT_GRACE_SECONDS
+        while age is None and time.monotonic() < grace_deadline:
+            time.sleep(0.5)
+            age = _install4j_restarter_age()
+
+    first_candidate = None
+    seen_restarter = []
+    if age is None:
+        # No usable restarter.log. On a crash, stop here — that is a
+        # genuine failure and the relaunch path owns it.
+        if not clean_exit or _AUTO_RESTART_PROBE_SECONDS <= 0:
+            return False
+        # On a clean exit, ask the agent socket directly before
+        # relaunching. Only a running JVM answers it (a dead one leaves
+        # the socket file behind but nothing listening), so a reply from
+        # a PID that is not ours is positive evidence of a self-restart.
+        log.info("AUTORESTART: no fresh install4j restarter.log; probing "
+                 f"{AGENT_SOCKET} for up to {_AUTO_RESTART_PROBE_SECONDS}s "
+                 "in case Gateway restarted itself anyway")
+        first_candidate = _wait_for_self_restarted_agent(
+            old_pid, _AUTO_RESTART_PROBE_SECONDS,
+            seen_restarter=seen_restarter)
+        if first_candidate is None and not seen_restarter:
+            return False
+        detected_via = ("install4j_restarter" if seen_restarter
+                        else "agent_socket")
+        who = ("install4j's restarter" if seen_restarter
+               else "a Gateway JVM we did not spawn")
+        log.warning(f"AUTORESTART: {who} is on {AGENT_SOCKET} — treating "
+                    "this as Gateway's own restart and NOT launching a "
+                    "second instance")
+    else:
+        detected_via = "restarter_log"
+
+    mtime = _install4j_restarter_mtime()
+    if (detected_via == "restarter_log" and mtime is not None
+            and mtime == _LAST_ADOPTED_RESTART_MTIME):
+        # Same restart we already handled: the adopted JVM came up and
+        # then died inside the 120s freshness window. That's a failure
+        # of the restarted instance, not a restart in progress — go
+        # straight to the controller-driven relaunch.
+        log.info("AUTORESTART: restarter.log unchanged since the last "
+                 "adoption attempt — treating this exit as a real "
+                 "failure, not another self-restart")
+        return False
+
+    if detected_via == "restarter_log":
+        log.info(f"AUTORESTART: install4j restarter ran {age:.0f}s ago "
+                 f"({_install4j_restarter_log_path()})")
+        log.warning(f"AUTORESTART: Gateway is restarting itself — NOT "
+                    f"launching a second instance (old pid={old_pid}); "
+                    f"waiting up to {_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS}s "
+                    f"for the new JVM's agent on {AGENT_SOCKET}")
+        _LAST_ADOPTED_RESTART_MTIME = mtime
+    t0 = time.monotonic()
+
+    def _alert(level, status, new_pid, why):
+        level(f"ALERT_AUTO_RESTART mode={TRADING_MODE} status={status} "
+              f"detected_via={detected_via} "
+              f"old_pid={old_pid} new_pid={new_pid} "
+              f"elapsed_seconds={time.monotonic() - t0:.0f} "
+              f"reason=\"{why}\"")
+
+    api_port = api_port_for_mode()
+    # install4j's restarter chain can briefly show a JVM that isn't the
+    # replacement Gateway. If the first candidate dies before its API
+    # port opens, try once more for whatever is left of the budget
+    # rather than falling straight through to a relaunch.
+    tried = set()
+    adopt_deadline = time.monotonic() + _AUTO_RESTART_ADOPT_TIMEOUT_SECONDS
+    while True:
+        if first_candidate is not None:
+            new_pid, first_candidate = first_candidate, None
+        else:
+            wait_budget = max(1.0, adopt_deadline - time.monotonic())
+            new_pid = _wait_for_self_restarted_agent(
+                old_pid, wait_budget, exclude=tried,
+                seen_restarter=seen_restarter)
+        if new_pid is None or new_pid in tried:
+            _alert(log.warning, "failed_no_agent", "none",
+                   f"no new Gateway JVM answered on {AGENT_SOCKET} within "
+                   f"{_AUTO_RESTART_ADOPT_TIMEOUT_SECONDS}s; falling back to a "
+                   "controller-driven relaunch")
+            return False
+        tried.add(new_pid)
+
+        # Repoint GATEWAY_PROC BEFORE the API-port wait: if the port never
+        # opens, the fallback's _teardown_jvm_for_restart then cleanly kills
+        # the adopted instance before relaunching.
+        GATEWAY_PROC = _AdoptedProcess(new_pid)
+        JVM_PID = new_pid
+        new_app = find_app(APP_NAME_CANDIDATES, timeout=120, match_pid=new_pid)
+        CURRENT_APP = new_app
+        _command_server_app = new_app
+        log.info(f"AUTORESTART: adopted Gateway pid={new_pid} (was {old_pid}) "
+                 f"after {time.monotonic() - t0:.0f}s")
+
+        deadline = time.monotonic() + _AUTO_RESTART_API_TIMEOUT_SECONDS
+        last_status = time.monotonic()
+        died = False
+        while time.monotonic() < deadline:
+            if GATEWAY_PROC.poll() is not None:
+                died = True
+                break
+            if is_api_port_open(api_port):
+                _alert(log.info, "adopted", new_pid,
+                       f"API port {api_port} open — session preserved across "
+                       "Gateway's auto-restart, no login and no second factor "
+                       "required")
+                signal_ready()
+                return True
+            texts, buttons = agent_list()
+            if "Username" in texts or "Password" in texts:
+                log.info("AUTORESTART: login dialog on the self-restarted "
+                         "Gateway — the session was not preserved (e.g. IBKR's "
+                         "weekly full re-authentication); re-driving login")
+                # AUTO_RESTART_TIME commonly sits inside IBKR's nightly
+                # maintenance window. Adoption itself needs no auth, but
+                # this branch does, so the v0.5.10 drain guard applies.
+                if _is_ibkr_maintenance_window():
+                    _apply_maintenance_recovery_delay(
+                        "self-restarted Gateway needs a full re-login")
+                if _redrive_login(new_app):
+                    _alert(log.info, "adopted", new_pid,
+                           "session not preserved; full login re-driven on the "
+                           "adopted JVM")
+                    return True
+                _alert(log.warning, "failed_login", new_pid,
+                       "login on the adopted Gateway failed; falling back to a "
+                       "controller-driven relaunch")
+                return False
+            # Same opportunistic disclaimer handling as wait_for_api_port.
+            for btn in SAFE_DISMISS_BUTTONS:
+                if btn in buttons:
+                    log.info(f"  dismissing disclaimer {btn!r}")
+                    agent_click(btn)
+                    time.sleep(0.5)
+            now = time.monotonic()
+            if now - last_status > 10:
+                log.info(f"AUTORESTART: API port {api_port} still closed at "
+                         f"t+{now - t0:.0f}s; windows={agent_windows()}")
+                last_status = now
+            time.sleep(1)
+
+        if died and time.monotonic() < adopt_deadline:
+            log.warning(f"AUTORESTART: adopted pid={new_pid} exited before its "
+                        "API port opened; looking for another instance from "
+                        "the restarter chain")
+            continue
+        if died:
+            _alert(log.warning, "failed_jvm_exited", new_pid,
+                   "adopted Gateway JVM exited before its API port opened; "
+                   "falling back to a controller-driven relaunch")
+            return False
+        _alert(log.warning, "failed_api_timeout", new_pid,
+               f"API port {api_port} did not open within "
+               f"{_AUTO_RESTART_API_TIMEOUT_SECONDS}s of adoption and no login "
+               "dialog appeared; falling back to a controller-driven relaunch")
+        return False
+
+
 def _recover_jvm_or_escalate(reason, *, exit_code=None):
     """v0.4.7: Attempt a fast in-place JVM restart; on failure fall
     through to ``_escalate_to_jvm_restart`` (long CCP cool-down).
@@ -2945,8 +3473,37 @@ def _recover_jvm_or_escalate(reason, *, exit_code=None):
     off a CCP-lockout cascade on both modes. Non-zero exits bypass the
     guard — they're crashes, not maintenance shutdowns, and should
     recover fast.
+
+    Issue #23: before either of those, if the old JVM is gone and
+    install4j's restarter just ran, ``_adopt_self_restarted_gateway``
+    adopts the instance Gateway is bringing up itself (no relaunch, no
+    login, no second factor). Ordered ahead of the maintenance guard on
+    purpose: AUTO_RESTART_TIME commonly sits inside that window, and an
+    8-minute sleep would be pointless when there is nothing to re-auth.
+    ``_EXIT_STATUS_UNOBSERVABLE`` (an adopted JVM's exit — its real code
+    can't be observed) is treated like 0 by the guard: the conservative
+    choice, since the common cause of an adopted JVM exiting is the same
+    cooperative shutdown.
     """
-    if exit_code == 0 and _is_ibkr_maintenance_window():
+    if _AUTO_RESTART_ADOPT and (GATEWAY_PROC is None
+                                or GATEWAY_PROC.poll() is not None):
+        try:
+            if _adopt_self_restarted_gateway(reason, exit_code=exit_code):
+                log.info("Recovery: adopted Gateway's self-restarted JVM; "
+                         "no relaunch needed")
+                return True
+        except Exception as e:
+            log.error(f"Recovery: self-restart adoption raised "
+                      f"{type(e).__name__}: {e}; falling back to relaunch")
+        if isinstance(GATEWAY_PROC, _AdoptedProcess) and GATEWAY_PROC.poll() is None:
+            # Half-adopted instance is still up: take it down now so no
+            # second Gateway lingers through any delay below, and the
+            # relaunch starts from a clean slate.
+            log.warning("AUTORESTART: tearing down the adopted Gateway "
+                        f"pid={GATEWAY_PROC.pid} before the fallback relaunch")
+            _teardown_jvm_for_restart()
+
+    if exit_code in (0, _EXIT_STATUS_UNOBSERVABLE) and _is_ibkr_maintenance_window():
         _apply_maintenance_recovery_delay(reason)
 
     log.warning(f"Recovery: {reason}. Trying fast in-place restart first.")
@@ -4615,7 +5172,17 @@ def monitor_loop(app):
         # JVM process check — fast, every iteration
         if gw is None or gw.poll() is not None:
             rc = gw.returncode if gw is not None else 1
-            log.error(f"Gateway JVM exited with code {rc}")
+            if isinstance(gw, _AdoptedProcess):
+                # Issue #23: not our child, so waitpid can't tell us the
+                # exit status. Its next self-restart is still detected
+                # via restarter.log, not via the exit code.
+                log.error(f"Gateway JVM pid={gw.pid} exited (exit status "
+                          "not observable: adopted after Gateway's "
+                          "self-restart, not a child of the controller)")
+                reason = "adopted Gateway JVM exited"
+            else:
+                log.error(f"Gateway JVM exited with code {rc}")
+                reason = f"JVM exited with code {rc}"
             try:
                 os.unlink(READY_FILE)
             except FileNotFoundError:
@@ -4628,8 +5195,7 @@ def monitor_loop(app):
             # falls through to long cool-down if CCP is actually locked.
             # v0.5.10: pass exit_code so the recovery path can apply the
             # IBKR maintenance-window guard when rc==0.
-            _recover_jvm_or_escalate(
-                f"JVM exited with code {rc}", exit_code=rc)
+            _recover_jvm_or_escalate(reason, exit_code=rc)
             consecutive_failures = 0
             wedged_failures = 0
             last_heartbeat = time.monotonic()
@@ -4726,6 +5292,16 @@ def attempt_reauth(app):
         return True
 
     log.info("Login dialog detected during monitor loop — re-driving login")
+    return _redrive_login(app)
+
+
+def _redrive_login(app):
+    """Re-drive the full login pipeline on a login dialog that is already
+    showing. Split out of ``attempt_reauth`` (issue #23) so the
+    self-restart adoption path can drive a login on the adopted JVM
+    when Gateway did not preserve the session. Returns True if re-auth
+    completed (or a CCP backoff was applied and the monitor loop should
+    simply retry), False if it definitively failed."""
     # Refresh the app reference (the old one may have gone stale).
     # Scope to our own JVM so dual-mode containers don't cross-drive the
     # other instance's login.

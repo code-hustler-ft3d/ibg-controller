@@ -76,6 +76,52 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.9.0
+
+- **If you set `AUTO_RESTART_TIME`, the controller no longer relaunches
+  Gateway after Gateway's own daily restart (issue #23).** It detects
+  install4j's restarter (by the mtime of `.install4j/restarter.log`
+  next to the launcher), waits for the instance Gateway is bringing up,
+  adopts it, and resumes monitoring — typically a few seconds, with no
+  login and no second factor, instead of the previous race that ended
+  in a cold login every night. **Default-on behaviour change.** If you
+  need the old behaviour, set `AUTO_RESTART_ADOPT=no`.
+  - New env vars: `AUTO_RESTART_ADOPT` (default `yes`),
+    `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (default `90`),
+    `AUTO_RESTART_PROBE_SECONDS` (default `15`).
+  - **Small added latency on clean exits.** When a code-0 exit leaves no
+    fresh `restarter.log`, the controller spends up to 5 s re-checking
+    for a late one and up to `AUTO_RESTART_PROBE_SECONDS` asking the
+    agent socket whether a Gateway JVM it didn't spawn is already
+    running, before falling through to the relaunch. Worst case ~20 s
+    added to a clean-exit recovery; crashes (non-zero exit) are
+    unaffected. Set `AUTO_RESTART_PROBE_SECONDS=0` to drop the probe.
+  - New log token: `ALERT_AUTO_RESTART` (INFO on `status=adopted`,
+    WARNING on the `failed_*` statuses). Grep-by-prefix monitors need
+    no change; add it if you want nightly visibility.
+  - Watch for on the first night after upgrading:
+    `ALERT_AUTO_RESTART mode=… status=adopted` at your configured
+    restart time. A `failed_*` status means the controller fell back to
+    the pre-fix relaunch for that night — the details are in the
+    `AUTORESTART:` lines above it.
+  - Pure Python, no agent-jar change — pull the new image or, if you
+    build from source, `make`.
+- **The upstream Gateway base moved 10.45.1g → 10.45.1j** (still the
+  gnzsnz `:stable` line). Live-validated on a real dual-mode account:
+  both modes reach `MONITORING`, login and 2FA drive cleanly, no
+  `ALERT_*` tokens. On arm64 the image also sheds 112 MB of x86-64
+  browser payload that could never execute there.
+- **If you build the image yourself, `docker build .` now produces the
+  release base by default.** `UPSTREAM_IMAGE` previously defaulted to
+  the moving `:stable` tag, which meant a bare build could silently use
+  a stale cached base and label it `unknown`. Override
+  `--build-arg UPSTREAM_IMAGE=` to build against a different Gateway,
+  and pass `IB_GATEWAY_VERSION=` with it so the image label stays
+  honest.
+  - If you don't set `AUTO_RESTART_TIME`, Gateway never restarts
+    itself, so neither signal fires and every exit takes the existing
+    recovery path — apart from the added detection delay above.
+
 ### v0.8.1
 
 - **Passkey/WebAuthn accounts now fail loudly instead of hanging

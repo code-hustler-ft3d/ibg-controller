@@ -65,9 +65,9 @@ Deeper guides:
 | Requirement | Notes |
 |---|---|
 | Linux `amd64`/`arm64` | Ubuntu 24.04 base tested |
-| IB Gateway 10.x | Release images pin **10.45.1g** (gnzsnz `:stable` line) |
+| IB Gateway 10.x | Release images pin **10.45.1j** (gnzsnz `:stable` line) |
 | Python 3.10+ | Runtime; stdlib only, no pip installs |
-| JDK 17+ | Build time only — runtime uses Gateway's bundled Zulu JRE |
+| JDK 17+ | Build time only — runtime uses the JRE bundled with Gateway |
 | `python3`, `matchbox-window-manager` | The only packages added on top of the upstream image |
 
 ## What works
@@ -162,6 +162,7 @@ real product.
 | `TWS_MASTER_CLIENT_ID` | Master API client ID |
 | `READ_ONLY_API` | `yes`/`no` |
 | `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other depending on account state; set both vars and the controller handles whichever is displayed. |
+| `AUTO_RESTART_ADOPT` | Default `yes`: when Gateway restarts itself at `AUTO_RESTART_TIME`, adopt the new JVM instead of launching a second one. Gateway normally carries the session across, so no login and no 2FA; when it doesn't, the controller re-drives login on the adopted JVM. `no` restores always-relaunch. Wait budget: `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (90). |
 
 ### Command server
 

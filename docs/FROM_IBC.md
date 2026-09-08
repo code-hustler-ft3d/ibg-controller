@@ -166,9 +166,25 @@ make                         # builds agent jar + stages controller
 docker build -t ibg-controller:local .
 ```
 
-The shipped `Dockerfile` extends `ghcr.io/gnzsnz/ib-gateway:stable`.
-For reproducible builds, pin to a digest via `--build-arg
-UPSTREAM_IMAGE=...@sha256:...`.
+The shipped `Dockerfile` defaults to the same digest-pinned base the
+release images use, so a bare `docker build .` reproduces what we
+publish. Override `--build-arg UPSTREAM_IMAGE=...` only to build
+against a different Gateway; if you do, pass `IB_GATEWAY_VERSION` too
+so the image label reports what it actually contains.
+
+Any gnzsnz base works. To build against their `latest` channel instead
+of `stable` — a newer Gateway line, e.g. for the in-app browser the
+passkey flow uses:
+
+```bash
+docker build -t ibg-controller:edge \
+  --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:latest \
+  --build-arg IB_GATEWAY_VERSION=10.50.1e .
+```
+
+CI covers that line as a build-and-boot check. The login, 2FA and
+dialog handlers are verified against 10.45.x only, so treat a
+`latest`-based image as unverified for those paths.
 
 ### 2. Convert your IBC config
 

@@ -13,8 +13,10 @@ name: Release image
 #     default GITHUB_TOKEN.
 #   - The `platforms` list below controls architectures. We publish
 #     linux/amd64 + linux/arm64: upstream gnzsnz/ib-gateway ships both
-#     (amd64 uses install4j JRE, arm64 uses Zulu), and the Dockerfile's
-#     ATK bridge step handles both JRE layouts. Keep this list in sync
+#     (both now use install4j's own JRE registry; arm64 used a separate
+#     Zulu JRE only before 10.45.1h, when upstream switched aarch64 to
+#     IBKR's native arm installer in gnzsnz/ib-gateway-docker#397), and
+#     the Dockerfile's ATK bridge step handles both layouts. Keep in sync
 #     with `docker-compose` consumers that pin --platform.
 #   - If you rename the workflow file, update docs/SECURITY.md's
 #     cosign verification example — the `--certificate-identity`
@@ -135,16 +137,16 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          # Pin the upstream Gateway base by digest so published releases
-          # don't silently track `:stable`. Bump this in lockstep with a
-          # deliberate Gateway-version upgrade. Multi-arch manifest (amd64
-          # + arm64) as of 10.45.1g, sha256:827d7a5…
-          # IB_GATEWAY_VERSION feeds the com.ibg-controller.ib-gateway-version
-          # image label — keep it in lockstep with the digest pin above so a
-          # `docker inspect` reports the exact bundled Gateway build.
-          build-args: |
-            UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1g@sha256:827d7a5b8454ec19cff2abe0ae6983f15bde4a11c5d5dff4cd74d67ace85a3f2
-            IB_GATEWAY_VERSION=10.45.1g
+          # Deliberately NO build-args. The digest pin and
+          # IB_GATEWAY_VERSION are the Dockerfile's ARG defaults, which
+          # makes the Dockerfile the single source of truth: a bare
+          # `docker build .` reproduces exactly what this workflow
+          # publishes. Bump the pin there, not here.
+          #
+          # Why it matters (2026-09-07 pre-release spike): while the
+          # default was the moving `:stable` tag, a bare build silently
+          # used a stale cached base and labelled it `unknown`, so a
+          # maintainer could "validate" a Gateway version that never ran.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Embed buildx provenance so `docker buildx imagetools inspect`
