@@ -137,16 +137,16 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          # Pin the upstream Gateway base by digest so published releases
-          # don't silently track `:stable`. Bump this in lockstep with a
-          # deliberate Gateway-version upgrade. Multi-arch manifest (amd64
-          # + arm64) as of 10.45.1g, sha256:827d7a5…
-          # IB_GATEWAY_VERSION feeds the com.ibg-controller.ib-gateway-version
-          # image label — keep it in lockstep with the digest pin above so a
-          # `docker inspect` reports the exact bundled Gateway build.
-          build-args: |
-            UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1j@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
-            IB_GATEWAY_VERSION=10.45.1j
+          # Deliberately NO build-args. The digest pin and
+          # IB_GATEWAY_VERSION are the Dockerfile's ARG defaults, which
+          # makes the Dockerfile the single source of truth: a bare
+          # `docker build .` reproduces exactly what this workflow
+          # publishes. Bump the pin there, not here.
+          #
+          # Why it matters (2026-09-07 pre-release spike): while the
+          # default was the moving `:stable` tag, a bare build silently
+          # used a stale cached base and labelled it `unknown`, so a
+          # maintainer could "validate" a Gateway version that never ran.
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           # Embed buildx provenance so `docker buildx imagetools inspect`

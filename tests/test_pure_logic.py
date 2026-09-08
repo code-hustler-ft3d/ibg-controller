@@ -2414,6 +2414,70 @@ def _sleeper():
     return subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
 
 
+class TestLoginButtonLabels(unittest.TestCase):
+    """Gateway renames the Log In button per mode. Probing the wrong one
+    first made every paper login emit a spurious ERROR-level
+    `agent CLICK 'Log In': ERR not_found` immediately before succeeding
+    — harmless, but it false-positives any "ERROR means page someone"
+    rule. Found in the v0.9.0 pre-release spike."""
+
+    def test_paper_tries_paper_label_first(self):
+        self.assertEqual(gc._login_button_labels("paper"),
+                         ("Paper Log In", "Log In"))
+
+    def test_live_tries_plain_label_first(self):
+        self.assertEqual(gc._login_button_labels("live"),
+                         ("Log In", "Paper Log In"))
+
+    def test_both_labels_always_offered(self):
+        for mode in ("paper", "live"):
+            self.assertEqual(set(gc._login_button_labels(mode)),
+                             {"Log In", "Paper Log In"})
+
+    def test_defaults_to_module_trading_mode(self):
+        with patch.object(gc, "TRADING_MODE", "paper"):
+            self.assertEqual(gc._login_button_labels()[0], "Paper Log In")
+        with patch.object(gc, "TRADING_MODE", "live"):
+            self.assertEqual(gc._login_button_labels()[0], "Log In")
+
+
+class TestAgentClickQuiet(unittest.TestCase):
+    """quiet=True demotes an expected miss to DEBUG so routine probes
+    don't look like failures; real failures must stay at ERROR."""
+
+    def test_failure_logs_error_by_default(self):
+        with patch.object(gc, "_agent_request", return_value="ERR not_found"), \
+             patch.object(gc.log, "error") as err, \
+             patch.object(gc.log, "debug") as dbg:
+            self.assertFalse(gc.agent_click("Log In"))
+            err.assert_called_once()
+            dbg.assert_not_called()
+
+    def test_quiet_failure_logs_debug(self):
+        with patch.object(gc, "_agent_request", return_value="ERR not_found"), \
+             patch.object(gc.log, "error") as err, \
+             patch.object(gc.log, "debug") as dbg:
+            self.assertFalse(gc.agent_click("Log In", quiet=True))
+            err.assert_not_called()
+            dbg.assert_called_once()
+
+    def test_quiet_exception_also_demoted(self):
+        with patch.object(gc, "_agent_request", side_effect=OSError("boom")), \
+             patch.object(gc.log, "error") as err, \
+             patch.object(gc.log, "debug") as dbg:
+            self.assertFalse(gc.agent_click("X", quiet=True))
+            err.assert_not_called()
+            dbg.assert_called_once()
+
+    def test_success_never_logs(self):
+        with patch.object(gc, "_agent_request", return_value="OK"), \
+             patch.object(gc.log, "error") as err, \
+             patch.object(gc.log, "debug") as dbg:
+            self.assertTrue(gc.agent_click("Log In", quiet=True))
+            err.assert_not_called()
+            dbg.assert_not_called()
+
+
 class TestInstall4jRestarterAge(unittest.TestCase):
     """_install4j_restarter_age is the only trigger for self-restart
     detection: seconds since install4j last wrote

@@ -4,7 +4,7 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.9.0] - 2026-09-07
 
 ### Added
 
@@ -50,6 +50,26 @@ and the project follows [Semantic Versioning](https://semver.org/).
   the recipe was simply undocumented.
 
 ### Fixed
+
+- **A bare `docker build .` no longer silently builds the wrong base.**
+  `UPSTREAM_IMAGE` defaulted to the moving `:stable` tag, so a local
+  build picked up whatever `:stable` sat in the Docker cache — in the
+  2026-09-07 pre-release spike, a five-month-old base — and labelled it
+  `IB_GATEWAY_VERSION=unknown`. A maintainer could therefore "validate"
+  a Gateway version that never ran. The Dockerfile's ARG defaults are
+  now the release pin itself, making the Dockerfile the single source of
+  truth: `release-image.yml` passes no build args and inherits them, and
+  a bare build reproduces the published image. The CI matrix passes
+  `IB_GATEWAY_VERSION` alongside its `UPSTREAM_IMAGE` override so
+  matrix images still report what they actually contain.
+- **Paper logins no longer emit a spurious `ERROR`.** `handle_login`
+  probed `"Log In"` before `"Paper Log In"`, so every paper login logged
+  `agent CLICK 'Log In': ERR not_found` at ERROR level immediately
+  before succeeding — enough to false-positive an "ERROR means page
+  someone" rule. The mode's expected label is now tried first, and the
+  probe uses a new `quiet=` argument on `agent_click` that demotes an
+  expected miss to DEBUG. Real failures stay at ERROR.
+
 
 - **Gateway's own daily auto-restart no longer races the controller
   into a cold login (issue #23).** With `AUTO_RESTART_TIME` set,
@@ -143,6 +163,26 @@ and the project follows [Semantic Versioning](https://semver.org/).
   tests below, not by the mocked unit tests.
 
 ### Validation
+
+- **Live-spiked on a real dual-mode account 2026-09-07 (Gateway
+  10.45.1j, arm64), the maintainer spike `CONTRIBUTING.md` requires
+  before release.** Both modes reached `MONITORING` (live 18:48:41,
+  paper 18:49:29), API ports 4001/4002 open, `/health` healthy for
+  both, and **zero `ALERT_*` tokens of any kind**. The previously
+  unverified surface all passed on the new base: agent injected into
+  install4j's JRE, login dialog discovered, 2FA method prompt matched
+  and TOTP typed, disclaimers dismissed. The outgoing container
+  released both IBKR session slots cleanly (`ALERT_CLEAN_LOGOUT
+  status=succeeded`) before the swap.
+- install4j's bundled JRE on 10.45.1j is Zulu 17.0.17, so the agent's
+  `--release 17` bytecode still matches the runtime it loads into.
+- Still pending at release time: the first `AUTO_LOGOFF_TIME` cycle on
+  10.45.1j. Expect one new INFO line per mode (`AUTORESTART: no fresh
+  install4j restarter.log; probing …`) and ~20 s of added detection
+  delay before the normal in-place restart. No `ALERT_AUTO_RESTART`
+  should appear: with `AUTO_RESTART_TIME` unset, install4j's restarter
+  never runs.
+
 
 - New unit coverage: `_install4j_restarter_age` (fresh / stale /
   missing / future-dated log, unknown launcher, discovery fallback),

@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.9.0
 
 - **If you set `AUTO_RESTART_TIME`, the controller no longer relaunches
   Gateway after Gateway's own daily restart (issue #23).** It detects
@@ -106,6 +106,18 @@ anything from you.
     `AUTORESTART:` lines above it.
   - Pure Python, no agent-jar change — pull the new image or, if you
     build from source, `make`.
+- **The upstream Gateway base moved 10.45.1g → 10.45.1j** (still the
+  gnzsnz `:stable` line). Live-validated on a real dual-mode account:
+  both modes reach `MONITORING`, login and 2FA drive cleanly, no
+  `ALERT_*` tokens. On arm64 the image also sheds 112 MB of x86-64
+  browser payload that could never execute there.
+- **If you build the image yourself, `docker build .` now produces the
+  release base by default.** `UPSTREAM_IMAGE` previously defaulted to
+  the moving `:stable` tag, which meant a bare build could silently use
+  a stale cached base and label it `unknown`. Override
+  `--build-arg UPSTREAM_IMAGE=` to build against a different Gateway,
+  and pass `IB_GATEWAY_VERSION=` with it so the image label stays
+  honest.
   - If you don't set `AUTO_RESTART_TIME`, Gateway never restarts
     itself, so neither signal fires and every exit takes the existing
     recovery path — apart from the added detection delay above.
