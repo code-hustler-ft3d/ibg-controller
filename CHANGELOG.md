@@ -4,6 +4,35 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A Lock and Exit schedule that Gateway silently drops is now
+  reported instead of claimed as applied.** The controller wrote
+  `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME`, saw
+  `agent_settext_by_label` return success, and logged "Post-login
+  config applied". That only means the widget accepted the write. On
+  2026-09-07 a production box logged `Setting Auto Log Off Time =
+  05:01 PM`, then ran 26 hours straight through that boundary without
+  logging off — and the same non-firing had been observed a month
+  earlier on v0.8.0, so it is long-standing rather than a regression.
+  After OK the controller now re-opens Configure → Settings, re-selects
+  Lock and Exit, and reads the value back, closing with **Cancel** so
+  the check itself commits nothing.
+  - Verified value: logged as confirmed.
+  - Value gone: new grep-contract token `ALERT_CONFIG_NOT_APPLIED`
+    (ERROR) naming the setting, the env var and the requested value.
+    Worth paging on — the session is healthy and logged in, which is
+    precisely why a silently missing daily schedule goes unnoticed.
+  - Dialog unreadable: a WARNING saying *unverified*, never reported as
+    a failure. Verification is best-effort and never fails the login.
+  - The old "Post-login config applied and dialog closed" line now
+    reads "committed", since applied was the claim that wasn't earned.
+- Note for anyone depending on Gateway's daily logoff: if you see this
+  token, treat an external scheduled container restart as the reliable
+  substitute rather than Gateway's own scheduler.
+
 ## [0.9.0] - 2026-09-07
 
 ### Added
