@@ -2352,6 +2352,65 @@ def _coerce_yes_no(val):
     return None
 
 
+def _lock_exit_time_visible(expected):
+    """True if ``expected`` appears in the Lock and Exit panel right now.
+
+    Reads the live component dump of the already-open config dialog, so
+    it costs one agent round-trip and needs no new agent command.
+    Returns None when the panel can't be read at all, which the caller
+    reports as "unverified" rather than "wrong".
+    """
+    dump = agent_window(CONFIG_WINDOW_TITLE_SUBSTR)
+    if not dump or not dump.startswith("OK"):
+        return None
+    # Gateway renders the time into a text field; a substring match is
+    # enough and survives the widget being a JSpinner editor, a
+    # formatted field, or a plain JTextField.
+    return expected.strip() in dump
+
+
+def _verify_lock_exit_time_persisted(label, expected):
+    """Re-open Configure → Settings after OK and confirm the Lock and Exit
+    time really stuck. Returns True/False, or None if it couldn't be
+    checked.
+
+    Why re-open rather than trust the write: on 2026-09-07 a production
+    box logged "Setting Auto Log Off Time = 05:01 PM" followed by
+    "Post-login config applied and dialog closed", and then ran 26 hours
+    straight through the configured boundary without ever logging off.
+    ``agent_settext_by_label`` reported success, so the in-dialog write
+    is not evidence that Gateway accepted or kept the value. Only a
+    read-back after the commit is.
+
+    Failure here is never fatal: the session is already logged in and
+    usable, so the worst case is that we say the setting is unverified
+    instead of silently claiming it was applied.
+    """
+    try:
+        if not _config_open():
+            log.warning("  Could not re-open config dialog to verify "
+                        f"{label!r}; treating as unverified")
+            return None
+        try:
+            if not agent_jtree_select_path(CONFIG_WINDOW_TITLE_SUBSTR,
+                                           "Lock and Exit"):
+                log.warning("  Could not re-select Lock and Exit to verify "
+                            f"{label!r}; treating as unverified")
+                return None
+            time.sleep(1.0)  # same panel-render settle as the write path
+            return _lock_exit_time_visible(expected)
+        finally:
+            # Cancel, never OK: verification must not itself commit
+            # anything, and an unchanged form should leave no side effect.
+            if not _config_close("Cancel"):
+                log.warning("  Could not close the verification dialog with "
+                            "Cancel — check for a stray config window")
+    except Exception as e:
+        log.warning(f"  Verification of {label!r} raised "
+                    f"{type(e).__name__}: {e}; treating as unverified")
+        return None
+
+
 def handle_post_login_config():
     """Drive Gateway's Configure → Settings dialog to apply env-var
     overrides for the IBC-compatible API config knobs.
@@ -2431,6 +2490,9 @@ def handle_post_login_config():
         return False
 
     changed = False
+    # (label, value, env var) of the Lock and Exit time we wrote, if any.
+    # Verified after OK — see _verify_lock_exit_time_persisted.
+    lock_exit_written = None
 
     if wanted_api_tab:
         log.info("  Navigating to API → Settings")
@@ -2474,6 +2536,8 @@ def handle_post_login_config():
                 if agent_settext_by_label(CONFIG_WINDOW_TITLE_SUBSTR,
                                           logoff_label, auto_logoff_time):
                     changed = True
+                    lock_exit_written = (logoff_label, auto_logoff_time,
+                                         "AUTO_LOGOFF_TIME")
                 else:
                     # Gateway may be in autorestart-mode for this account —
                     # the field is labeled "Set Auto Restart Time" instead.
@@ -2486,6 +2550,8 @@ def handle_post_login_config():
                 if agent_settext_by_label(CONFIG_WINDOW_TITLE_SUBSTR,
                                           restart_label, auto_restart_time):
                     changed = True
+                    lock_exit_written = (restart_label, auto_restart_time,
+                                         "AUTO_RESTART_TIME")
                 else:
                     log.warning("  Failed to set Auto Restart Time — "
                                 "Gateway is showing 'Set Auto Log Off Time' "
@@ -2497,7 +2563,27 @@ def handle_post_login_config():
         if not _config_close("OK"):
             log.warning("Could not click OK to commit config changes")
             return False
-        log.info("Post-login config applied and dialog closed")
+        log.info("Post-login config committed; dialog closed")
+        if lock_exit_written is not None:
+            label, value, env_var = lock_exit_written
+            time.sleep(1.0)  # let the dialog fully dispose before re-opening
+            verified = _verify_lock_exit_time_persisted(label, value)
+            if verified is True:
+                log.info(f"  Verified: {label} reads back as {value!r}")
+            elif verified is False:
+                # Stable grep token: an operator who set a schedule needs
+                # to know it will not happen. See docs/OBSERVABILITY.md.
+                log.error(
+                    f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
+                    f"setting=\"{label}\" env_var={env_var} "
+                    f"requested=\"{value}\" "
+                    f"reason=\"Gateway did not retain the value after OK; "
+                    f"the schedule will not fire\"")
+            else:
+                log.warning(
+                    f"  Could not verify {label} — it may or may not have "
+                    "been applied. Confirm in the Gateway UI if you depend "
+                    "on the schedule.")
     else:
         # Nothing was actually changed — use Cancel to avoid any
         # side-effect of OK that might otherwise fire even for an
