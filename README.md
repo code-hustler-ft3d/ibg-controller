@@ -95,20 +95,23 @@ real product.
 - **IB Key push** requires a human to tap approve on a phone. The
   controller will wait for that (leave `TWOFACTOR_CODE` unset), which
   is fine attended and a dead end for automation.
-- **Passkey / WebAuthn accounts are not supported for unattended
-  login.** IBKR forced some regions (Hong Kong and Japan as of 2026-08)
-  onto passkeys; Gateway then opens an in-app browser expecting a
-  hardware security key, which a headless container can't present. The
-  controller detects this and fails loudly (`ALERT_2FA_FAILED
-  reason="passkey/WebAuthn 2FA flow ..."`) instead of hanging — it does
-  not drive the ceremony. Emulating a WebAuthn authenticator (a
-  FIDO2/USB device or a browser debug channel) is a different job than
-  driving Gateway's dialogs and out of scope for this tool; it also
-  can't run on arm64, which ships no jxbrowser build. If the account
-  still offers Mobile Authenticator, switch to it; otherwise log in
-  attended via VNC, or run your own authenticator alongside the
-  container. See
-  [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22).
+- **Passkey / WebAuthn accounts: the controller presses Authenticate,
+  you supply the authenticator.** IBKR forced some regions (Hong Kong
+  and Japan as of 2026-08) onto passkeys; Gateway's Second Factor
+  dialog then asks you to "use your Passkey device". With
+  `PASSKEY_AUTHENTICATE=yes` the controller presses Authenticate and
+  stops there — the WebAuthn ceremony must be completed by an
+  authenticator running alongside the container (a virtual FIDO device
+  such as [passless](https://github.com/pando85/passless), a key
+  passed through, or a person). The controller never holds a passkey
+  and never emulates one; that is a different job than driving
+  Gateway's dialogs. Unset, a passkey prompt fails loudly
+  (`ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow ..."`) as it has
+  since v0.8.1. Contributed and used in production by @jpike88; the
+  maintainer has no passkey account, so this is ⚠️ rather than ✅.
+  Needs an amd64 base — IBKR's arm64 installer ships no browser. See
+  [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22)
+  and [#29](https://github.com/code-hustler-ft3d/ibg-controller/pull/29).
 - **Accounts with more than one method**: Gateway pre-picks one, and
   the dialog shape varies by account — some get a code dialog
   defaulted to one method, others a device-selector list. The

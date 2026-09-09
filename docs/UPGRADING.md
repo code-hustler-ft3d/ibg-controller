@@ -76,6 +76,18 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **Optional passkey support (PR #29).** New env var
+  `PASSKEY_AUTHENTICATE` (default unset = off). Nothing changes unless
+  you set it to `yes`, in which case the controller presses
+  **Authenticate** on Gateway's passkey prompt and leaves the WebAuthn
+  ceremony to an authenticator you run alongside the container. Without
+  it, a passkey prompt fails loudly exactly as in v0.8.1 and v0.9.0, now
+  with a `remediation=` hint on the alert line. One new additive
+  `ALERT_2FA_FAILED` reason, `"passkey Authenticate lookup failed"` —
+  grep-by-prefix monitors need no change.
+
 ### v0.9.0
 
 - **If you set `AUTO_RESTART_TIME`, the controller no longer relaunches

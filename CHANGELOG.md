@@ -4,6 +4,39 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Passkey prompt handling, opt-in (PR #29, @jpike88).** When Gateway's
+  Second Factor dialog shows the passkey prompt ("Use your Passkey
+  device …"), the controller can now press **Authenticate**. It never
+  performs the WebAuthn ceremony: that must be completed by an
+  authenticator you run alongside the container — a virtual FIDO device
+  such as [passless](https://github.com/pando85/passless), a key passed
+  through, or a person — which is the arrangement issue #22 said would
+  be revisited if someone got it working out of tree. They did.
+  - **Off by default.** Set `PASSKEY_AUTHENTICATE=yes` to enable. With
+    it unset, a passkey prompt still fails loudly with the same
+    `ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow - unattended
+    login not supported"` v0.8.1 emits, now with a `remediation=` hint,
+    instead of falling through to TOTP handling. Every existing flow is
+    byte-for-byte unchanged unless you opt in.
+  - New `ALERT_2FA_FAILED` reason `"passkey Authenticate lookup
+    failed"` when the prompt was seen but no Authenticate button could
+    be activated.
+  - Pressing Authenticate is reported as 2FA success immediately; if
+    the authenticator never completes the ceremony, the failure surfaces
+    as the API-port wait timing out. The handler says so in a comment.
+  - Also fixes a latent bug: the post-relogin 2FA loop called the TOTP
+    generator with an empty secret in IB Key mode.
+  - Validated by the contributor's live use against a real passkey
+    account, and by flow tests driving the real `handle_2fa` with a mock
+    agent in four configurations: TOTP dialog with the gate on and off,
+    passkey dialog with and without a TOTP secret, gate off failing
+    loud, and the IB Key push loop. The maintainer has no passkey
+    account, so this is ⚠️ rather than ✅ in the compatibility table.
+
 ## [0.9.0] - 2026-09-07
 
 ### Added
@@ -19,7 +52,6 @@ and the project follows [Semantic Versioning](https://semver.org/).
   probe the agent socket when no `restarter.log` was written. The probe
   plus a 5 s late-log grace is the only added latency, and only on clean
   exits.
-- added passkey dialog handling
 
 ### Changed
 

@@ -3098,5 +3098,142 @@ class TestAttemptReauthSplit(unittest.TestCase):
             redrive.assert_called_once_with(app)
 
 
+# ── PR #29: passkey prompt handling ────────────────────────────────────
+
+_TOTP_DIALOG = (
+    "OK\n=== window='Second Factor Authentication' ===\n"
+    "JLabel: Enter Mobile Authenticator code\nJTextField: \n"
+    "JButton: OK\nJButton: Cancel\nEND\n")
+_PASSKEY_DIALOG = (
+    "OK\n=== window='Second Factor Authentication' ===\n"
+    "JTextArea: Use your Passkey device to complete authentication\n"
+    "JButton: Authenticate >\nJButton: Cancel\nEND\n")
+_RFC_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"   # RFC 6238 test vector, not a real seed
+
+
+class TestPasskeyPromptPresent(unittest.TestCase):
+    """Pure decision helper (CONTRIBUTING: keep the decision in a helper
+    and test it directly)."""
+
+    def test_detects_prompt(self):
+        self.assertTrue(gc._passkey_prompt_present(_PASSKEY_DIALOG))
+
+    def test_case_and_whitespace_insensitive(self):
+        self.assertTrue(gc._passkey_prompt_present(
+            "OK\nJTextArea: USE  YOUR\n  passkey   DEVICE now\nEND\n"))
+
+    def test_totp_dialog_is_not_a_passkey_prompt(self):
+        self.assertFalse(gc._passkey_prompt_present(_TOTP_DIALOG))
+
+    def test_empty_and_none_are_false(self):
+        self.assertFalse(gc._passkey_prompt_present(""))
+        self.assertFalse(gc._passkey_prompt_present(None))
+
+
+class TestHandle2faWithPasskeyHandler(unittest.TestCase):
+    """Drives the real handle_2fa with a mock agent. The point is not the
+    passkey feature in isolation but that adding it leaves every existing
+    2FA flow untouched: TOTP still types a code and never presses
+    Authenticate; the IB Key push loop still leaves the dialog alone.
+    Four cases, all run on PR #29's commit before it was merged."""
+
+    def _drive(self, dump, *, totp, gate, port=None, windows=None):
+        calls = {"typed": [], "clicked": [], "consulted": 0}
+        port_seq = iter(port or [False] * 200)
+        win_seq = iter(windows or [[("dialog", "Second Factor Authentication", True)]] * 200)
+
+        def window_dump(title=""):
+            calls["consulted"] += 1
+            return dump
+
+        with patch.object(gc, "TOTP_SECRET", totp), \
+             patch.object(gc, "_PASSKEY_AUTHENTICATE", gate), \
+             patch.object(gc, "agent_windows", side_effect=lambda: next(win_seq, [])), \
+             patch.object(gc, "agent_window", side_effect=window_dump), \
+             patch.object(gc, "agent_list", return_value=(set(), {"Authenticate >"})), \
+             patch.object(gc, "agent_labels", return_value=[
+                 ("Second Factor Authentication", "Enter Mobile Authenticator code")]), \
+             patch.object(gc, "agent_settext_in_window",
+                          side_effect=lambda _w, t: calls["typed"].append(t) or True), \
+             patch.object(gc, "agent_click_in_window",
+                          side_effect=lambda _w, l: calls["clicked"].append(l) or True), \
+             patch.object(gc, "agent_click", return_value=True), \
+             patch.object(gc, "is_api_port_open",
+                          side_effect=lambda *a, **k: next(port_seq, True)), \
+             patch.object(gc, "_detect_passkey_flow", return_value=None), \
+             patch.object(gc, "_reset_ccp_backoff"), \
+             patch.object(gc, "time") as fake_time:
+            ticks = iter(range(0, 10_000_000, 3))
+            fake_time.monotonic.side_effect = lambda: next(ticks)
+            fake_time.sleep = lambda *_: None
+            with self.assertLogs(gc.log, level="INFO") as logs:
+                result = gc.handle_2fa(object())
+        calls["log"] = "\n".join(logs.output)
+        calls["auth_clicks"] = [l for l in calls["clicked"] if l.startswith("Authenticate")]
+        return result, calls
+
+    def test_totp_flow_unchanged_with_gate_on(self):
+        result, c = self._drive(_TOTP_DIALOG, totp=_RFC_SEED, gate=True)
+        self.assertTrue(result)
+        self.assertEqual(len(c["typed"]), 1)
+        self.assertRegex(c["typed"][0], r"^\d{6}$")
+        self.assertEqual(c["auth_clicks"], [])
+        self.assertGreaterEqual(c["consulted"], 1, "handler must run, not be bypassed")
+
+    def test_totp_flow_unchanged_with_gate_off(self):
+        result, c = self._drive(_TOTP_DIALOG, totp=_RFC_SEED, gate=False)
+        self.assertTrue(result)
+        self.assertEqual(len(c["typed"]), 1)
+        self.assertEqual(c["auth_clicks"], [])
+
+    def test_passkey_dialog_gate_on_presses_authenticate_never_types(self):
+        result, c = self._drive(_PASSKEY_DIALOG, totp=_RFC_SEED, gate=True)
+        self.assertTrue(result)
+        self.assertEqual(c["typed"], [], "a TOTP code must never be typed into a passkey dialog")
+        self.assertEqual(c["auth_clicks"], ["Authenticate >"])
+
+    def test_passkey_dialog_no_totp_gate_on(self):
+        result, c = self._drive(_PASSKEY_DIALOG, totp="", gate=True)
+        self.assertTrue(result)
+        self.assertEqual(c["typed"], [])
+        self.assertEqual(c["auth_clicks"], ["Authenticate >"])
+
+    def test_passkey_dialog_gate_off_fails_loud_and_touches_nothing(self):
+        # Default behaviour: same reason string as v0.8.1's browser-window
+        # detection, so existing monitors keep matching; no click, no code.
+        result, c = self._drive(_PASSKEY_DIALOG, totp=_RFC_SEED, gate=False)
+        self.assertFalse(result)
+        self.assertEqual(c["typed"], [])
+        self.assertEqual(c["auth_clicks"], [])
+        self.assertIn('ALERT_2FA_FAILED', c["log"])
+        self.assertIn('passkey/WebAuthn 2FA flow - unattended login not supported', c["log"])
+        self.assertIn('PASSKEY_AUTHENTICATE=yes', c["log"])
+
+    def test_ib_key_push_flow_unchanged(self):
+        # No TOTP secret, normal dialog: the loop the issue #23 reporter
+        # and every IB Key user runs. Dialog is dismissed on the 3rd poll
+        # and the port opens — success must arrive that way, untouched.
+        dialog = [("dialog", "Second Factor Authentication", True)]
+        result, c = self._drive(_TOTP_DIALOG, totp="", gate=True,
+                                port=[False, False, True],
+                                windows=[[dialog[0]], [dialog[0]]] + [[]] * 100)
+        self.assertTrue(result)
+        self.assertEqual(c["typed"], [])
+        self.assertEqual(c["auth_clicks"], [])
+        self.assertGreaterEqual(c["consulted"], 1, "handler runs in the IB Key loop too")
+
+
+class TestPasskeyGateEnvParsing(unittest.TestCase):
+    def test_default_off(self):
+        self.assertIs(gc._coerce_yes_no("") is True, False)
+
+    def test_yes_enables(self):
+        self.assertIs(gc._coerce_yes_no("yes") is True, True)
+
+    def test_garbage_stays_off(self):
+        # An unrecognised value must not silently enable a 2FA behaviour.
+        self.assertIs(gc._coerce_yes_no("banana") is True, False)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

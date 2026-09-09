@@ -1617,6 +1617,19 @@ def _handle_passkey_prompt(title):
     if not _passkey_prompt_present(dump):
         return None
     log.info("Passkey prompt detected in %r: Use your Passkey device", title)
+    if not _PASSKEY_AUTHENTICATE:
+        # Same reason string v0.8.1 emits for the browser-window variant,
+        # so monitors keyed on it keep matching. Without this gate the
+        # dialog would fall through to TOTP handling and the code would
+        # be typed into a field that isn't there.
+        log.error(
+            f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+            f"reason=\"passkey/WebAuthn 2FA flow - unattended login not supported\" "
+            f"remediation=\"set PASSKEY_AUTHENTICATE=yes to have the "
+            f"controller press Authenticate, and run an authenticator "
+            f"alongside the container to complete the ceremony (README, "
+            f"Passkey section)\"")
+        return False
     # WINDOW can dump multiple matches, but CLICK_IN_WIN uses the first.
     if sum(line.startswith("=== window=") for line in dump.splitlines()) > 1:
         log.error("Multiple windows match %r; refusing an ambiguous passkey click", title)
@@ -1630,6 +1643,12 @@ def _handle_passkey_prompt(title):
         log.info("Passkey Authenticate candidate (raw): %r", label)
         if not agent_click_in_window(title, label):
             return False
+        # Returning True from here means handle_2fa reports success as
+        # soon as the click is accepted, before the ceremony completes.
+        # If the external authenticator never answers, the failure
+        # surfaces downstream as the API-port wait timing out rather than
+        # as a 2FA failure. That hand-off is deliberate: the controller
+        # has done the only part it can do.
         log.info(
             "Passkey Authenticate click accepted by agent; no further clicks "
             "in this attempt. WebAuthn completion is outside this handler.")
@@ -2865,6 +2884,18 @@ _CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS = int(os.environ.get(
 # Every failure inside the adoption path falls through to the
 # controller-driven restart, so the worst case is the old behaviour
 # plus the adopt timeout.
+# PR #29 (jpike88): when Gateway's 2FA dialog shows the passkey prompt
+# ("Use your Passkey device …"), the controller can press Authenticate.
+# It never performs the WebAuthn ceremony itself — that must be completed
+# by an authenticator you run alongside the container (a virtual FIDO
+# device such as passless, a key passed through, or a person). Opt-in:
+# with it unset the controller keeps v0.8.1's behaviour and fails loudly
+# on a passkey prompt rather than pressing anything. Off by default
+# because the maintainer has no passkey account to verify it against;
+# it is validated by the contributor's live use and the flow tests.
+_PASSKEY_AUTHENTICATE = _coerce_yes_no(
+    os.environ.get("PASSKEY_AUTHENTICATE", "")) is True
+
 _AUTO_RESTART_ADOPT = _coerce_yes_no(
     os.environ.get("AUTO_RESTART_ADOPT", "yes")) is not False
 # How long to wait for the self-restarted JVM's agent to report a new

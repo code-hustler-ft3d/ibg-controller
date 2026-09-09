@@ -595,7 +595,8 @@ ALERT_2FA_FAILED mode=live reason="2FA method mismatch" dialog_prompt='Enter IB 
 ALERT_2FA_FAILED mode=live reason="JLIST_SELECT on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="CLICK_IN_WIN OK on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="2FA device switch produced no code-entry dialog"
-ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login not supported"
+ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login not supported" remediation="set PASSKEY_AUTHENTICATE=yes ..."
+ALERT_2FA_FAILED mode=live reason="passkey Authenticate lookup failed"
 ```
 
 **When fired**: on terminal 2FA failure paths in `handle_2fa`
@@ -685,6 +686,7 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | `CLEAN_LOGOUT_TIMEOUT_SECONDS` | `15` | Seconds to wait for the Gateway JVM to exit after dispatching `WindowEvent.WINDOW_CLOSING` (the v0.5.6 clean-logout path). Gateway's WindowListener performs a CCP session-close, which can take a few seconds (network round-trip to IBKR + state flush). If this expires, the controller falls through to the SIGTERM path. Shorten (e.g. `7`) if Docker's `--stop-timeout` is tight; lengthen on slow-network hosts. Added v0.5.6. |
 | `CCP_LOCKOUT_MAX_JVM_RESTARTS` | `0` | Number of SIGKILL-capable JVM teardown cycles `_escalate_to_jvm_restart` will attempt before giving up. Default `0` = halt immediately and emit `ALERT_CCP_PERSISTENT_HALT` (v0.5.9's new behaviour; rationale: the retry loop can compound the lockout it's trying to clear by re-stranding slots on each teardown). Set to `5` to restore pre-v0.5.9 auto-retry behaviour. Supersedes the internal `_JVM_RESTART_MAX_ATTEMPTS` constant when set positive. Added v0.5.9. |
 | `AUTO_RESTART_ADOPT` | `yes` | When the Gateway JVM exits right after install4j's restarter ran (Gateway's own `AUTO_RESTART_TIME` restart), adopt the instance install4j brings up instead of launching a second one — no login, no second factor. `no` restores the always-relaunch behaviour that raced the restarter (issue #23). Added with the issue #23 fix. |
+| `PASSKEY_AUTHENTICATE` | unset (`no`) | `yes` lets the controller press **Authenticate** on Gateway's passkey prompt; the WebAuthn ceremony itself must be completed by an authenticator you run alongside the container. Unset, a passkey prompt fails loudly (`ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow …"`) as it has since v0.8.1. Added in PR #29. |
 | `AUTO_RESTART_PROBE_SECONDS` | `15` | When a clean JVM exit leaves no fresh `restarter.log`, how long to ask the agent socket whether a Gateway JVM the controller didn't spawn is already running (`ALERT_AUTO_RESTART detected_via=agent_socket`). Set to `0` to detect self-restarts only via `restarter.log`. This is the worst-case delay added to a genuine crash recovery on a clean exit, alongside the 5 s late-log grace. Added with the issue #23 fix. |
 | `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` | `90` | How long to wait for the self-restarted JVM's agent to answer with a new PID before giving up on adoption and falling back to a relaunch (`ALERT_AUTO_RESTART status=failed_no_agent`). The issue #23 reporter observed 0-3 s on their host; the default leaves room for slower ones. Added with the issue #23 fix. |
 
