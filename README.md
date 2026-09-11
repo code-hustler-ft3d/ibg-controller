@@ -95,6 +95,22 @@ real product.
 - **IB Key push** requires a human to tap approve on a phone. The
   controller will wait for that (leave `TWOFACTOR_CODE` unset), which
   is fine attended and a dead end for automation.
+- **Attended fallback over VNC.** If automation can't finish 2FA —
+  wrong method on the account, a stale secret, a push you missed —
+  connect to the container's VNC (port `5900`, password from the
+  upstream `VNC_SERVER_PASSWORD` env var) and complete the login by
+  hand. The controller sees the API port open and carries on
+  monitoring; nothing needs restarting. You have the 2FA wait
+  (`TWOFA_EXIT_INTERVAL`, default 120 s) plus the API-port wait
+  (180 s) — about five minutes, during which the controller only
+  watches. Slower than that and it exits, the container restarts and
+  you get a fresh window, but a login in progress is interrupted;
+  raise `TWOFA_EXIT_INTERVAL` if you need longer. Leave
+  `TWOFA_TIMEOUT_ACTION` at its default `none`: `restart` would
+  relaunch Gateway out from under you. Publish 5900 on localhost only
+  (`-p 127.0.0.1:5900:5900`). Expect to repeat it roughly weekly —
+  IBKR forces a full re-authentication at its Sunday ~01:00 ET reset
+  (per IBC's user guide). (Suggested by @ldicarlo in #7.)
 - **Passkey / WebAuthn accounts are not supported for unattended
   login.** IBKR forced some regions (Hong Kong and Japan as of 2026-08)
   onto passkeys; Gateway then opens an in-app browser expecting a
