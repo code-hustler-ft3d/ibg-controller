@@ -30,6 +30,7 @@ for dialog catalog and edge cases. Original work by @rlktradewright (IBC).
 """
 
 import base64
+import binascii
 import enum
 import hashlib
 import hmac
@@ -289,6 +290,40 @@ log = logging.getLogger("controller")
 
 
 # ── TOTP generation (stdlib only — no oathtool, no pyotp) ───────────────
+
+def _validate_totp_secret(secret):
+    """Return None if ``secret`` is usable by ``generate_totp``, else a
+    one-line explanation for the operator.
+
+    Empty is fine: it selects IB Key push mode. Anything else must be
+    the base32 *secret* IBKR shows when enrolling Mobile Authenticator.
+    The mistake this exists to catch (issue #7, 2026-09-11): pasting a
+    six-digit *generated* code instead. ``base64.b32decode`` rejects
+    that, and before this check the failure was an uncaught
+    ``binascii.Error`` traceback the moment the 2FA dialog appeared.
+    """
+    if not secret:
+        return None
+    if secret.strip().isdigit() and len(secret.strip()) in (6, 7, 8):
+        return (f"TWOFACTOR_CODE looks like a generated {len(secret.strip())}-digit "
+                "code. It must be the base32 SECRET from IBKR's Mobile "
+                "Authenticator enrolment (a long string of letters and the "
+                "digits 2-7); the controller generates the current code from it.")
+    try:
+        base64.b32decode(secret, casefold=True)
+        return None
+    except (binascii.Error, ValueError) as e:
+        hint = ""
+        if " " in secret:
+            try:
+                base64.b32decode(secret.replace(" ", ""), casefold=True)
+                hint = " Removing the spaces would make it valid."
+            except (binascii.Error, ValueError):
+                pass
+        return (f"TWOFACTOR_CODE is not valid base32 ({e}). It must be the "
+                "base32 secret from IBKR's Mobile Authenticator enrolment, "
+                f"not a generated code.{hint}")
+
 
 def generate_totp(secret_b32, period=30, digits=6):
     """Generate a TOTP code from a base32 secret. Stdlib only."""
@@ -4284,6 +4319,17 @@ def main():
 
     if not USERNAME or not PASSWORD:
         log.error("TWS_USERID and TWS_PASSWORD must be set")
+        sys.exit(2)
+
+    _totp_problem = _validate_totp_secret(TOTP_SECRET)
+    if _totp_problem:
+        # Fail here, before any login, rather than crash with a traceback
+        # at the 2FA dialog. Same ALERT prefix operators already watch;
+        # the reason is new and additive.
+        log.error(
+            f"ALERT_2FA_FAILED mode={TRADING_MODE} "
+            f"reason=\"TWOFACTOR_CODE is not a base32 secret\" "
+            f"remediation=\"{_totp_problem}\"")
         sys.exit(2)
 
     _warn_unsupported_env_vars()

@@ -635,6 +635,7 @@ ALERT_2FA_FAILED mode=live reason="JLIST_SELECT on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="CLICK_IN_WIN OK on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="2FA device switch produced no code-entry dialog"
 ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login not supported"
+ALERT_2FA_FAILED mode=live reason="TWOFACTOR_CODE is not a base32 secret" remediation="TWOFACTOR_CODE looks like a generated 6-digit code. It must be the base32 SECRET ..."
 ```
 
 **When fired**: on terminal 2FA failure paths in `handle_2fa`
@@ -667,7 +668,17 @@ ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login 
    scope for this tool (and can't run on arm64, which ships no
    jxbrowser build).
 
-**What the operator should do**: for reasons 1–4, connect via VNC
+9. (issue #7 follow-up) **At startup, before any login**: `TWOFACTOR_CODE`
+   is set but is not a base32 secret — typically a six-digit *generated*
+   code pasted where the enrolment secret belongs. The controller exits
+   with status 2 immediately. Before this check the same mistake
+   surfaced as an uncaught `binascii.Error` traceback the moment the
+   2FA dialog appeared. The `remediation=` field says exactly what was
+   wrong with the value.
+
+**What the operator should do**: for reason 9, put the base32 secret
+from IBKR's Mobile Authenticator enrolment in `TWOFACTOR_CODE` (or
+`TWOFACTOR_CODE_FILE`) and restart; for reasons 1–4, connect via VNC
 (`vnc://<container-host>:5900`) and enter the TOTP manually, or
 verify `TWOFACTOR_CODE` in the env is the correct base32 secret from
 IBKR's Mobile Authenticator setup QR code. For reasons 5–7

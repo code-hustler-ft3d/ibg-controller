@@ -148,6 +148,7 @@ real product.
 |---|---|
 | `TWS_USERID` / `TWS_PASSWORD` | IB credentials |
 | `TWS_USERID_PAPER` / `TWS_PASSWORD_PAPER` | Paper credentials, used when `TRADING_MODE=paper` |
+| `TWOFACTOR_CODE` | The **base32 secret** from IBKR's Mobile Authenticator enrolment — not a generated six-digit code. Validated at startup; a wrong-shaped value exits with `ALERT_2FA_FAILED reason="TWOFACTOR_CODE is not a base32 secret"`. Leave unset for IB Key push. |
 | `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
 | `TRADING_MODE` | `live`, `paper` (default), or `both` |
 | `TWOFACTOR_CODE` | Base32 TOTP secret; enables automatic 2FA entry |
