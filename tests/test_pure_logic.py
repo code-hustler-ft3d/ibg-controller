@@ -3098,5 +3098,52 @@ class TestAttemptReauthSplit(unittest.TestCase):
             redrive.assert_called_once_with(app)
 
 
+class TestValidateTotpSecret(unittest.TestCase):
+    """Issue #7 follow-up: a six-digit *generated* code pasted into
+    TWOFACTOR_CODE used to crash the controller with an uncaught
+    binascii.Error the moment the 2FA dialog appeared. Validate at
+    startup and say what's wrong instead."""
+
+    RFC_SEED = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+
+    def test_empty_means_ib_key_mode_and_is_fine(self):
+        self.assertIsNone(gc._validate_totp_secret(""))
+
+    def test_valid_secret_passes(self):
+        self.assertIsNone(gc._validate_totp_secret(self.RFC_SEED))
+
+    def test_lowercase_and_padding_tolerated(self):
+        self.assertIsNone(gc._validate_totp_secret(self.RFC_SEED.lower()))
+        self.assertIsNone(gc._validate_totp_secret("GEZDGNBV"))          # unpadded
+        self.assertIsNone(gc._validate_totp_secret("GEZDGNBVGY======"))  # padded
+
+    def test_six_digit_code_is_named_as_the_mistake(self):
+        msg = gc._validate_totp_secret("123456")
+        self.assertIsNotNone(msg)
+        self.assertIn("generated 6-digit code", msg)
+        self.assertIn("SECRET", msg)
+
+    def test_eight_digit_code_is_named_too(self):
+        self.assertIn("generated 8-digit code", gc._validate_totp_secret("12345678"))
+
+    def test_non_base32_garbage_is_explained(self):
+        msg = gc._validate_totp_secret("not-a-secret!")
+        self.assertIsNotNone(msg)
+        self.assertIn("not valid base32", msg)
+
+    def test_spaces_get_a_targeted_hint(self):
+        spaced = " ".join(self.RFC_SEED[i:i+4] for i in range(0, len(self.RFC_SEED), 4))
+        msg = gc._validate_totp_secret(spaced)
+        self.assertIsNotNone(msg)
+        self.assertIn("Removing the spaces would make it valid", msg)
+
+    def test_generate_totp_never_sees_a_value_validation_rejects(self):
+        # The guarantee main() relies on: anything the validator passes,
+        # generate_totp can decode without raising.
+        for ok in ("", self.RFC_SEED, self.RFC_SEED.lower(), "GEZDGNBV"):
+            if gc._validate_totp_secret(ok) is None and ok:
+                self.assertRegex(gc.generate_totp(ok), r"^\d{6}$")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

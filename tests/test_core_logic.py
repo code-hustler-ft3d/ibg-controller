@@ -579,5 +579,79 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
         self.assertLess(elapsed, 12, "waited on an already-handled restart")
 
 
+class TestLockExitTimeVerification(unittest.TestCase):
+    """A production box logged `Setting Auto Log Off Time = 05:01 PM`
+    and `Post-login config applied`, then ran 26 hours straight through
+    that boundary without logging off (2026-09-07, and the same
+    non-firing was seen a month earlier on v0.8.0). `agent_settext_by_label`
+    returning True says the write was accepted, not that Gateway kept
+    it — so the value is now read back after OK."""
+
+    def setUp(self):
+        for name in ("_config_open", "_config_close", "agent_jtree_select_path",
+                     "agent_window", "time"):
+            self.assertTrue(hasattr(gc, name), name)
+
+    def _patches(self, dump, open_ok=True, tree_ok=True, close_ok=True):
+        return [
+            patch.object(gc, "_config_open", return_value=open_ok),
+            patch.object(gc, "agent_jtree_select_path", return_value=tree_ok),
+            patch.object(gc, "_config_close", return_value=close_ok),
+            patch.object(gc, "agent_window", return_value=dump),
+            patch.object(gc.time, "sleep"),
+        ]
+
+    def _run(self, *a, **kw):
+        ps = self._patches(*a, **kw)
+        for p in ps:
+            p.start()
+            self.addCleanup(p.stop)
+        return gc._verify_lock_exit_time_persisted(
+            "Set Auto Log Off Time (HH:MM)", "05:01 PM")
+
+    def test_value_present_verifies(self):
+        self.assertIs(self._run("OK\nJTextField: 05:01 PM\nEND\n"), True)
+
+    def test_value_absent_fails_verification(self):
+        # The real production symptom: dialog reads back empty.
+        self.assertIs(self._run("OK\nJTextField: \nEND\n"), False)
+
+    def test_different_value_fails_verification(self):
+        self.assertIs(self._run("OK\nJTextField: 11:59 PM\nEND\n"), False)
+
+    def test_unreadable_dialog_is_unverified_not_wrong(self):
+        # None means "couldn't check" and must not be reported as a
+        # failed setting.
+        self.assertIsNone(self._run(""))
+        self.assertIsNone(self._run("ERR no_such_window"))
+
+    def test_cannot_reopen_is_unverified(self):
+        self.assertIsNone(self._run("OK\nJTextField: 05:01 PM\nEND\n",
+                                    open_ok=False))
+
+    def test_cannot_select_panel_is_unverified(self):
+        self.assertIsNone(self._run("OK\nJTextField: 05:01 PM\nEND\n",
+                                    tree_ok=False))
+
+    def test_verification_never_commits(self):
+        """Verification must close with Cancel, never OK — otherwise the
+        check itself could apply a half-filled form."""
+        ps = self._patches("OK\nJTextField: 05:01 PM\nEND\n")
+        for p in ps:
+            p.start()
+            self.addCleanup(p.stop)
+        gc._verify_lock_exit_time_persisted("Set Auto Log Off Time (HH:MM)",
+                                            "05:01 PM")
+        gc._config_close.assert_called_once_with("Cancel")
+
+    def test_exception_is_swallowed_as_unverified(self):
+        with patch.object(gc, "_config_open", side_effect=RuntimeError("boom")):
+            self.assertIsNone(gc._verify_lock_exit_time_persisted("L", "V"))
+
+    def test_visible_helper_tolerates_missing_dump(self):
+        with patch.object(gc, "agent_window", return_value=None):
+            self.assertIsNone(gc._lock_exit_time_visible("05:01 PM"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

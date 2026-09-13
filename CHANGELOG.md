@@ -4,6 +4,49 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A wrong-shaped `TWOFACTOR_CODE` now fails at startup with a plain
+  explanation instead of a traceback at the 2FA dialog** (issue #7
+  follow-up). The common mistake is pasting a six-digit *generated*
+  code where the base32 enrolment *secret* belongs; `base64.b32decode`
+  rejects it and, with both `generate_totp` call sites unguarded, the
+  controller died with an uncaught `binascii.Error` the moment the
+  dialog appeared — after a full login. Now `_validate_totp_secret`
+  runs in `main()` next to the credentials check and exits with status
+  2 and `ALERT_2FA_FAILED reason="TWOFACTOR_CODE is not a base32
+  secret"`, whose `remediation=` names the specific problem (looks like
+  a generated code / not base32 / would be valid without the spaces).
+  Empty stays valid — that's IB Key mode. The README env table gains a
+  `TWOFACTOR_CODE` row, which it was missing.
+
+- **A Lock and Exit schedule that Gateway silently drops is now
+  reported instead of claimed as applied.** The controller wrote
+  `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME`, saw
+  `agent_settext_by_label` return success, and logged "Post-login
+  config applied". That only means the widget accepted the write. On
+  2026-09-07 a production box logged `Setting Auto Log Off Time =
+  05:01 PM`, then ran 26 hours straight through that boundary without
+  logging off — and the same non-firing had been observed a month
+  earlier on v0.8.0, so it is long-standing rather than a regression.
+  After OK the controller now re-opens Configure → Settings, re-selects
+  Lock and Exit, and reads the value back, closing with **Cancel** so
+  the check itself commits nothing.
+  - Verified value: logged as confirmed.
+  - Value gone: new grep-contract token `ALERT_CONFIG_NOT_APPLIED`
+    (ERROR) naming the setting, the env var and the requested value.
+    Worth paging on — the session is healthy and logged in, which is
+    precisely why a silently missing daily schedule goes unnoticed.
+  - Dialog unreadable: a WARNING saying *unverified*, never reported as
+    a failure. Verification is best-effort and never fails the login.
+  - The old "Post-login config applied and dialog closed" line now
+    reads "committed", since applied was the claim that wasn't earned.
+- Note for anyone depending on Gateway's daily logoff: if you see this
+  token, treat an external scheduled container restart as the reliable
+  substitute rather than Gateway's own scheduler.
+
 ## [0.9.0] - 2026-09-07
 
 ### Added

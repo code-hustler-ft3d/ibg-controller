@@ -219,6 +219,45 @@ took longer than the configured delay — consider tuning
 INFO-tier visibility dashboards, no debounce — frequency itself is
 useful signal.
 
+### `ALERT_CONFIG_NOT_APPLIED`
+
+```
+ALERT_CONFIG_NOT_APPLIED mode=live setting="Set Auto Log Off Time (HH:MM)" env_var=AUTO_LOGOFF_TIME requested="05:01 PM" reason="Gateway did not retain the value after OK; the schedule will not fire"
+```
+
+**When fired**: the controller wrote a Lock and Exit schedule
+(`AUTO_LOGOFF_TIME` or `AUTO_RESTART_TIME`), clicked OK, then re-opened
+the dialog and found the value gone. The write was accepted and the
+schedule still will not happen.
+
+**What it means**: any automation you have built on that daily boundary
+— a restart, a reconnect, a downstream job — will not be triggered by
+Gateway. This is not a controller crash; the session is logged in and
+healthy, which is exactly why it is worth paging on: everything looks
+fine while a scheduled event silently never occurs.
+
+**Why the check exists**: `agent_settext_by_label` returning success
+only means the write was accepted by the widget. On 2026-09-07 a
+production box logged `Setting Auto Log Off Time = 05:01 PM` and
+`Post-login config applied`, then ran 26 hours straight through the
+configured boundary without ever logging off. Only a read-back after
+the commit distinguishes the two cases.
+
+**What the operator should do**: check the value in Gateway's UI over
+VNC. If Gateway is showing the *other* Lock and Exit field (it offers
+either Auto Log Off Time or Auto Restart Time, never both, depending on
+account state) then set the matching env var instead. If Gateway shows
+your value but still does not act on it, the schedule is not usable on
+that account and an external scheduled restart is the reliable
+substitute.
+
+**Log level**: `ERROR`. Page on it once per container start at most —
+it is emitted only on the post-login config pass.
+
+**Related**: a `Could not verify …` WARNING is emitted instead when the
+dialog could not be re-opened or read at all. That means unverified,
+not failed; do not page on it.
+
 ### `ALERT_AUTO_RESTART`
 
 ```
@@ -596,6 +635,7 @@ ALERT_2FA_FAILED mode=live reason="JLIST_SELECT on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="CLICK_IN_WIN OK on 2FA device selector failed"
 ALERT_2FA_FAILED mode=live reason="2FA device switch produced no code-entry dialog"
 ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login not supported"
+ALERT_2FA_FAILED mode=live reason="TWOFACTOR_CODE is not a base32 secret" remediation="TWOFACTOR_CODE looks like a generated 6-digit code. It must be the base32 SECRET ..."
 ```
 
 **When fired**: on terminal 2FA failure paths in `handle_2fa`
@@ -628,7 +668,17 @@ ALERT_2FA_FAILED mode=live reason="passkey/WebAuthn 2FA flow - unattended login 
    scope for this tool (and can't run on arm64, which ships no
    jxbrowser build).
 
-**What the operator should do**: for reasons 1–4, connect via VNC
+9. (issue #7 follow-up) **At startup, before any login**: `TWOFACTOR_CODE`
+   is set but is not a base32 secret — typically a six-digit *generated*
+   code pasted where the enrolment secret belongs. The controller exits
+   with status 2 immediately. Before this check the same mistake
+   surfaced as an uncaught `binascii.Error` traceback the moment the
+   2FA dialog appeared. The `remediation=` field says exactly what was
+   wrong with the value.
+
+**What the operator should do**: for reason 9, put the base32 secret
+from IBKR's Mobile Authenticator enrolment in `TWOFACTOR_CODE` (or
+`TWOFACTOR_CODE_FILE`) and restart; for reasons 1–4, connect via VNC
 (`vnc://<container-host>:5900`) and enter the TOTP manually, or
 verify `TWOFACTOR_CODE` in the env is the correct base32 secret from
 IBKR's Mobile Authenticator setup QR code. For reasons 5–7
@@ -790,7 +840,8 @@ four additional `ALERT_CLEAN_LOGOUT` `status=` values
 (`safe_no_session`, `zombie_slot_cannot_release`,
 `cancelled_pending_2fa`, `failed_cancel_2fa`) in v0.5.9, and
 `ALERT_AUTO_RESTART` (INFO on `status=adopted`, WARNING on the
-`failed_*` statuses) with the issue #23 fix — all under the same
+`failed_*` statuses) with the issue #23 fix, and
+`ALERT_CONFIG_NOT_APPLIED` (ERROR) in v0.9.1 — all under the same
 stability contract. Breaking changes will be called out in
 the CHANGELOG and accompany a minor version bump. Adding new fields
 to `/health`, new `ALERT_*` tokens, or new `status=` values to
