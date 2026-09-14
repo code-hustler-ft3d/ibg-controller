@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.10.0
 
 - **Optional passkey support (PR #29).** New env var
   `PASSKEY_AUTHENTICATE` (default unset = off). Nothing changes unless

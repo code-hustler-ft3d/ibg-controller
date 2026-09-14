@@ -299,7 +299,7 @@ install4j brought up, adopted it, and reports the outcome here.
 waiting for the new JVM; an attempt that stops earlier (no fresh
 `restarter.log`) emits none, and neither does an unexpected exception
 inside the path (that one is logged as `Recovery: self-restart
-adoption raised …`). Added with the issue #23 fix.
+adoption raised …`). Added v0.9.0.
 
 **`status=` values**:
 
@@ -655,7 +655,7 @@ ALERT_2FA_FAILED mode=live reason="TWOFACTOR_CODE is not a base32 secret" remedi
    type the TOTP into the wrong method.
 6. (v0.8.0, #20/#21) The multi-method *device-selector* variant was
    detected but couldn't be driven (`JLIST_SELECT` / OK click failed).
-   Since the issue #33 fix, the `agent JLIST_SELECT` line logged just
+   Since v0.10.0 (issue #33), the `agent JLIST_SELECT` line logged just
    before this alert lists the entries the list contains (`have=[…]`),
    and a `TWOFA_DEVICE` differing from an entry only in case or spacing
    is matched.
@@ -673,7 +673,7 @@ ALERT_2FA_FAILED mode=live reason="TWOFACTOR_CODE is not a base32 secret" remedi
    scope for this tool (and can't run on arm64, which ships no
    jxbrowser build).
 
-9. (issue #7 follow-up) **At startup, before any login**: `TWOFACTOR_CODE`
+9. (v0.10.0, #7 follow-up) **At startup, before any login**: `TWOFACTOR_CODE`
    is set but is not a base32 secret — typically a six-digit *generated*
    code pasted where the enrolment secret belongs. The controller exits
    with status 2 immediately. Before this check the same mistake
@@ -739,10 +739,10 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | `CCP_COOLDOWN_MULTIPLIER` | `1.5` | Multiplicative factor applied per restart attempt: attempt-1 = base, attempt-2 = base×1.5, attempt-3 = base×2.25, etc., capped at `CCP_COOLDOWN_MAX_SECONDS`. Set to `1.0` to restore the v0.5.4-and-earlier fixed-duration behaviour. Added v0.5.5. |
 | `CLEAN_LOGOUT_TIMEOUT_SECONDS` | `15` | Seconds to wait for the Gateway JVM to exit after dispatching `WindowEvent.WINDOW_CLOSING` (the v0.5.6 clean-logout path). Gateway's WindowListener performs a CCP session-close, which can take a few seconds (network round-trip to IBKR + state flush). If this expires, the controller falls through to the SIGTERM path. Shorten (e.g. `7`) if Docker's `--stop-timeout` is tight; lengthen on slow-network hosts. Added v0.5.6. |
 | `CCP_LOCKOUT_MAX_JVM_RESTARTS` | `0` | Number of SIGKILL-capable JVM teardown cycles `_escalate_to_jvm_restart` will attempt before giving up. Default `0` = halt immediately and emit `ALERT_CCP_PERSISTENT_HALT` (v0.5.9's new behaviour; rationale: the retry loop can compound the lockout it's trying to clear by re-stranding slots on each teardown). Set to `5` to restore pre-v0.5.9 auto-retry behaviour. Supersedes the internal `_JVM_RESTART_MAX_ATTEMPTS` constant when set positive. Added v0.5.9. |
-| `AUTO_RESTART_ADOPT` | `yes` | When the Gateway JVM exits right after install4j's restarter ran (Gateway's own `AUTO_RESTART_TIME` restart), adopt the instance install4j brings up instead of launching a second one — no login, no second factor. `no` restores the always-relaunch behaviour that raced the restarter (issue #23). Added with the issue #23 fix. |
-| `PASSKEY_AUTHENTICATE` | unset (`no`) | `yes` lets the controller press **Authenticate** on Gateway's passkey prompt; the WebAuthn ceremony itself must be completed by an authenticator you run alongside the container. Unset, a passkey prompt fails loudly (`ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow …"`) as it has since v0.8.1. Added in PR #29. |
-| `AUTO_RESTART_PROBE_SECONDS` | `15` | When a clean JVM exit leaves no fresh `restarter.log`, how long to ask the agent socket whether a Gateway JVM the controller didn't spawn is already running (`ALERT_AUTO_RESTART detected_via=agent_socket`). Set to `0` to detect self-restarts only via `restarter.log`. This is the worst-case delay added to a genuine crash recovery on a clean exit, alongside the 5 s late-log grace. Added with the issue #23 fix. |
-| `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` | `90` | How long to wait for the self-restarted JVM's agent to answer with a new PID before giving up on adoption and falling back to a relaunch (`ALERT_AUTO_RESTART status=failed_no_agent`). The issue #23 reporter observed 0-3 s on their host; the default leaves room for slower ones. Added with the issue #23 fix. |
+| `AUTO_RESTART_ADOPT` | `yes` | When the Gateway JVM exits right after install4j's restarter ran (Gateway's own `AUTO_RESTART_TIME` restart), adopt the instance install4j brings up instead of launching a second one — no login, no second factor. `no` restores the always-relaunch behaviour that raced the restarter (issue #23). Added v0.9.0. |
+| `PASSKEY_AUTHENTICATE` | unset (`no`) | `yes` lets the controller press **Authenticate** on Gateway's passkey prompt; the WebAuthn ceremony itself must be completed by an authenticator you run alongside the container. Unset, a passkey prompt fails loudly (`ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow …"`) as it has since v0.8.1. Added v0.10.0. |
+| `AUTO_RESTART_PROBE_SECONDS` | `15` | When a clean JVM exit leaves no fresh `restarter.log`, how long to ask the agent socket whether a Gateway JVM the controller didn't spawn is already running (`ALERT_AUTO_RESTART detected_via=agent_socket`). Set to `0` to detect self-restarts only via `restarter.log`. This is the worst-case delay added to a genuine crash recovery on a clean exit, alongside the 5 s late-log grace. Added v0.9.0. |
+| `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` | `90` | How long to wait for the self-restarted JVM's agent to answer with a new PID before giving up on adoption and falling back to a relaunch (`ALERT_AUTO_RESTART status=failed_no_agent`). The issue #23 reporter observed 0-3 s on their host; the default leaves room for slower ones. Added v0.9.0. |
 
 ## Example integrations
 
@@ -846,8 +846,8 @@ four additional `ALERT_CLEAN_LOGOUT` `status=` values
 (`safe_no_session`, `zombie_slot_cannot_release`,
 `cancelled_pending_2fa`, `failed_cancel_2fa`) in v0.5.9, and
 `ALERT_AUTO_RESTART` (INFO on `status=adopted`, WARNING on the
-`failed_*` statuses) with the issue #23 fix, and
-`ALERT_CONFIG_NOT_APPLIED` (ERROR) in v0.9.1 — all under the same
+`failed_*` statuses) in v0.9.0, and
+`ALERT_CONFIG_NOT_APPLIED` (ERROR) in v0.10.0 — all under the same
 stability contract. Breaking changes will be called out in
 the CHANGELOG and accompany a minor version bump. Adding new fields
 to `/health`, new `ALERT_*` tokens, or new `status=` values to

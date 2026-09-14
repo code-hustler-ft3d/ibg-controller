@@ -155,6 +155,7 @@ real product.
 | `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
 | `TRADING_MODE` | `live`, `paper` (default), or `both` |
 | `TWOFA_DEVICE` | IBC-compatible. Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Matched against Gateway's device list without regard to case or spacing; if nothing matches, the log lists the entries it found. Ignored on single-method accounts. |
+| `PASSKEY_AUTHENTICATE` | `yes` makes the controller press **Authenticate** on Gateway's passkey prompt; an authenticator running alongside the container completes the WebAuthn ceremony. Unset, a passkey prompt fails loudly. Needs an amd64 base. |
 
 ### Connection
 
