@@ -88,6 +88,37 @@ anything from you.
   `ALERT_2FA_FAILED` reason, `"passkey Authenticate lookup failed"` —
   grep-by-prefix monitors need no change.
 
+- **A Lock and Exit schedule that doesn't stick is now reported (#30).**
+  If you set `AUTO_LOGOFF_TIME` or `AUTO_RESTART_TIME`, the controller
+  now re-opens Configure → Settings after applying it and reads the
+  value back, closing with Cancel. This adds a few seconds to the
+  post-login config pass. If Gateway didn't keep the value, you get a
+  new ERROR-level token,
+  `ALERT_CONFIG_NOT_APPLIED mode=… setting="…" env_var=… requested="…" reason="…"`,
+  meaning the daily logoff or restart will not happen. It is worth
+  paging on: the session stays healthy, which is exactly why a missing
+  schedule otherwise goes unnoticed. If the dialog can't be read, a
+  WARNING says the value is unverified instead. Nothing to change unless
+  the token fires; if it does, an external scheduled restart is the
+  reliable substitute.
+- **A mis-shaped `TWOFACTOR_CODE` now stops the controller at startup
+  (#32).** The value must be the base32 secret from IBKR's Mobile
+  Authenticator enrolment. A generated six-digit code, or anything else
+  that isn't base32, now exits with status 2 and
+  `ALERT_2FA_FAILED reason="TWOFACTOR_CODE is not a base32 secret"`
+  before any login attempt. Previously the same value got through a full
+  username/password login and then crashed with a Python traceback at
+  the 2FA dialog. Deployments with a valid secret, or with it unset for
+  IB Key, are unaffected. If you see the token, put the secret in
+  `TWOFACTOR_CODE` (or `TWOFACTOR_CODE_FILE`) and restart.
+- **The 2FA device selector tolerates case and spacing (#34).** On
+  multi-method accounts, `TWOFA_DEVICE` is now matched against Gateway's
+  device list without regard to case, whitespace or HTML markup, as long
+  as exactly one entry matches. When nothing matches, the controller log
+  lists the entries it found (`have=[…]`). This is a change to the
+  in-JVM agent, so it only takes effect from the new image, not by
+  swapping the controller script. No configuration change is needed.
+
 ### v0.9.0
 
 - **If you set `AUTO_RESTART_TIME`, the controller no longer relaunches
