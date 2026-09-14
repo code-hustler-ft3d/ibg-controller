@@ -70,8 +70,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
   2 and `ALERT_2FA_FAILED reason="TWOFACTOR_CODE is not a base32
   secret"`, whose `remediation=` names the specific problem (looks like
   a generated code / not base32 / would be valid without the spaces).
-  Empty stays valid — that's IB Key mode. The README env table gains a
-  `TWOFACTOR_CODE` row, which it was missing.
+  Empty stays valid — that's IB Key mode. The README's `TWOFACTOR_CODE` row now says it must be
+  the secret, not a generated code.
 
 - **A Lock and Exit schedule that Gateway silently drops is now
   reported instead of claimed as applied.** The controller wrote
