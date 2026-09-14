@@ -655,6 +655,10 @@ ALERT_2FA_FAILED mode=live reason="TWOFACTOR_CODE is not a base32 secret" remedi
    type the TOTP into the wrong method.
 6. (v0.8.0, #20/#21) The multi-method *device-selector* variant was
    detected but couldn't be driven (`JLIST_SELECT` / OK click failed).
+   Since the issue #33 fix, the `agent JLIST_SELECT` line logged just
+   before this alert lists the entries the list contains (`have=[…]`),
+   and a `TWOFA_DEVICE` differing from an entry only in case or spacing
+   is matched.
 7. (v0.8.0, #20/#21) The device was selected and OK clicked, but no
    "Enter <method> code" prompt appeared within 15s — on current
    Gateway the in-dialog switch is rejected server-side (issue #20),

@@ -177,10 +177,15 @@ SETTEXT_BY_LABEL <title>|<label>|<value>   → OK set label=<label> value=<v>
 ```
 JLIST_SELECT <title_substr>|<item_text>    → OK selected=<item> | ERR ...
 ```
-Selects an item by exact text in the first `JList` of the first showing
-window whose title contains the substring. Used to pick `TWOFA_DEVICE`
-in the 2FA device-selector dialog (the same dialog shape IBC's
-`SecondFactorDevice` handling targets).
+Selects an item in the first `JList` of the first showing window whose
+title contains the substring. Used to pick `TWOFA_DEVICE` in the 2FA
+device-selector dialog (the same dialog shape IBC's `SecondFactorDevice`
+handling targets). An exact match on the entry's value or its painted
+label wins; otherwise a single entry that matches without regard to
+case, runs of whitespace or HTML markup is accepted (issue #33). Two
+entries matching that way are refused with `ERR jlist_item_ambiguous`,
+and a miss returns `ERR jlist_item_not_found want=… have=[a | b]` listing
+the entries. `OK selected=` reports the entry's painted label.
 
 Why each was added:
 

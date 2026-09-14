@@ -155,7 +155,7 @@ real product.
 | `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
 | `TRADING_MODE` | `live`, `paper` (default), or `both` |
 | `TWOFACTOR_CODE` | Base32 TOTP secret; enables automatic 2FA entry |
-| `TWOFA_DEVICE` | IBC-compatible. Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Ignored on single-method accounts. |
+| `TWOFA_DEVICE` | IBC-compatible. Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Matched against Gateway's device list without regard to case or spacing; if nothing matches, the log lists the entries it found. Ignored on single-method accounts. |
 
 ### Connection
 

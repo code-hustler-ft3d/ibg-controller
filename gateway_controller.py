@@ -640,6 +640,9 @@ def agent_jlist_select(title_substring, item_text):
         log.error(f"agent JLIST_SELECT {title_substring!r}: {type(e).__name__}: {e}")
         return False
     if resp.startswith("OK"):
+        # The agent reports the entry it picked. Since issue #33 that can
+        # differ from item_text in case or spacing, so log it.
+        log.info(f"agent JLIST_SELECT {title_substring!r}: {resp}")
         return True
     log.error(f"agent JLIST_SELECT {title_substring!r}: {resp}")
     return False

@@ -39,6 +39,26 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The 2FA device selector no longer fails on a difference in case or
+  spacing** (issue #33, reported by @ldicarlo). On multi-method accounts
+  the controller picks `TWOFA_DEVICE` from Gateway's device list with the
+  agent's `JLIST_SELECT`, which accepted only exact text. A value that
+  differed from the list entry only in case, such as `Mobile
+  Authenticator App` against the `Mobile Authenticator app` Gateway
+  shows, failed with `jlist_item_not_found` and stopped the login with
+  `ALERT_2FA_FAILED reason="JLIST_SELECT on 2FA device selector failed"`
+  — while the controller's own follow-up check of the code prompt was
+  already case-insensitive. An exact match still wins. Otherwise the
+  agent accepts a single entry matching without regard to case, runs of
+  whitespace or HTML markup, compared against both the entry's value and
+  the label the list actually paints. Two entries that differ only in
+  case are refused as ambiguous rather than guessed between. A miss now
+  lists the entries (`have=[IB Key | Mobile Authenticator app]`), so it
+  diagnoses itself, and a successful selection logs the entry picked.
+  Agent change: needs the new image. Verified by a new drill,
+  `tests/integration/jlist_select_drill.py`, driving the real agent over
+  its socket against real Swing lists under Xvfb.
+
 - **A wrong-shaped `TWOFACTOR_CODE` now fails at startup with a plain
   explanation instead of a traceback at the 2FA dialog** (issue #7
   follow-up). The common mistake is pasting a six-digit *generated*

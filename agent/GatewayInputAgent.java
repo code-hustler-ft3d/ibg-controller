@@ -58,7 +58,7 @@ import javax.swing.tree.TreePath;
  *   SETTEXT_IN_WIN <title>|<text>         → OK | ERR ...
  *   CLICK_IN_WIN <title>|<button>         → OK | ERR ...
  *   JTREE_SELECT_PATH <title>|<p1>/<p2>/..→ OK selected=<path> | ERR ...
- *   JLIST_SELECT <title>|<item>          → OK selected=<item> | ERR ...
+ *   JLIST_SELECT <title>|<item>          → OK selected=<entry> | ERR jlist_item_not_found want=… have=[…] | ERR jlist_item_ambiguous …
  *   JCHECK <title>|<name>|<true|false>    → OK unchanged=<v> | OK changed=<v> | ERR ...
  *   SETTEXT_BY_LABEL <title>|<label>|<v>  → OK set label=<label> value=<v> | ERR ...
  *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
@@ -577,34 +577,108 @@ public class GatewayInputAgent {
 
         // First JList inside this window — the 2FA device selector is
         // the only list in the Second Factor Authentication dialog.
-        // JList is generic; collect() infers the raw type here, which
-        // is fine for iterating the model.
         @SuppressWarnings({"rawtypes", "unchecked"})
         List<JList> lists = collect(target, JList.class);
         if (lists.isEmpty()) {
             return "ERR no_jlist_in_window=" + titleSubstr;
         }
         final JList<?> list = lists.get(0);
-        final ListModel<?> model = list.getModel();
 
+        // Read every entry on the EDT, two ways: the model element's
+        // toString() (what matched on the real #20/#21 account) and the
+        // text the cell renderer actually paints, which is what a person
+        // sees and copies into TWOFA_DEVICE. They normally agree.
+        final List<String> raw = new ArrayList<>();
+        final List<String> shown = new ArrayList<>();
+        SwingUtilities.invokeAndWait(() -> collectJListTexts(list, raw, shown));
+
+        String want = itemText.trim();
+        // 1. Exact match: the original behaviour, still preferred.
         int found = -1;
-        for (int i = 0; i < model.getSize(); i++) {
-            Object entry = model.getElementAt(i);
-            String entryStr = entry == null ? "" : entry.toString().trim();
-            if (entryStr.equals(itemText)) {
+        for (int i = 0; i < raw.size(); i++) {
+            if (raw.get(i).equals(want) || shown.get(i).equals(want)) {
                 found = i;
                 break;
             }
         }
+        // 2. Ignoring case, runs of whitespace and HTML markup (issue #33:
+        //    "Mobile Authenticator App" against "Mobile Authenticator app").
+        //    Accepted only when exactly ONE entry matches, so two entries
+        //    differing only in case are refused rather than guessed at.
         if (found < 0) {
-            return "ERR jlist_item_not_found want=" + itemText;
+            String norm = normaliseListText(want);
+            List<Integer> hits = new ArrayList<>();
+            for (int i = 0; i < raw.size(); i++) {
+                if (normaliseListText(raw.get(i)).equals(norm)
+                        || normaliseListText(shown.get(i)).equals(norm)) {
+                    hits.add(i);
+                }
+            }
+            if (hits.size() > 1) {
+                return "ERR jlist_item_ambiguous want=" + itemText
+                        + " have=" + describeEntries(shown);
+            }
+            if (hits.size() == 1) {
+                found = hits.get(0);
+            }
+        }
+        if (found < 0) {
+            // List what is there, so a mismatch explains itself in the
+            // controller log instead of needing a VNC session to diagnose.
+            return "ERR jlist_item_not_found want=" + itemText
+                    + " have=" + describeEntries(shown);
         }
         final int idx = found;
         SwingUtilities.invokeAndWait(() -> {
             list.setSelectedIndex(idx);
             list.ensureIndexIsVisible(idx);
         });
-        return "OK selected=" + itemText;
+        return "OK selected=" + shown.get(idx);
+    }
+
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    private static void collectJListTexts(JList list, List<String> raw, List<String> shown) {
+        ListModel model = list.getModel();
+        javax.swing.ListCellRenderer renderer = list.getCellRenderer();
+        for (int i = 0; i < model.getSize(); i++) {
+            Object entry = model.getElementAt(i);
+            String r = entry == null ? "" : entry.toString().trim();
+            String painted = r;
+            if (renderer != null) {
+                try {
+                    Component c = renderer.getListCellRendererComponent(list, entry, i, false, false);
+                    if (c instanceof JLabel) {
+                        String t = ((JLabel) c).getText();
+                        if (t != null) {
+                            String cleaned = t.replaceAll("<[^>]+>", " ")
+                                    .replace("&nbsp;", " ")
+                                    .replaceAll("\\s+", " ").trim();
+                            if (!cleaned.isEmpty()) painted = cleaned;
+                        }
+                    }
+                } catch (RuntimeException ignored) {
+                    // A misbehaving renderer must never break selection;
+                    // fall back to toString().
+                }
+            }
+            raw.add(r);
+            shown.add(painted);
+        }
+    }
+
+    private static String normaliseListText(String s) {
+        return s.replaceAll("<[^>]+>", " ").replace("&nbsp;", " ")
+                .replaceAll("\\s+", " ").trim().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private static String describeEntries(List<String> shown) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < shown.size(); i++) {
+            if (i > 0) sb.append(" | ");
+            // The protocol is line-oriented: an entry must never end the reply.
+            sb.append(shown.get(i).replace('\n', ' ').replace('\r', ' '));
+        }
+        return sb.append(']').toString();
     }
 
     private static String doJCheck(String rest) throws Exception {

@@ -123,6 +123,12 @@ environment inheritance, the agent socket handoff. Mocked tests cannot
 falsify assumptions in that territory; this drill has already caught
 two defects that the unit suite passed clean.
 
+`jlist_select_drill.py` does the same for the agent's JList selection
+(issue #33): it builds the agent jar from the checkout, drives
+`JLIST_SELECT` against a small Swing fixture, and needs no Gateway
+install. Run it against the shipped jar too (`AGENT_JAR=…`) to see
+the regression it guards against.
+
 Each check prints `[PASS]`/`[FAIL]` with a one-line reason, and the
 docstring records what was observed and when. Anything the drill has to
 stand in for (an API port that only opens after a real login, say) must
