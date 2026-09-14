@@ -5,10 +5,14 @@ A practical playbook for moving an IBC-based IB Gateway deployment to
 tool, a cutover recipe, a rollback path, and behavior differences
 worth knowing about.
 
+IBC was retired on 1 September 2026. Its repository is archived, and
+further work is limited to a planned final release and significant bug
+fixes.
+
 This guide targets the **Gateway / headless Docker** use case that
 most `gnzsnz/ib-gateway-docker` users are on. TWS migration has the
-same mapping but isn't yet live-validated — see the [Compatibility
-table](../README.md#compatibility-table) in the README before you
+same mapping but isn't yet live-validated — see the [What works
+table](../README.md#what-works) in the README before you
 commit to it for TWS.
 
 ## TL;DR
@@ -32,8 +36,8 @@ docker run -d --name ibkr-new --env-file .env \
 
 All rows are what `./ibc_config_to_env.py` produces automatically.
 Keys not listed here fall into one of three buckets: handled
-implicitly (no env var needed), unsupported (you stay on IBC if you
-depend on them), or unknown (the tool emits a warning so you can
+implicitly (no env var needed), unsupported (no controller
+equivalent), or unknown (the tool emits a warning so you can
 review). The tool's `--help` output lists every key it knows about.
 
 ### Credentials
@@ -80,15 +84,15 @@ review). The tool's `--help` output lists every key it knows about.
 
 Grouped by decision reason. The `ibc_config_to_env.py` tool warns on
 stderr whenever it sees any of these in your `config.ini`. If you
-**rely** on a row tagged *stay-on-IBC*, stop here — the controller
-has no equivalent and adding one isn't on the roadmap. Rows tagged
+**rely** on a row tagged *not supported*, the controller has no
+equivalent and adding one isn't on the roadmap. Rows tagged
 *workaround* have an alternate path.
 
-#### FIX CTCI mode — stay on IBC
+#### FIX CTCI mode — not supported
 
 | IBC key | Why no controller equivalent |
 |---|---|
-| `FIX` | FIX CTCI (order routing over FIX protocol) isn't a code path the controller's auth/2FA/restart logic covers. Running the controller against a Gateway process in FIX mode hasn't been validated and isn't a goal for v0.x. If you need FIX, IBC's FIX code path stays the working choice. |
+| `FIX` | FIX CTCI (order routing over FIX protocol) isn't a code path the controller's auth/2FA/restart logic covers. Running the controller against a Gateway process in FIX mode hasn't been validated and isn't a goal for v0.x. If you need FIX, IBC's final releases still cover it. |
 | `FIXLoginId` | Same as `FIX`. |
 | `FIXPassword` | Same as `FIX`. |
 
