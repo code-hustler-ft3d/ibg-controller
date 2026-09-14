@@ -6,11 +6,8 @@ on:
     tags: ['v*']
   pull_request:
     branches: [main]
-  # Manual trigger so CI can be started on a ref when GitHub creates no
-  # push run: on 2026-09-14 the push of 8cadf39 produced no check suite at
-  # all, and without this there was no way to run one. Every release step
-  # below is conditioned on a tag ref, so a dispatch on a branch builds and
-  # tests without publishing anything.
+  # Manual run on any ref. Only tag refs publish: the release steps below
+  # are conditioned on refs/tags/v*, so a run on a branch builds and tests.
   workflow_dispatch:
 
 permissions:
