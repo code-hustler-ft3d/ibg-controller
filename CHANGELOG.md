@@ -4,6 +4,25 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The README's `docker run` quick start now sets
+  `USE_IBG_CONTROLLER=yes`.** Without it the image starts the IBC build
+  from its base image instead of the controller. The flag is also listed
+  in the README's env var tables.
+- **The passkey docs now say what the image is missing.** Gateway's
+  passkey prompt opens its embedded browser, whose system libraries the
+  image doesn't include. The README points to the package list to add.
+
+### Changed
+
+- **The README leads with what ibg-controller does**, and it and
+  `docs/FROM_IBC.md` note that IBC was retired on 1 September 2026.
+  Migration rows that said to stay on IBC now say the feature isn't
+  supported.
+
 ## [0.10.0] - 2026-09-14
 
 ### Added

@@ -6,18 +6,31 @@
 [![License: MIT](https://img.shields.io/github/license/code-hustler-ft3d/ibg-controller)](LICENSE)
 [![cosign signed](https://img.shields.io/badge/cosign-signed-0a84ff?logo=sigstore&logoColor=white)](SECURITY.md)
 
-A drop-in replacement for [IBC](https://github.com/IbcAlpha/IBC) on
-headless Docker IB Gateway. A Python controller plus a small in-JVM
-Java agent: launches Gateway, drives the login dialog (including TOTP
-2FA), applies post-login API config, monitors for re-auth events, and
-speaks IBC's TCP command protocol.
+Unattended IB Gateway in Docker. ibg-controller starts Gateway, logs
+in, completes 2FA, applies your API settings and keeps the session
+running with nobody at the screen. A Python controller runs the login
+state machine, and a small Java agent inside Gateway's JVM does the
+clicking and typing.
 
-IBC is deprecated as of September 2026. This is one of the community
-paths forward, written in Python so the
-[`gnzsnz/ib-gateway-docker`](https://github.com/gnzsnz/ib-gateway-docker)
-community can read and patch it without a JVM or Rust toolchain. That
-image is also the base this project builds on and is tested against
-(`UPSTREAM_IMAGE` is a build arg if you need a different one).
+- **TOTP 2FA without a phone.** Set `TWOFACTOR_CODE` and the weekly
+  re-authentication completes on its own.
+- **Gateway's own daily restart, adopted.** When Gateway restarts
+  itself, the controller follows the new process instead of launching
+  a second one.
+- **Built to be monitored.** `/health` for probes and stable `ALERT_*`
+  log tokens for paging.
+- **Signed releases.** Multi-arch images, cosign-signed, with an SBOM.
+
+**Coming from IBC?** IBC was retired on 1 September 2026 and its
+repository is archived. Your existing env vars from
+[gnzsnz's image](https://github.com/gnzsnz/ib-gateway-docker), like
+`TWS_USERID`, `TRADING_MODE` and `TWOFACTOR_CODE`, work unchanged. The
+command server uses IBC's command names, and a one-shot tool converts
+your `config.ini`: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
+
+Release images build on gnzsnz's `ib-gateway` image, pinned by digest,
+which supplies Gateway itself, Xvfb and VNC. `UPSTREAM_IMAGE` is a
+build arg if you need a different base.
 
 ## Quick start
 
@@ -26,11 +39,15 @@ docker pull ghcr.io/code-hustler-ft3d/ibg-controller:latest
 
 docker run -d --name ibkr \
   --env-file /path/to/your/.env \
+  -e USE_IBG_CONTROLLER=yes \
   -e TRADING_MODE=paper \
   -e TWS_SERVER_PAPER=cdc1.ibllc.com \
   -p 127.0.0.1:4002:4004 \
   ghcr.io/code-hustler-ft3d/ibg-controller:latest
 ```
+
+`USE_IBG_CONTROLLER=yes` is required. Without it the image starts the
+IBC build that ships in its base image.
 
 Tags: `:latest`, `:<major>.<minor>`, `:v<major>.<minor>.<patch>`. All
 cosign-signed; verification recipe and digest pinning in
@@ -68,7 +85,7 @@ Deeper guides:
 | IB Gateway 10.x | Release images pin **10.45.1j** (gnzsnz `:stable` line) |
 | Python 3.10+ | Runtime; stdlib only, no pip installs |
 | JDK 17+ | Build time only — runtime uses the JRE bundled with Gateway |
-| `python3`, `matchbox-window-manager` | The only packages added on top of the upstream image |
+| `python3`, `matchbox-window-manager`, `curl` | The only packages added on top of the upstream image |
 
 ## What works
 
@@ -125,7 +142,11 @@ real product.
   (`ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow ..."`) as it has
   since v0.8.1. Contributed and used in production by @jpike88; the
   maintainer has no passkey account, so this is ⚠️ rather than ✅.
-  Needs an amd64 base — IBKR's arm64 installer ships no browser. See
+  Needs an amd64 base, because IBKR's arm64 installer ships no browser.
+  The prompt opens Gateway's embedded browser, whose system libraries
+  this image doesn't include: add the packages from
+  [gnzsnz/ib-gateway-docker#440](https://github.com/gnzsnz/ib-gateway-docker/pull/440)
+  in an image of your own. See
   [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22)
   and [#29](https://github.com/code-hustler-ft3d/ibg-controller/pull/29).
 - **Accounts with more than one method**: Gateway pre-picks one, and
@@ -145,6 +166,12 @@ real product.
 
 ## Env vars
 
+### Startup
+
+| Var | Notes |
+|---|---|
+| `USE_IBG_CONTROLLER` | `yes` runs ibg-controller. Unset, the image starts the IBC build from its base image instead. |
+
 ### Credentials
 
 | Var | Notes |
@@ -154,8 +181,8 @@ real product.
 | `TWOFACTOR_CODE` | The **base32 secret** from IBKR's Mobile Authenticator enrolment — not a generated six-digit code. Validated at startup; a wrong-shaped value exits with `ALERT_2FA_FAILED reason="TWOFACTOR_CODE is not a base32 secret"`. Leave unset for IB Key push. |
 | `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
 | `TRADING_MODE` | `live`, `paper` (default), or `both` |
-| `TWOFA_DEVICE` | IBC-compatible. Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Matched against Gateway's device list without regard to case or spacing; if nothing matches, the log lists the entries it found. Ignored on single-method accounts. |
-| `PASSKEY_AUTHENTICATE` | `yes` makes the controller press **Authenticate** on Gateway's passkey prompt; an authenticator running alongside the container completes the WebAuthn ceremony. Unset, a passkey prompt fails loudly. Needs an amd64 base. |
+| `TWOFA_DEVICE` | Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Matched against Gateway's device list without regard to case or spacing; if nothing matches, the log lists the entries it found. Ignored on single-method accounts. |
+| `PASSKEY_AUTHENTICATE` | `yes` makes the controller press **Authenticate** on Gateway's passkey prompt; an authenticator running alongside the container completes the WebAuthn ceremony. Unset, a passkey prompt fails loudly. Needs an amd64 base and extra browser libraries; see [2FA](#2fa). |
 
 ### Connection
 
@@ -164,7 +191,7 @@ real product.
 | `TWS_SERVER` / `TWS_SERVER_PAPER` | IBKR regional server hostname — see [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) |
 | `GATEWAY_OR_TWS` | `gateway` (default) or `tws` |
 
-### Dialog handling (IBC-compat)
+### Dialog handling
 
 | Var | Notes |
 |---|---|
@@ -188,7 +215,7 @@ real product.
 
 | Var | Notes |
 |---|---|
-| `CONTROLLER_COMMAND_SERVER_PORT` | TCP port for IBC-compat commands (`STOP`, `RESTART`, `RECONNECTACCOUNT`, `ENABLEAPI`). Unset = disabled. IBC's default was `7462`. |
+| `CONTROLLER_COMMAND_SERVER_PORT` | TCP port for `STOP`, `RESTART`, `RECONNECTACCOUNT` and `ENABLEAPI`, using IBC's command names. Unset = disabled. IBC's default port was `7462`. |
 | `CONTROLLER_COMMAND_SERVER_HOST` | Bind address, default `0.0.0.0` (control exposure with Docker's `-p 127.0.0.1:...`) |
 | `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN` | Optional shared secret; clients send `AUTH <token>` first. Strongly recommended if the port is reachable beyond localhost. |
 
@@ -247,7 +274,7 @@ crash): [`docs/DISCONNECT_RECOVERY.md`](docs/DISCONNECT_RECOVERY.md).
                    │  gateway_controller.py (Python)        │
                    │    ├─ state machine: login → 2FA →     │
                    │    │    config → ready → monitor       │
-                   │    ├─ IBC-compat command server (TCP)  │
+                   │    ├─ command server (TCP)             │
                    │    └─ /health endpoint                 │
                    │                                        │
                    └────────────────────────────────────────┘
@@ -262,8 +289,9 @@ Python controller runs the state machine and never touches the UI
 directly. Design history and the reasoning behind each piece:
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-Replaces IBC (entirely, for Gateway), oathtool (stdlib TOTP), and
-xdotool (the agent types from inside the JVM).
+The controller doesn't use IBC, oathtool or xdotool. It computes TOTP
+codes with the Python standard library, and the agent types from
+inside the JVM.
 
 ## Building
 
@@ -331,9 +359,10 @@ MIT — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## Acknowledgements
 
-- **@rlktradewright** for [IBC](https://github.com/IbcAlpha/IBC) —
-  most of what we know about driving Gateway's dialogs comes from
-  reading IBC.
+- **@rlktradewright** for [IBC](https://github.com/IbcAlpha/IBC),
+  which with its predecessor IBController automated TWS and Gateway
+  for 23 years until its retirement in September 2026. Most of what we
+  know about driving Gateway's dialogs comes from reading it.
 - **[Lcstyle/ibctl](https://github.com/Lcstyle/ibctl)** for the
   in-JVM agent idea and the edge-case catalog.
 - **@gnzsnz** for
