@@ -21,7 +21,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - **The README leads with what ibg-controller does**, and it and
   `docs/FROM_IBC.md` note that IBC was retired on 1 September 2026.
   Migration rows that said to stay on IBC now say the feature isn't
-  supported.
+  supported. The feature table gains a passkey row, the multi-method
+  2FA row says the switch is rejected on some accounts rather than all,
+  and the tag list includes the `x.y.z` form.
 
 ## [0.10.0] - 2026-09-14
 

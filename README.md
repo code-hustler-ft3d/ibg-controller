@@ -24,7 +24,7 @@ clicking and typing.
 **Coming from IBC?** IBC was retired on 1 September 2026 and its
 repository is archived. Your existing env vars from
 [gnzsnz's image](https://github.com/gnzsnz/ib-gateway-docker), like
-`TWS_USERID`, `TRADING_MODE` and `TWOFACTOR_CODE`, work unchanged. The
+`TWS_USERID`, `TRADING_MODE` and `TWOFA_DEVICE`, work unchanged. The
 command server uses IBC's command names, and a one-shot tool converts
 your `config.ini`: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
 
@@ -49,7 +49,8 @@ docker run -d --name ibkr \
 `USE_IBG_CONTROLLER=yes` is required. Without it the image starts the
 IBC build that ships in its base image.
 
-Tags: `:latest`, `:<major>.<minor>`, `:v<major>.<minor>.<patch>`. All
+Tags: `:latest`, `:<major>.<minor>`, `:<major>.<minor>.<patch>` and
+`:v<major>.<minor>.<patch>`. All
 cosign-signed; verification recipe and digest pinning in
 [`SECURITY.md`](SECURITY.md).
 
@@ -94,7 +95,8 @@ Deeper guides:
 | Paper / live / dual-mode cold start | ✅ verified | ⚠️ code in place | dual mode = two isolated JVMs |
 | TOTP 2FA (single method) | ✅ verified | ⚠️ code in place | |
 | IB Key push 2FA | ✅ wait mode | ✅ wait mode | waits for you to approve on the phone |
-| Multi-method 2FA | ⚠️ fails loud | ⚠️ fails loud | both dialog shapes detected; see [2FA](#2fa) |
+| Multi-method 2FA | ⚠️ account-dependent | ⚠️ code in place | both dialog shapes detected and driven; the switch to TOTP is rejected on some accounts; see [2FA](#2fa) |
+| Passkey prompt (`PASSKEY_AUTHENTICATE=yes`) | ⚠️ contributor-validated | ⚠️ untested | presses Authenticate; your authenticator completes WebAuthn; amd64 plus extra libraries; see [2FA](#2fa) |
 | Existing-session dialog | ✅ verified | ⚠️ code in place | |
 | Post-login config (`READ_ONLY_API`, `TWS_MASTER_CLIENT_ID`, auto logoff/restart times) | ✅ verified | ⚠️ untested | |
 | Command server (`STOP`, `RESTART`, `RECONNECTACCOUNT`, `ENABLEAPI`) | ✅ verified | ⚠️ untested | `RECONNECTDATA` is TWS-only |
@@ -155,14 +157,18 @@ real product.
   controller detects both shapes. If the pre-pick doesn't match
   `TWOFACTOR_CODE` it selects the right device where the dialog allows
   it, and otherwise fails loudly (`ALERT_2FA_FAILED`) with the fix in
-  the log — it never types the code into the wrong method. IBKR
-  rejects mid-challenge method switching server-side
-  ([#20](https://github.com/code-hustler-ft3d/ibg-controller/issues/20)),
-  so the durable fix is on the account: make Mobile Authenticator your
-  default (or only) method in Client Portal → Settings → User Settings
-  → Security → Secure Login System. Background:
+  the log — it never types the code into the wrong method. Whether
+  the switch then goes through depends on the account: on the account
+  in [#20](https://github.com/code-hustler-ft3d/ibg-controller/issues/20)
+  IBKR rejected it server-side, while on the account in
+  [#33](https://github.com/code-hustler-ft3d/ibg-controller/issues/33)
+  a switch made by hand was accepted. The durable fix is on the
+  account: make Mobile Authenticator your default (or only) method in
+  Client Portal → Settings → User Settings → Security → Secure Login
+  System. Background:
   [#7](https://github.com/code-hustler-ft3d/ibg-controller/issues/7),
-  [#20](https://github.com/code-hustler-ft3d/ibg-controller/issues/20).
+  [#20](https://github.com/code-hustler-ft3d/ibg-controller/issues/20),
+  [#33](https://github.com/code-hustler-ft3d/ibg-controller/issues/33).
 
 ## Env vars
 
@@ -282,7 +288,7 @@ crash): [`docs/DISCONNECT_RECOVERY.md`](docs/DISCONNECT_RECOVERY.md).
 
 Gateway's Swing fields reject every external input mechanism
 (synthetic X11 events, AT-SPI writes), so a small Java agent
-(~950 lines, no dependencies) is loaded into Gateway's JVM via
+(~1,100 lines, no dependencies) is loaded into Gateway's JVM via
 `-javaagent:` and does the UI work from inside — `setText`, `doClick`,
 tree/list selection — over a line-based Unix-socket protocol. The
 Python controller runs the state machine and never touches the UI
