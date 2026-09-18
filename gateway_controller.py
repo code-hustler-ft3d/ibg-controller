@@ -2056,22 +2056,38 @@ def handle_2fa(app):
                         # is required"). Fail with a dedicated reason
                         # rather than falling through to a misleading
                         # SETTEXT failure.
+                        #
+                        # Issue #37 (10.45.1j) shows the mechanism in
+                        # launcher.log: selecting another method makes
+                        # Gateway open a SECOND auth session ("Attempt
+                        # 2: Authenticating"), and IBKR kicks the first
+                        # one — "COMPETE: session kicked out" followed
+                        # by "Disconnect all farms due to competing
+                        # session". Hence the modal the operator sees.
                         log.error(
                             "No 2FA code-entry prompt appeared within 15s "
-                            "of device selection — Gateway most likely "
-                            "rejected the in-dialog method switch "
-                            "server-side (issue #20).")
+                            "of device selection. Gateway is showing "
+                            "'Re-login is required': the pre-selected "
+                            "method's challenge is already in flight when "
+                            "the selector opens, so switching starts a "
+                            "second auth session and IBKR kicks the first "
+                            "one (launcher.log: 'COMPETE: session kicked "
+                            "out'). Issues #20, #37.")
                         log.error(
                             f"ALERT_2FA_FAILED mode={TRADING_MODE} "
                             "reason=\"2FA device switch produced no "
                             "code-entry dialog\"")
                         log.error(
-                            "Remediation: set your IBKR account's "
-                            f"preferred 2FA method to {twofa_device!r} "
-                            "(Client Portal → Settings → User Settings → "
-                            "Security → Secure Login System) so Gateway "
-                            "defaults to it. See docs/UPGRADING.md "
-                            "(issues #7, #20).")
+                            f"Remediation: make {twofa_device!r} the ONLY "
+                            "2FA method on the account (Client Portal → "
+                            "Settings → User Settings → Security → Secure "
+                            "Login System). With one method Gateway shows "
+                            "no selector, and the code is typed "
+                            "automatically. Until then this account needs "
+                            "a human: leave TWOFACTOR_CODE unset and "
+                            "approve the IB Key push on your phone, or "
+                            "finish the login over VNC. See "
+                            "docs/UPGRADING.md (issues #7, #20, #37).")
                         return False
                 # v0.7.0 (issue #7): on a multi-method account Gateway's
                 # dialog is pre-defaulted to one method and shows an
