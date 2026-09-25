@@ -8,6 +8,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **Multi-method 2FA accounts: say up front that one method is
+  required (issue #37).** A third reporter hit the same wall, so the
+  README now states the requirement right under the quick start rather
+  than in the last bullet of the 2FA section, and the `TWOFA_DEVICE`
+  row says plainly that setting it does not make a two-method account
+  work unattended. Issue #37's `launcher.log` also gave the mechanism
+  for the first time: switching method in the selector starts a second
+  auth session and IBKR kicks the first (`COMPETE: session kicked out`,
+  `Disconnect all farms due to competing session`), which is the
+  "Re-login is required" modal operators see. The failure message now
+  names that modal, says the account fix is to remove the other method,
+  and points at the two attended alternatives. `ALERT_2FA_FAILED
+  reason="2FA device switch produced no code-entry dialog"` is
+  unchanged.
+
 - **The README's `docker run` quick start now sets
   `USE_IBG_CONTROLLER=yes`.** Without it the image starts the IBC build
   from its base image instead of the controller. The flag is also listed

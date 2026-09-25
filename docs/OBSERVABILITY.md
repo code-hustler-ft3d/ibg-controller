@@ -660,10 +660,17 @@ ALERT_2FA_FAILED mode=live reason="TWOFACTOR_CODE is not a base32 secret" remedi
    and a `TWOFA_DEVICE` differing from an entry only in case or spacing
    is matched.
 7. (v0.8.0, #20/#21) The device was selected and OK clicked, but no
-   "Enter <method> code" prompt appeared within 15s — on current
-   Gateway the in-dialog switch is rejected server-side (issue #20),
-   so expect this reason on multi-method accounts whose default method
-   isn't the one `TWOFACTOR_CODE` satisfies.
+   "Enter <method> code" prompt appeared within 15s — expect this
+   reason on multi-method accounts whose default method isn't the one
+   `TWOFACTOR_CODE` satisfies. Issue #37 (Gateway 10.45.1j) shows the
+   mechanism: the pre-selected method's challenge is already in flight
+   when the selector opens, so the switch starts a second auth session
+   and IBKR kicks the first — `COMPETE: session kicked out` and
+   `Disconnect all farms due to competing session` in `launcher.log`,
+   and a "Re-login is required" modal on screen. The controller does
+   not press Re-login: on the #20 account the chosen method did not
+   survive the re-login, so clicking it would loop fresh auth attempts
+   into IBKR's rate limiter.
 8. (v0.8.1, #22) A passkey/WebAuthn login flow was detected — IBKR
    routed the login to a browser (jxbrowser) expecting a hardware
    security key instead of the TOTP dialog. A headless container can't
@@ -687,11 +694,13 @@ from IBKR's Mobile Authenticator enrolment in `TWOFACTOR_CODE` (or
 (`vnc://<container-host>:5900`) and enter the TOTP manually, or
 verify `TWOFACTOR_CODE` in the env is the correct base32 secret from
 IBKR's Mobile Authenticator setup QR code. For reasons 5–7
-(multi-method accounts), set the account's preferred second-factor
-method to the one matching `TWOFACTOR_CODE` (Client Portal → Settings
-→ User Settings → Security → Secure Login System) so Gateway defaults
-to it — in-dialog switching is rejected by IBKR server-side; see
-issues #7 and #20. For reason 8 (passkey), unattended login isn't
+(multi-method accounts), make the method matching `TWOFACTOR_CODE` the
+*only* one on the account (Client Portal → Settings → User Settings →
+Security → Secure Login System); with one method Gateway shows no
+selector and unattended TOTP works. Switching method in the dialog
+gets the session kicked, so a two-method account always needs a human
+at login: either leave `TWOFACTOR_CODE` unset and approve the IB Key
+push, or log in over VNC. See issues #7, #20 and #37. For reason 8 (passkey), unattended login isn't
 possible on that account: if it still offers Mobile Authenticator,
 make that the login method (same Secure Login System panel); otherwise
 log in attended via VNC. See issue #22.
