@@ -3345,5 +3345,126 @@ class TestPasskeyGateEnvParsing(unittest.TestCase):
         self.assertIs(gc._coerce_yes_no("banana") is True, False)
 
 
+class TestOperatorHalt(unittest.TestCase):
+    """A 2FA failure only a human can clear must not exit into Docker's
+    restart policy: that re-runs the identical login every few minutes and
+    walks the account into IBKR's rate limiter (#20, #37). Transient agent
+    failures keep the old exit behaviour, where a restart can genuinely
+    help.
+    """
+
+    WINDOWS = [("JDialog", "Second Factor Authentication", True)]
+    PROMPT_LABELS = [("Second Factor Authentication",
+                      "Enter Mobile Authenticator app code")]
+
+    KICKED_WINDOWS = [("aw", "IBKR Gateway", False),
+                      ("bg", "Re-login is required", True)]
+
+    def _handle_2fa(self, *, window_dump, labels, settext=True, jlist=True,
+                    kicked=False, jlist_response=""):
+        """Drive handle_2fa. ``kicked`` swaps the window list for the #37
+        kicked-session set once the device has been selected."""
+        state = {"selected": False}
+
+        def windows():
+            if kicked and state["selected"]:
+                return self.KICKED_WINDOWS
+            return self.WINDOWS
+
+        def select(*_a, **_k):
+            state["selected"] = True
+            return jlist
+
+        with patch.object(gc, "TOTP_SECRET", "JBSWY3DPEHPK3PXP"), \
+             patch.object(gc, "_last_jlist_response", jlist_response), \
+             patch.object(gc, "is_api_port_open", return_value=False), \
+             patch.object(gc, "agent_windows", side_effect=windows), \
+             patch.object(gc, "agent_window", return_value=window_dump), \
+             patch.object(gc, "agent_labels", return_value=labels), \
+             patch.object(gc, "agent_jlist_select", side_effect=select), \
+             patch.object(gc, "agent_settext_in_window", return_value=settext), \
+             patch.object(gc, "agent_click_in_window", return_value=True), \
+             patch.object(gc, "generate_totp", return_value="123456"), \
+             patch.object(gc.time, "sleep"):
+            with _capture_controller_errors():
+                return gc.handle_2fa(None)
+
+    def test_kicked_switch_is_operator_actionable(self):
+        # The kicked session announces itself with the Re-login modal.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], kicked=True))
+        self.assertTrue(gc._twofa_needs_operator)
+
+    def test_missing_prompt_without_the_modal_still_exits(self):
+        # Same 15 s timeout, no Re-login modal: the prompt may just not
+        # have rendered on a slow round-trip. Halting on that would strand
+        # a container that a restart would have fixed.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], kicked=False))
+        self.assertFalse(gc._twofa_needs_operator)
+
+    def test_unmatched_device_name_is_operator_actionable(self):
+        # The agent answered: TWOFA_DEVICE names nothing in the list, so
+        # restarting types the same wrong name at the same list.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], jlist=False,
+            jlist_response="ERR jlist_item_not_found want=Nope have=[IB Key]"))
+        self.assertTrue(gc._twofa_needs_operator)
+
+    def test_jlist_socket_error_still_exits(self):
+        # No reply from the agent — a transport problem, not a config one.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], jlist=False, jlist_response=""))
+        self.assertFalse(gc._twofa_needs_operator)
+
+    def test_agent_hiccup_is_not_operator_actionable(self):
+        # A failed SETTEXT is a transient agent problem, not a config one:
+        # this path must keep exiting so the container can restart.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.LINK_DUMP,
+            labels=self.PROMPT_LABELS, settext=False))
+        self.assertFalse(gc._twofa_needs_operator)
+
+    def test_flag_resets_between_invocations(self):
+        # do_restart_in_place and the re-auth path call handle_2fa too; a
+        # stale flag from an earlier failure must not halt a later run.
+        gc._twofa_needs_operator = True
+        self._handle_2fa(window_dump=TestTwofaSelectorPresent.LINK_DUMP,
+                         labels=self.PROMPT_LABELS)
+        self.assertFalse(gc._twofa_needs_operator)
+
+    def test_rescue_window_uses_the_plain_probe(self):
+        # wait_for_api_port_with_retry re-drives the login up to 8 times,
+        # which is precisely the storm this path exists to avoid.
+        with patch.object(gc, "wait_for_api_port", return_value=True) as plain, \
+             patch.object(gc, "wait_for_api_port_with_retry") as retry, \
+             _capture_controller_errors():
+            self.assertTrue(gc._await_manual_login(timeout=1))
+        plain.assert_called_once()
+        retry.assert_not_called()
+
+    def test_halt_sets_state_and_keeps_saying_why(self):
+        before = gc._current_state
+        try:
+            with patch.object(gc.time, "sleep") as slept, \
+                 _capture_controller_errors() as errors:
+                gc._halt_for_operator("two methods on the account", cycles=2)
+            self.assertEqual(gc._current_state, gc.State.HALTED)
+            self.assertEqual(slept.call_count, 2)
+            self.assertTrue(
+                any("two methods on the account" in line for line in errors),
+                f"halt reason missing from: {errors}")
+        finally:
+            gc._current_state = before
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

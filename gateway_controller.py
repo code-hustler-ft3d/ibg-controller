@@ -89,6 +89,7 @@ class State(enum.Enum):
     COMMAND_SERVER = "COMMAND_SERVER"
     READY = "READY"
     MONITORING = "MONITORING"
+    HALTED = "HALTED"
 
 
 _current_state = State.INIT
@@ -623,6 +624,14 @@ def agent_click_in_window(title_substring, button_text):
     return False
 
 
+# Last reply from the agent's JLIST_SELECT, so callers can tell a genuine
+# miss ("ERR jlist_item_not_found" / "_ambiguous" — the configured name is
+# not in the account's list, which no restart will change) from a socket
+# error, which a restart may well clear. Empty when the request never got a
+# reply.
+_last_jlist_response = ""
+
+
 def agent_jlist_select(title_substring, item_text):
     """Ask the agent to select an item by text in the first JList of a
     window whose title contains the given substring.
@@ -634,11 +643,14 @@ def agent_jlist_select(title_substring, item_text):
     in-JVM agent can — mirroring IBC's SecondFactorDevice handling of
     the same dialog.
     """
+    global _last_jlist_response
+    _last_jlist_response = ""
     try:
         resp = _agent_request(f"JLIST_SELECT {title_substring}|{item_text}")
     except Exception as e:
         log.error(f"agent JLIST_SELECT {title_substring!r}: {type(e).__name__}: {e}")
         return False
+    _last_jlist_response = resp
     if resp.startswith("OK"):
         # The agent reports the entry it picked. Since issue #33 that can
         # differ from item_text in case or spacing, so log it.
@@ -1667,7 +1679,7 @@ def _handle_passkey_prompt(title):
             f"controller press Authenticate, and run an authenticator "
             f"alongside the container to complete the ceremony (README, "
             f"Passkey section)\"")
-        return False
+        return _fail_2fa_needs_operator()
     # WINDOW can dump multiple matches, but CLICK_IN_WIN uses the first.
     if sum(line.startswith("=== window=") for line in dump.splitlines()) > 1:
         log.error("Multiple windows match %r; refusing an ambiguous passkey click", title)
@@ -1787,6 +1799,27 @@ def _twofa_method_mismatch(prompt, desired_device):
     return True
 
 
+# Set when a 2FA failure needs a human to change something — the account's
+# enabled methods, TWOFA_DEVICE, PASSKEY_AUTHENTICATE — rather than another
+# login attempt. main() halts on these instead of exiting: exiting hands the
+# container back to Docker's restart policy, which re-runs the identical
+# login, and a configuration failure fails identically every time. That turns
+# one misconfigured account into a login generator pointed at IBKR's rate
+# limiter (issues #20, #37).
+_twofa_needs_operator = False
+
+
+def _fail_2fa_needs_operator():
+    """Mark this 2FA failure as one only a human can clear.
+
+    Returns False so callers can ``return _fail_2fa_needs_operator()`` in
+    place of ``return False``.
+    """
+    global _twofa_needs_operator
+    _twofa_needs_operator = True
+    return False
+
+
 def handle_2fa(app):
     """Handle Gateway's Second Factor Authentication dialog.
 
@@ -1830,6 +1863,9 @@ def handle_2fa(app):
     # can detect and wait for IB Key push approval. The only difference
     # is: with TOTP_SECRET we type the code; without it we just wait
     # for the dialog to disappear.
+    global _twofa_needs_operator
+    _twofa_needs_operator = False
+
     ib_key_mode = not TOTP_SECRET
     if ib_key_mode:
         log.info("No TWOFACTOR_CODE set — will watch for IB Key push dialog if it appears")
@@ -2017,6 +2053,13 @@ def handle_2fa(app):
                         log.error(
                             f"ALERT_2FA_FAILED mode={TRADING_MODE} "
                             "reason=\"JLIST_SELECT on 2FA device selector failed\"")
+                        if _last_jlist_response.startswith("ERR jlist_item_"):
+                            # The list came back and TWOFA_DEVICE names
+                            # nothing in it (or two things): a restart
+                            # types the same value at the same list.
+                            return _fail_2fa_needs_operator()
+                        # No reply, or the window was gone — a restart
+                        # may clear it.
                         return False
                     if not agent_click_in_window(TWOFA_WINDOW_SUBSTR, "OK"):
                         log.error("CLICK_IN_WIN OK on 2FA device selector failed")
@@ -2108,6 +2151,12 @@ def handle_2fa(app):
                             "approve the IB Key push on your phone, or "
                             "finish the login over VNC. See "
                             "docs/UPGRADING.md (issues #7, #20, #37).")
+                        if kicked:
+                            return _fail_2fa_needs_operator()
+                        # No "Re-login is required" modal: the code prompt
+                        # may simply not have rendered within 15 s on a
+                        # slow round-trip. Let the container restart
+                        # rather than halting on a maybe.
                         return False
                 # v0.7.0 (issue #7): on a multi-method account Gateway's
                 # dialog is pre-defaulted to one method and shows an
@@ -2148,7 +2197,7 @@ def handle_2fa(app):
                         f"preferred 2FA method to {twofa_device!r} (the one "
                         "matching TWOFACTOR_CODE). See docs/UPGRADING.md "
                         "(issue #7).")
-                    return False
+                    return _fail_2fa_needs_operator()
                 if prompt:
                     log.info(f"2FA method prompt {prompt!r} matches "
                              f"{twofa_device!r}")
@@ -4245,6 +4294,44 @@ def wait_for_api_port(timeout=180):
     return False
 
 
+_OPERATOR_RESCUE_SECONDS = 300
+_HALT_LOG_INTERVAL_SECONDS = 300
+
+
+def _await_manual_login(timeout=_OPERATOR_RESCUE_SECONDS):
+    """Give a human a window to finish a login the controller cannot.
+
+    Deliberately the plain port probe: ``wait_for_api_port_with_retry``
+    re-drives the login up to 8 times, which is the storm this path exists
+    to avoid.
+    """
+    log.error(f"Waiting up to {timeout}s for a manual login before halting. "
+              "Connect to the container's VNC (port 5900) and finish it by "
+              "hand if you want this session. Nothing is retried meanwhile.")
+    return wait_for_api_port(timeout=timeout)
+
+
+def _halt_for_operator(reason, cycles=None):
+    """Stop working without exiting, and stay stopped.
+
+    Exiting hands the container back to Docker's restart policy, which
+    re-runs the same failing login every few minutes. Halting keeps the
+    JVM, VNC and the health server up — /health answers 503, so Docker's
+    HEALTHCHECK marks the container unhealthy — and waits for a person.
+    ``cycles`` bounds the reminder loop for tests; None means forever.
+    """
+    _set_state(State.HALTED)
+    log.error(f"HALTED: {reason}")
+    log.error("No further login attempts will be made. Fix the cause and "
+              "restart the container; VNC stays reachable if you want to "
+              "finish this login by hand.")
+    n = 0
+    while cycles is None or n < cycles:
+        time.sleep(_HALT_LOG_INTERVAL_SECONDS)
+        n += 1
+        log.error(f"HALTED: {reason} (waiting for an operator)")
+
+
 def signal_ready():
     """Touch the readiness file so run.sh can start socat."""
     with open(READY_FILE, "w") as f:
@@ -4642,7 +4729,20 @@ def main():
     # 4. 2FA if applicable
     if not handle_2fa(app):
         log.error("2FA handling failed")
-        sys.exit(1)
+        if _twofa_needs_operator:
+            # Needs a change only a human can make (the account's 2FA
+            # methods, TWOFA_DEVICE, PASSKEY_AUTHENTICATE). Another
+            # attempt fails identically, so offer a rescue window and then
+            # halt rather than exiting into Docker's restart policy, which
+            # would re-run this login every few minutes (issues #20, #37).
+            if _await_manual_login():
+                log.info("Manual login detected — resuming the normal flow")
+            else:
+                _halt_for_operator(
+                    "2FA needs a change only an operator can make; see the "
+                    "ALERT_2FA_FAILED line above")
+        else:
+            sys.exit(1)
 
     _set_state(State.DISCLAIMERS)
     # 4b. Dismiss known post-login disclaimer dialogs (paper-trading
