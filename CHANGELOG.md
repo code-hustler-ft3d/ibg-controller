@@ -6,6 +6,23 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **A 2FA failure that needs an operator now halts instead of exiting
+  (issues #20, #37).** Exiting handed the container back to Docker's
+  restart policy, which re-ran the identical login every few minutes;
+  a configuration failure fails the same way every time, so the
+  container became a login generator pointed at IBKR's rate limiter.
+  The controller now waits 300 s for a manual login over VNC — finish
+  it and the session is picked up and the normal flow resumes — then
+  enters the new `HALTED` state, keeping the JVM, VNC and `/health`
+  (503) up while making no further attempts. This covers the account's
+  2FA methods, an unmatched `TWOFA_DEVICE`, and a passkey prompt
+  without `PASSKEY_AUTHENTICATE`. Agent-level failures such as a failed
+  `SETTEXT_IN_WIN` still exit, because a restart can clear those. The
+  rescue window deliberately uses the plain port probe, never the
+  retrying one, which would re-drive the login up to eight times.
+
 ### Fixed
 
 - **The 2FA device-switch failure reports what's on screen instead of
