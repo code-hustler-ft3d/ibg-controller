@@ -3357,13 +3357,31 @@ class TestOperatorHalt(unittest.TestCase):
     PROMPT_LABELS = [("Second Factor Authentication",
                       "Enter Mobile Authenticator app code")]
 
-    def _handle_2fa(self, *, window_dump, labels, settext=True, jlist=True):
+    KICKED_WINDOWS = [("aw", "IBKR Gateway", False),
+                      ("bg", "Re-login is required", True)]
+
+    def _handle_2fa(self, *, window_dump, labels, settext=True, jlist=True,
+                    kicked=False, jlist_response=""):
+        """Drive handle_2fa. ``kicked`` swaps the window list for the #37
+        kicked-session set once the device has been selected."""
+        state = {"selected": False}
+
+        def windows():
+            if kicked and state["selected"]:
+                return self.KICKED_WINDOWS
+            return self.WINDOWS
+
+        def select(*_a, **_k):
+            state["selected"] = True
+            return jlist
+
         with patch.object(gc, "TOTP_SECRET", "JBSWY3DPEHPK3PXP"), \
+             patch.object(gc, "_last_jlist_response", jlist_response), \
              patch.object(gc, "is_api_port_open", return_value=False), \
-             patch.object(gc, "agent_windows", return_value=self.WINDOWS), \
+             patch.object(gc, "agent_windows", side_effect=windows), \
              patch.object(gc, "agent_window", return_value=window_dump), \
              patch.object(gc, "agent_labels", return_value=labels), \
-             patch.object(gc, "agent_jlist_select", return_value=jlist), \
+             patch.object(gc, "agent_jlist_select", side_effect=select), \
              patch.object(gc, "agent_settext_in_window", return_value=settext), \
              patch.object(gc, "agent_click_in_window", return_value=True), \
              patch.object(gc, "generate_totp", return_value="123456"), \
@@ -3372,19 +3390,40 @@ class TestOperatorHalt(unittest.TestCase):
                 return gc.handle_2fa(None)
 
     def test_kicked_switch_is_operator_actionable(self):
-        gc._twofa_needs_operator = False
-        self.assertFalse(self._handle_2fa(
-            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP, labels=[]))
-        self.assertTrue(gc._twofa_needs_operator)
-
-    def test_unmatched_device_name_is_operator_actionable(self):
-        # JLIST_SELECT missing the named entry means TWOFA_DEVICE doesn't
-        # match the account's list — restarting types the same wrong name.
+        # The kicked session announces itself with the Re-login modal.
         gc._twofa_needs_operator = False
         self.assertFalse(self._handle_2fa(
             window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
-            labels=[], jlist=False))
+            labels=[], kicked=True))
         self.assertTrue(gc._twofa_needs_operator)
+
+    def test_missing_prompt_without_the_modal_still_exits(self):
+        # Same 15 s timeout, no Re-login modal: the prompt may just not
+        # have rendered on a slow round-trip. Halting on that would strand
+        # a container that a restart would have fixed.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], kicked=False))
+        self.assertFalse(gc._twofa_needs_operator)
+
+    def test_unmatched_device_name_is_operator_actionable(self):
+        # The agent answered: TWOFA_DEVICE names nothing in the list, so
+        # restarting types the same wrong name at the same list.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], jlist=False,
+            jlist_response="ERR jlist_item_not_found want=Nope have=[IB Key]"))
+        self.assertTrue(gc._twofa_needs_operator)
+
+    def test_jlist_socket_error_still_exits(self):
+        # No reply from the agent — a transport problem, not a config one.
+        gc._twofa_needs_operator = False
+        self.assertFalse(self._handle_2fa(
+            window_dump=TestTwofaSelectorPresent.SELECTOR_DUMP,
+            labels=[], jlist=False, jlist_response=""))
+        self.assertFalse(gc._twofa_needs_operator)
 
     def test_agent_hiccup_is_not_operator_actionable(self):
         # A failed SETTEXT is a transient agent problem, not a config one:

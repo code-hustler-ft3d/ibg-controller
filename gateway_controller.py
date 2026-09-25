@@ -624,6 +624,14 @@ def agent_click_in_window(title_substring, button_text):
     return False
 
 
+# Last reply from the agent's JLIST_SELECT, so callers can tell a genuine
+# miss ("ERR jlist_item_not_found" / "_ambiguous" — the configured name is
+# not in the account's list, which no restart will change) from a socket
+# error, which a restart may well clear. Empty when the request never got a
+# reply.
+_last_jlist_response = ""
+
+
 def agent_jlist_select(title_substring, item_text):
     """Ask the agent to select an item by text in the first JList of a
     window whose title contains the given substring.
@@ -635,11 +643,14 @@ def agent_jlist_select(title_substring, item_text):
     in-JVM agent can — mirroring IBC's SecondFactorDevice handling of
     the same dialog.
     """
+    global _last_jlist_response
+    _last_jlist_response = ""
     try:
         resp = _agent_request(f"JLIST_SELECT {title_substring}|{item_text}")
     except Exception as e:
         log.error(f"agent JLIST_SELECT {title_substring!r}: {type(e).__name__}: {e}")
         return False
+    _last_jlist_response = resp
     if resp.startswith("OK"):
         # The agent reports the entry it picked. Since issue #33 that can
         # differ from item_text in case or spacing, so log it.
@@ -2042,7 +2053,14 @@ def handle_2fa(app):
                         log.error(
                             f"ALERT_2FA_FAILED mode={TRADING_MODE} "
                             "reason=\"JLIST_SELECT on 2FA device selector failed\"")
-                        return _fail_2fa_needs_operator()
+                        if _last_jlist_response.startswith("ERR jlist_item_"):
+                            # The list came back and TWOFA_DEVICE names
+                            # nothing in it (or two things): a restart
+                            # types the same value at the same list.
+                            return _fail_2fa_needs_operator()
+                        # No reply, or the window was gone — a restart
+                        # may clear it.
+                        return False
                     if not agent_click_in_window(TWOFA_WINDOW_SUBSTR, "OK"):
                         log.error("CLICK_IN_WIN OK on 2FA device selector failed")
                         log.error(
@@ -2133,7 +2151,13 @@ def handle_2fa(app):
                             "approve the IB Key push on your phone, or "
                             "finish the login over VNC. See "
                             "docs/UPGRADING.md (issues #7, #20, #37).")
-                        return _fail_2fa_needs_operator()
+                        if kicked:
+                            return _fail_2fa_needs_operator()
+                        # No "Re-login is required" modal: the code prompt
+                        # may simply not have rendered within 15 s on a
+                        # slow round-trip. Let the container restart
+                        # rather than halting on a maybe.
+                        return False
                 # v0.7.0 (issue #7): on a multi-method account Gateway's
                 # dialog is pre-defaulted to one method and shows an
                 # "Enter <method> code" prompt. Only type our TOTP if the

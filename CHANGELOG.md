@@ -18,8 +18,13 @@ and the project follows [Semantic Versioning](https://semver.org/).
   enters the new `HALTED` state, keeping the JVM, VNC and `/health`
   (503) up while making no further attempts. This covers the account's
   2FA methods, an unmatched `TWOFA_DEVICE`, and a passkey prompt
-  without `PASSKEY_AUTHENTICATE`. Agent-level failures such as a failed
-  `SETTEXT_IN_WIN` still exit, because a restart can clear those. The
+  without `PASSKEY_AUTHENTICATE`. The halt is deliberately narrow: the
+  device-switch failure halts only when the "Re-login is required" modal
+  is actually on screen, and an unmatched `TWOFA_DEVICE` halts only when
+  the agent answered with `ERR jlist_item_*`. A 15-second timeout with no
+  modal, or a `JLIST_SELECT` that got no reply at all, may be transient
+  and still exits. Agent-level failures such as a failed
+  `SETTEXT_IN_WIN` still exit too, because a restart can clear those. The
   rescue window deliberately uses the plain port probe, never the
   retrying one, which would re-drive the login up to eight times.
 
