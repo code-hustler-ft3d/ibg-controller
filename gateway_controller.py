@@ -2064,15 +2064,35 @@ def handle_2fa(app):
                         # one — "COMPETE: session kicked out" followed
                         # by "Disconnect all farms due to competing
                         # session". Hence the modal the operator sees.
-                        log.error(
-                            "No 2FA code-entry prompt appeared within 15s "
-                            "of device selection. Gateway is showing "
-                            "'Re-login is required': the pre-selected "
-                            "method's challenge is already in flight when "
-                            "the selector opens, so switching starts a "
-                            "second auth session and IBKR kicks the first "
-                            "one (launcher.log: 'COMPETE: session kicked "
-                            "out'). Issues #20, #37.")
+                        # Report what is actually on screen rather than
+                        # assuming the cause: the poll loop above already
+                        # collected the window titles, and the kicked
+                        # session announces itself with a "Re-login is
+                        # required" modal (#37). Without it, the switch
+                        # may simply not have produced a prompt yet.
+                        kicked = any("re-login" in (t or "").lower()
+                                     for t in (last_poll_windows or []))
+                        if kicked:
+                            log.error(
+                                "No 2FA code-entry prompt appeared within "
+                                "15s of device selection, and Gateway is "
+                                "showing 'Re-login is required': the "
+                                "pre-selected method's challenge is already "
+                                "in flight when the selector opens, so "
+                                "switching starts a second auth session and "
+                                "IBKR kicks the first one (launcher.log: "
+                                "'COMPETE: session kicked out'). Issues "
+                                "#20, #37.")
+                        else:
+                            log.error(
+                                "No 2FA code-entry prompt appeared within "
+                                "15s of device selection. Windows on "
+                                f"screen: {last_poll_windows}. On the "
+                                "accounts seen so far this means IBKR "
+                                "rejected the mid-login method switch; "
+                                "Gateway's launcher.log shows it as "
+                                "'COMPETE: session kicked out'. Issues "
+                                "#20, #37.")
                         log.error(
                             f"ALERT_2FA_FAILED mode={TRADING_MODE} "
                             "reason=\"2FA device switch produced no "

@@ -8,6 +8,15 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The 2FA device-switch failure reports what's on screen instead of
+  assuming it (issue #37).** The message claimed Gateway was showing
+  "Re-login is required" whenever no code-entry prompt appeared within
+  15 s. It now checks the window titles the poll loop already collects:
+  with the modal present it names it and explains the kicked session,
+  and without it the log lists the windows that were actually there.
+  `ALERT_2FA_FAILED reason="2FA device switch produced no code-entry
+  dialog"` is unchanged.
+
 - **Multi-method 2FA accounts: say up front that one method is
   required (issue #37).** A third reporter hit the same wall, so the
   README now states the requirement right under the quick start rather

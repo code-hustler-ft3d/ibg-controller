@@ -2288,6 +2288,69 @@ class TestHandle2faSelectorFlow(unittest.TestCase):
             "Second Factor", "Mobile Authenticator app")
         mocks["settext"].assert_not_called()
 
+    KICKED_WINDOWS = [("aw", "Attempt 2: Authenticating...", False),
+                      ("aw", "IBKR Gateway", False),
+                      ("bg", "Re-login is required", True)]
+
+    def _run_kicked(self, *, kicked):
+        """Selector accepted, no code prompt, and after the selection the
+        windows are either the #37 kicked-session set (Re-login modal) or
+        an unremarkable set. Returns the captured ERROR lines."""
+        state = {"selected": False}
+
+        def windows():
+            if state["selected"]:
+                return (self.KICKED_WINDOWS if kicked
+                        else [("aw", "IBKR Gateway", False)])
+            return self.TWOFA_WINDOWS
+
+        def jlist(*_a, **_k):
+            state["selected"] = True
+            return True
+
+        with patch.object(gc, "TOTP_SECRET", "JBSWY3DPEHPK3PXP"), \
+             patch.object(gc, "is_api_port_open", return_value=False), \
+             patch.object(gc, "agent_windows", side_effect=windows), \
+             patch.object(gc, "agent_window",
+                          return_value=TestTwofaSelectorPresent.SELECTOR_DUMP), \
+             patch.object(gc, "agent_labels", return_value=[]), \
+             patch.object(gc, "agent_jlist_select", side_effect=jlist), \
+             patch.object(gc, "agent_settext_in_window", return_value=True), \
+             patch.object(gc, "agent_click_in_window", return_value=True), \
+             patch.object(gc, "generate_totp", return_value="123456"), \
+             patch.object(gc.time, "sleep"):
+            with _capture_controller_errors() as errors:
+                result = gc.handle_2fa(None)
+        self.assertFalse(result)
+        return errors
+
+    def test_kicked_session_names_the_relogin_dialog(self):
+        # Issue #37: when the switch gets the session kicked, Gateway puts
+        # a "Re-login is required" modal on screen. The operator is
+        # staring at it, so the log must name it rather than guessing at
+        # a server-side rejection.
+        errors = self._run_kicked(kicked=True)
+        self.assertTrue(
+            any("Re-login is required" in line for line in errors),
+            f"kicked-session diagnosis missing from: {errors}")
+        self.assertTrue(any(
+            'reason="2FA device switch produced no code-entry dialog"'
+            in line for line in errors),
+            "the stable ALERT reason must not change")
+
+    def test_no_relogin_dialog_reports_the_windows_instead(self):
+        # Same failure without the modal: don't claim the session was
+        # kicked. Dump what was on screen so the next report carries it.
+        errors = self._run_kicked(kicked=False)
+        self.assertFalse(
+            any("is showing 'Re-login is required'" in line
+                for line in errors),
+            f"must not assert a kick that wasn't observed: {errors}")
+        self.assertTrue(
+            any("Windows on screen:" in line and "IBKR Gateway" in line
+                for line in errors),
+            f"observed windows missing from: {errors}")
+
     def test_switch_accepted_completes_totp_flow(self):
         # Selector detected and, after selection, the code-entry
         # prompt appears — the flow must continue through the normal
