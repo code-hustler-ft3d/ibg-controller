@@ -349,6 +349,16 @@ didn't start. Check the `-javaagent:` flag is on the JVM command line,
 the socket in `GATEWAY_INPUT_AGENT_SOCKET` exists, and
 `/tmp/jvm_console_${TRADING_MODE}.log` for agent boot errors.
 
+**Container stays up but never becomes ready, log says `HALTED`.**
+Deliberate. A 2FA failure that only you can clear — two methods on the
+account, a `TWOFA_DEVICE` that matches nothing, a passkey prompt
+without `PASSKEY_AUTHENTICATE` — stops the controller instead of
+exiting, because exiting lets Docker restart it and re-run the same
+failing login every few minutes. The `ALERT_2FA_FAILED` line above the
+halt says what to fix. VNC stays reachable, and if you finish the
+login by hand within 300 s of the failure the controller picks the
+session up and carries on.
+
 **"Existing session detected" loops forever.** Something else keeps
 logging in as the same account (another container, TWS on your
 desktop, the mobile app). Shut the other session down.

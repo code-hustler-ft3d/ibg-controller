@@ -17,7 +17,10 @@ curl http://ibkr:8081/health   # paper
 ```
 
 HTTP 200 = controller is in `MONITORING` state, API port is open,
-JVM is alive. HTTP 503 = anything else. The JSON body is the same
+JVM is alive. HTTP 503 = anything else, including `HALTED` — the
+deliberate stop after a 2FA failure only an operator can clear, where
+the container stays up and reachable but makes no further login
+attempts. The JSON body is the same
 either way, so parsers can inspect it regardless of status.
 
 ## The `/health` endpoint
@@ -61,7 +64,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 | `status` | `"healthy"` \| `"unhealthy"` | `healthy` iff `state == "MONITORING"` AND `api_port_open` AND `jvm_alive`. Everything else is `unhealthy`. |
 | `version` | string | Controller version (`__version__`). |
 | `mode` | `"live"` \| `"paper"` | The `TRADING_MODE` this controller is driving. |
-| `state` | string | Controller state machine position. One of `INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`, `POST_LOGIN`, `TWO_FA`, `DISCLAIMERS`, `API_WAIT`, `CONFIG`, `COMMAND_SERVER`, `READY`, `MONITORING`. |
+| `state` | string | Controller state machine position. One of `INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`, `POST_LOGIN`, `TWO_FA`, `DISCLAIMERS`, `API_WAIT`, `CONFIG`, `COMMAND_SERVER`, `READY`, `MONITORING`, `HALTED`. |
 | `jvm_pid` | int \| null | OS PID of the Gateway JVM. `null` before agent discovery completes. |
 | `jvm_alive` | bool | `true` iff the controller's handle on the Gateway JVM reports it hasn't exited. Normally a `subprocess.Popen`; after Gateway's own auto-restart it is a signal-based stand-in for a JVM the controller didn't spawn (issue #23), which reports liveness but not an exit code. |
 | `api_port` | int | `4001` (live) or `4002` (paper). |
@@ -700,7 +703,18 @@ Security → Secure Login System); with one method Gateway shows no
 selector and unattended TOTP works. Switching method in the dialog
 gets the session kicked, so a two-method account always needs a human
 at login: either leave `TWOFACTOR_CODE` unset and approve the IB Key
-push, or log in over VNC. See issues #7, #20 and #37. For reason 8 (passkey), unattended login isn't
+push, or log in over VNC. See issues #7, #20 and #37.
+
+On reasons 5–8 the controller no longer exits. It waits 300 s for a
+manual login (finish it over VNC and it picks the session up and
+carries on), then enters the `HALTED` state: no further login
+attempts, JVM and VNC still up, `/health` answering 503 so Docker's
+HEALTHCHECK marks the container unhealthy. Exiting would hand the
+container back to Docker's restart policy, which re-runs the identical
+login every few minutes — a configuration failure fails the same way
+every time, so that is just a login generator pointed at IBKR's rate
+limiter. Agent-level failures (reasons 1–2) still exit, because a
+restart can genuinely clear those. For reason 8 (passkey), unattended login isn't
 possible on that account: if it still offers Mobile Authenticator,
 make that the login method (same Secure Login System panel); otherwise
 log in attended via VNC. See issue #22.

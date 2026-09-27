@@ -76,6 +76,20 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **A 2FA failure you have to fix now halts instead of exiting.** When
+  the account's 2FA setup is the blocker — two methods enabled, a
+  `TWOFA_DEVICE` matching no entry in Gateway's list, or a passkey
+  prompt without `PASSKEY_AUTHENTICATE` — the controller waits 300 s
+  for a manual login over VNC and then stops, holding the container up
+  with `/health` answering 503 and state `HALTED`. Previously it exited
+  with status 1, and a container with a restart policy re-ran the same
+  failing login every few minutes, which is how accounts reach IBKR's
+  rate limiter. **If your orchestration watches for container exits,
+  watch the health check instead** — a halted container is up and
+  unhealthy, not gone. Transient agent failures still exit as before.
+
 ### v0.10.0
 
 - **Optional passkey support (PR #29).** New env var
