@@ -257,12 +257,35 @@ production box logged `Setting Auto Log Off Time = 05:01 PM` and
 configured boundary without ever logging off. Only a read-back after
 the commit distinguishes the two cases.
 
-**What this check cannot tell you**: it proves Gateway *kept* the
-value, not that Gateway will *act* on it. A box can log
-`Verified: … reads back as '05:01 PM'` and still run straight through
-the boundary without logging off — the original 2026-09-07 symptom. If
-that is what you are seeing, no token will fire, and an external
-scheduled restart is the remedy. Reported from the field 2026-09-27.
+**What this check can and cannot tell you**: it proves Gateway *kept*
+the value, not that Gateway will *act* on it. A forced test on
+2026-09-27 settled the open half: with a value Gateway kept, the logoff
+**did** fire at the boundary, so the retained-value case works on a real
+account. The 2026-09-07 incident was therefore the value not sticking,
+which is what this token catches. If you ever see a verified value *and*
+a boundary that passes without a logoff, no token will fire and an
+external scheduled restart is the remedy.
+
+**Known limitation — AM times cannot be written (2026-09-27).** Gateway
+renders this field as a composite editor: the digits are one text
+component and AM/PM is a separate control beside it. The agent's
+`SETTEXT_BY_LABEL` writes the first text component after the label and
+never touches the second, so the meridiem keeps its previous value.
+Writing `11:39 AM` committed successfully and Gateway stored **11:39
+PM**; the read-back correctly refused it. A PM value on a field already
+showing PM round-trips fine, which is why this went unnoticed. Until the
+agent can reach the meridiem control, an AM `AUTO_LOGOFF_TIME` or
+`AUTO_RESTART_TIME` is unsatisfiable: it lands as PM and this token
+fires on every login. The controller warns about an AM value before
+writing it. Use a PM time, or schedule the restart outside the
+container.
+
+**Known limitation — the read-back matches a summary label.** The real
+time widgets sit deeper than the component dump's depth limit (30), so
+`_lock_exit_time_visible` matches a sibling label Gateway renders (for
+example `at 12:05 PM`) rather than the control itself. It has been
+correct in every observed case, including refusing the corrupted AM
+write, but it verifies Gateway's rendering rather than the widget.
 
 **What the operator should do**: check the value in Gateway's UI over
 VNC. If Gateway is showing the *other* Lock and Exit field (it offers

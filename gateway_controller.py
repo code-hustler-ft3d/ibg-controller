@@ -1917,7 +1917,7 @@ def handle_2fa(app):
 
         # Log window changes for diagnostics
         if windows != last_windows:
-            log.info(f"2FA wait: windows -> {windows}")
+            log.info(_redact_logs(f"2FA wait: windows -> {windows}"))
             last_windows = windows
 
         # Opportunistic: handle an 'Existing session detected' modal if
@@ -2606,6 +2606,34 @@ def _lock_exit_time_visible(expected):
     return expected.strip() in dump
 
 
+def _warn_if_meridiem_unsettable(label, value):
+    """Warn before writing a Lock and Exit time the agent cannot fully set.
+
+    Gateway renders that field as a composite editor: the digits live in
+    one text component and AM/PM in a separate control beside it.
+    ``SETTEXT_BY_LABEL`` writes the first JTextComponent after the label
+    and never touches the second, so the meridiem keeps whatever it had.
+    Observed live 2026-09-27: writing "11:39 AM" committed successfully
+    and Gateway stored 11:39 PM; the read-back correctly refused it.
+
+    A PM value on a field already showing PM round-trips fine, which is
+    why this went unnoticed. An AM value is currently unsatisfiable: it
+    lands as PM and ALERT_CONFIG_NOT_APPLIED fires on every login with no
+    env-level remedy. Say so before the write rather than leaving the
+    operator to infer it from a recurring alert.
+    """
+    if "am" not in value.strip().lower():
+        return False
+    log.warning(
+        f"  {label} is set to {value!r}, and AM values cannot currently be "
+        "written: Gateway keeps AM/PM in a separate control the agent "
+        "does not reach, so this will be stored as PM and "
+        "ALERT_CONFIG_NOT_APPLIED will fire below. Use a PM time, or "
+        "schedule the restart outside the container. See "
+        "docs/OBSERVABILITY.md (ALERT_CONFIG_NOT_APPLIED).")
+    return True
+
+
 def _verify_lock_exit_time_persisted(label, expected):
     """Re-open Configure → Settings after OK and confirm the Lock and Exit
     time really stuck. Returns True/False, or None if it couldn't be
@@ -2770,6 +2798,7 @@ def handle_post_login_config():
             restart_label = "Set Auto Restart Time (HH:MM)"
             if auto_logoff_time:
                 log.info(f"  Setting Auto Log Off Time = {auto_logoff_time}")
+                _warn_if_meridiem_unsettable(logoff_label, auto_logoff_time)
                 if agent_settext_by_label(CONFIG_WINDOW_TITLE_SUBSTR,
                                           logoff_label, auto_logoff_time):
                     changed = True
@@ -2784,6 +2813,7 @@ def handle_post_login_config():
                                 "to drive that field.")
             if auto_restart_time:
                 log.info(f"  Setting Auto Restart Time = {auto_restart_time}")
+                _warn_if_meridiem_unsettable(restart_label, auto_restart_time)
                 if agent_settext_by_label(CONFIG_WINDOW_TITLE_SUBSTR,
                                           restart_label, auto_restart_time):
                     changed = True
@@ -3659,8 +3689,9 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                     time.sleep(0.5)
             now = time.monotonic()
             if now - last_status > 10:
-                log.info(f"AUTORESTART: API port {api_port} still closed at "
-                         f"t+{now - t0:.0f}s; windows={agent_windows()}")
+                log.info(_redact_logs(
+                    f"AUTORESTART: API port {api_port} still closed at "
+                    f"t+{now - t0:.0f}s; windows={agent_windows()}"))
                 last_status = now
             time.sleep(1)
 
@@ -4288,7 +4319,8 @@ def wait_for_api_port(timeout=180):
         if now - last_status > 10:
             elapsed = int(now - start)
             windows = agent_windows()
-            log.info(f"  API port still closed at t+{elapsed}s; windows={windows}")
+            log.info(_redact_logs(
+                f"  API port still closed at t+{elapsed}s; windows={windows}"))
             last_status = now
         time.sleep(0.5)
     return False
@@ -5508,6 +5540,20 @@ def monitor_loop(app):
                           "not observable: adopted after Gateway's "
                           "self-restart, not a child of the controller)")
                 reason = "adopted Gateway JVM exited"
+            elif rc == 0:
+                # A scheduled Lock and Exit logoff exits cleanly, and so
+                # does Gateway's own restart. Logging that at ERROR is how
+                # operators learn to ignore ERROR (field report
+                # 2026-09-27). Recovery below is unchanged either way.
+                _sched = (os.environ.get("AUTO_LOGOFF_TIME", "").strip()
+                          or os.environ.get("AUTO_RESTART_TIME", "").strip())
+                log.info(
+                    f"Gateway JVM exited cleanly (code 0)"
+                    + (f"; a scheduled Lock and Exit is configured "
+                       f"({_sched}), so this is expected at that boundary"
+                       if _sched else "")
+                    + ". Recovering.")
+                reason = "JVM exited cleanly (code 0)"
             else:
                 log.error(f"Gateway JVM exited with code {rc}")
                 reason = f"JVM exited with code {rc}"
