@@ -234,7 +234,7 @@ real product.
 |---|---|
 | `TWS_MASTER_CLIENT_ID` | Master API client ID |
 | `READ_ONLY_API` | `yes`/`no` |
-| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other depending on account state; set both vars and the controller handles whichever is displayed. |
+| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other depending on account state; set both vars and the controller handles whichever is displayed. **AM times don't work yet**: Gateway keeps AM/PM in a separate control the agent can't reach, so an AM value is stored as PM and `ALERT_CONFIG_NOT_APPLIED` fires every login. Use a PM time or an external scheduler. |
 | `AUTO_RESTART_ADOPT` | Default `yes`: when Gateway restarts itself at `AUTO_RESTART_TIME`, adopt the new JVM instead of launching a second one. Gateway normally carries the session across, so no login and no 2FA; when it doesn't, the controller re-drives login on the adopted JVM. `no` restores always-relaunch. Wait budget: `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (90). |
 
 ### Command server

@@ -3494,5 +3494,36 @@ class TestOperatorHalt(unittest.TestCase):
         finally:
             gc._current_state = before
 
+class TestMeridiemAndLogHygiene(unittest.TestCase):
+    """Field report 2026-09-27: Gateway's Lock and Exit time is a composite
+    editor — digits in one text component, AM/PM in a separate control the
+    agent never reaches. Writing "11:39 AM" committed OK and Gateway stored
+    11:39 PM. AM values are therefore unsatisfiable today, and the operator
+    gets a recurring ALERT_CONFIG_NOT_APPLIED with no env-level remedy
+    unless we say so up front.
+    """
+
+    def test_am_value_is_flagged(self):
+        with _capture_controller_errors():
+            self.assertTrue(gc._warn_if_meridiem_unsettable(
+                "Set Auto Log Off Time (HH:MM)", "11:39 AM"))
+
+    def test_pm_value_is_not_flagged(self):
+        with _capture_controller_errors():
+            self.assertFalse(gc._warn_if_meridiem_unsettable(
+                "Set Auto Log Off Time (HH:MM)", "05:01 PM"))
+            self.assertFalse(gc._warn_if_meridiem_unsettable(
+                "Set Auto Restart Time (HH:MM)", "23:45"))
+
+    def test_account_numbers_are_stripped_from_window_titles(self):
+        # The config window title embeds the account number, so any log line
+        # that prints window titles leaks it. _redact_logs existed for this
+        # and three call sites bypassed it.
+        line = ("2FA wait: windows -> [('aV', 'DU1234567 Trader Workstation "
+                "Configuration (Simulated Trading)', True)]")
+        red = gc._redact_logs(line)
+        self.assertNotIn("DU1234567", red)
+        self.assertIn("Trader Workstation Configuration", red)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

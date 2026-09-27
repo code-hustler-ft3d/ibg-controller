@@ -6,6 +6,27 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **AM Lock and Exit times are flagged instead of silently corrupted
+  (field report 2026-09-27).** Gateway renders that field as a composite
+  editor: digits in one text component, AM/PM in a separate control the
+  agent never reaches. Writing `11:39 AM` committed successfully and
+  Gateway stored 11:39 PM. The read-back correctly refused it, but the
+  operator was left with a recurring `ALERT_CONFIG_NOT_APPLIED`, no
+  env-level remedy and no explanation. The controller now warns before
+  the write, and the README and `docs/OBSERVABILITY.md` state the
+  limitation. Setting AM still isn't possible; that needs the agent to
+  see past the component dump's depth limit.
+- **A clean Gateway exit no longer logs at ERROR.** A scheduled Lock and
+  Exit logoff exits with code 0, and logging that at ERROR is how
+  operators learn to ignore ERROR. Code 0 now logs at INFO, naming the
+  configured schedule when there is one. Non-zero exits are unchanged.
+- **Window titles are redacted in three more log lines.** The config
+  window title embeds the account number, and `_redact_logs` existed for
+  exactly that, but the 2FA wait line and both API-port wait lines
+  printed window lists raw.
+
 ### Added
 
 - **`ALERT_HALTED` and `ALERT_2FA_MANUAL_WINDOW`.** A field report on
