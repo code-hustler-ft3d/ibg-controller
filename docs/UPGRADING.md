@@ -76,6 +76,29 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.11.1
+
+- **A clean Gateway exit no longer logs at `ERROR`.** A scheduled Lock
+  and Exit logoff exits with code 0, and that was logged at `ERROR`
+  alongside real faults. It now logs at `INFO` and names the configured
+  schedule. **If you alert on `ERROR` lines you will see fewer of them**,
+  which is the point; nothing about the recovery changed.
+- **Two new tokens**: `ALERT_HALTED` (the controller stopped on purpose
+  and nothing will proceed until a person acts) and
+  `ALERT_2FA_MANUAL_WINDOW` (a 300 s window where finishing the login
+  over VNC still rescues the session). Both are additive — grep-by-prefix
+  monitors need no change.
+- **Known limitation, now stated**: an AM `AUTO_LOGOFF_TIME` or
+  `AUTO_RESTART_TIME` cannot be written. Gateway keeps AM/PM in a
+  separate control the agent cannot reach, so an AM value is stored as PM
+  and `ALERT_CONFIG_NOT_APPLIED` fires on every login. The controller now
+  warns before the write. Use a PM time or an external scheduler.
+- **If anything in your stack restarts unhealthy containers**, read the
+  note in the README: a halted container answers 503 on `/health` by
+  design, and a Kubernetes liveness probe, Swarm, an autoheal sidecar or
+  a "restart unhealthy" monitor will restart it and recreate the login
+  loop the halt prevents. Point liveness at `/ready`.
+
 ### v0.11.0
 
 - **A 2FA failure you have to fix now halts instead of exiting.** When
