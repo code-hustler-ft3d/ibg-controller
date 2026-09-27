@@ -64,7 +64,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 | `status` | `"healthy"` \| `"unhealthy"` | `healthy` iff `state == "MONITORING"` AND `api_port_open` AND `jvm_alive`. Everything else is `unhealthy`. |
 | `version` | string | Controller version (`__version__`). |
 | `mode` | `"live"` \| `"paper"` | The `TRADING_MODE` this controller is driving. |
-| `state` | string | Controller state machine position. One of `INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`, `POST_LOGIN`, `TWO_FA`, `DISCLAIMERS`, `API_WAIT`, `CONFIG`, `COMMAND_SERVER`, `READY`, `MONITORING`, `HALTED`. |
+| `state` | string | Controller state machine position. One of `INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`, `POST_LOGIN`, `TWO_FA`, `DISCLAIMERS`, `API_WAIT`, `CONFIG`, `COMMAND_SERVER`, `READY`, `MONITORING`, `HALTED` (added v0.11.0). |
 | `jvm_pid` | int \| null | OS PID of the Gateway JVM. `null` before agent discovery completes. |
 | `jvm_alive` | bool | `true` iff the controller's handle on the Gateway JVM reports it hasn't exited. Normally a `subprocess.Popen`; after Gateway's own auto-restart it is a signal-based stand-in for a JVM the controller didn't spawn (issue #23), which reports liveness but not an exit code. |
 | `api_port` | int | `4001` (live) or `4002` (paper). |
@@ -705,7 +705,7 @@ gets the session kicked, so a two-method account always needs a human
 at login: either leave `TWOFACTOR_CODE` unset and approve the IB Key
 push, or log in over VNC. See issues #7, #20 and #37.
 
-On reasons 5–8 the controller no longer exits. It waits 300 s for a
+On reasons 5–8 the controller no longer exits (v0.11.0). It waits 300 s for a
 manual login (finish it over VNC and it picks the session up and
 carries on), then enters the `HALTED` state: no further login
 attempts, JVM and VNC still up, `/health` answering 503 so Docker's
