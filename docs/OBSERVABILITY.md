@@ -378,7 +378,7 @@ statuses. Grep on the prefix and read `status=`.
 expected rate with `AUTO_RESTART_TIME` set; zero is expected without
 it.
 
-### `ALERT_2FA_MANUAL_WINDOW`
+### `ALERT_2FA_MANUAL_WINDOW` (added v0.11.1)
 
 ```
 ALERT_2FA_MANUAL_WINDOW mode=live timeout_seconds=300 remediation="finish the login over VNC (port 5900) within 300s …"
@@ -400,7 +400,7 @@ automated attempt.
 **Recommended debounce**: none — it fires once per failure and is
 time-critical.
 
-### `ALERT_HALTED`
+### `ALERT_HALTED` (added v0.11.1)
 
 ```
 ALERT_HALTED mode=live state=HALTED reason="2FA needs a change only an operator can make; see the ALERT_2FA_FAILED line above"
