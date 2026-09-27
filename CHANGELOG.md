@@ -4,6 +4,41 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`ALERT_HALTED` and `ALERT_2FA_MANUAL_WINDOW`.** A field report on
+  v0.11.0 pointed out that nothing distinguished "exited, the restart
+  policy may retry" from "halted, nothing will ever proceed" — opposite
+  operator responses, same `ALERT_2FA_FAILED` line. `ALERT_CCP_PERSISTENT_HALT`
+  already set the precedent. `ALERT_2FA_MANUAL_WINDOW` fires when the
+  300 s rescue window opens, which is the only moment operator action
+  still changes the outcome.
+- **The controller logs its version at startup.** `__version__` existed
+  only in the `/health` payload, so user-submitted logs carried no
+  version and triage had to infer it. The first line is now
+  `ibg-controller v0.11.0 starting (mode=live, gateway=10.45.1j, product=gateway)`.
+
+### Fixed
+
+- **Documented that restart-on-unhealthy tooling defeats the halt.** The
+  shipped `HEALTHCHECK` curls `/health`, which answers 503 while
+  `HALTED`, so Kubernetes liveness probes, Swarm, autoheal sidecars and
+  "restart unhealthy" monitors restart the container and recreate the
+  login storm v0.11.0 exists to prevent. Plain Docker is unaffected,
+  since it never restarts on health status. README and
+  `docs/OBSERVABILITY.md` now name the four vectors and say to point
+  liveness at `/ready`, which stays 200 while the process is
+  deliberately alive.
+- **Documented what the Lock and Exit read-back cannot tell you.** It
+  proves Gateway kept the value, not that Gateway will act on it. A box
+  can log `Verified: … reads back as '05:01 PM'` and still run through
+  the boundary without logging off, and no token fires for that.
+- **Documented that API clients must re-arm subscriptions** after a
+  Gateway restart. A client that only reconnects its socket can report
+  itself connected while market data stays frozen.
+
 ## [0.11.0] - 2026-09-27
 
 ### Changed

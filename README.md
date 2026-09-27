@@ -272,6 +272,21 @@ and last-auth timestamp — HTTP 200 when logged in and serving, 503
 otherwise. `GET /ready` is a process-liveness probe. The shipped
 Dockerfile wires this into a Docker `HEALTHCHECK`.
 
+**If anything in your stack restarts unhealthy containers, read this.**
+When a 2FA failure needs you, the controller halts instead of exiting,
+and `/health` answers 503 — so the shipped `HEALTHCHECK` marks the
+container unhealthy. Plain Docker ignores that, but Kubernetes liveness
+probes, Swarm, autoheal sidecars and "restart unhealthy" monitors will
+restart it and recreate the login loop the halt prevents. Point liveness
+at `/ready`, which stays 200 while the process is deliberately alive,
+and keep `/health` for readiness.
+
+**API clients must re-arm their subscriptions after a Gateway restart.**
+A client that only reconnects its socket can report itself connected
+while market data stays frozen — the subscriptions died with the old
+JVM. Re-subscribe on reconnect, or watch your own bar timestamps rather
+than the connection flag.
+
 The logs carry stable `ALERT_*` tokens (`ALERT_2FA_FAILED`,
 `ALERT_LOGIN_FAILED`, `ALERT_CCP_PERSISTENT`, `ALERT_PASSWORD_EXPIRED`,
 `ALERT_SHUTDOWN`, ...) that monitors can grep regardless of log level.

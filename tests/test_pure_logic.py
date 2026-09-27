@@ -3452,6 +3452,34 @@ class TestOperatorHalt(unittest.TestCase):
         plain.assert_called_once()
         retry.assert_not_called()
 
+    def test_halt_emits_a_greppable_token(self):
+        # Field report 2026-09-27: ALERT_2FA_FAILED alone can't tell
+        # "exited, Docker will retry" from "halted, nothing will proceed",
+        # and those need opposite operator responses. ALERT_CCP_PERSISTENT_HALT
+        # set the precedent for a halt-specific token.
+        before = gc._current_state
+        try:
+            with patch.object(gc.time, "sleep"), \
+                 _capture_controller_errors() as errors:
+                gc._halt_for_operator("two methods on the account", cycles=0)
+            self.assertTrue(
+                any("ALERT_HALTED" in line and "state=HALTED" in line
+                    for line in errors),
+                f"halt token missing from: {errors}")
+        finally:
+            gc._current_state = before
+
+    def test_rescue_window_announces_itself(self):
+        # The 300 s window is the only moment operator action still helps,
+        # so it has to be alertable at window-open, not after it lapsed.
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             _capture_controller_errors() as errors:
+            self.assertFalse(gc._await_manual_login(timeout=7))
+        self.assertTrue(
+            any("ALERT_2FA_MANUAL_WINDOW" in line and "timeout_seconds=7" in line
+                for line in errors),
+            f"rescue-window token missing from: {errors}")
+
     def test_halt_sets_state_and_keeps_saying_why(self):
         before = gc._current_state
         try:
