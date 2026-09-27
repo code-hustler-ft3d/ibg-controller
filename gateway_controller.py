@@ -4305,6 +4305,12 @@ def _await_manual_login(timeout=_OPERATOR_RESCUE_SECONDS):
     re-drives the login up to 8 times, which is the storm this path exists
     to avoid.
     """
+    log.error(
+        f"ALERT_2FA_MANUAL_WINDOW mode={TRADING_MODE} "
+        f"timeout_seconds={timeout} "
+        f"remediation=\"finish the login over VNC (port 5900) within "
+        f"{timeout}s and the controller picks the session up; after that it "
+        f"halts and makes no further attempts\"")
     log.error(f"Waiting up to {timeout}s for a manual login before halting. "
               "Connect to the container's VNC (port 5900) and finish it by "
               "hand if you want this session. Nothing is retried meanwhile.")
@@ -4316,11 +4322,24 @@ def _halt_for_operator(reason, cycles=None):
 
     Exiting hands the container back to Docker's restart policy, which
     re-runs the same failing login every few minutes. Halting keeps the
-    JVM, VNC and the health server up — /health answers 503, so Docker's
-    HEALTHCHECK marks the container unhealthy — and waits for a person.
+    JVM, VNC and the health server up and waits for a person.
+
+    CAVEAT (field report, 2026-09-27): /health answers 503 here, and the
+    shipped HEALTHCHECK curls /health, so the container goes unhealthy.
+    Plain Docker never restarts on unhealthy, so the halt holds — but
+    anything that acts on health status (Kubernetes livenessProbe, Swarm,
+    autoheal-style sidecars, a monitor with a "restart unhealthy" rule)
+    will restart the container and recreate the login storm this exists to
+    prevent. Point liveness at /ready, which stays 200 while the process is
+    deliberately alive, and keep /health for readiness. README and
+    docs/OBSERVABILITY.md say so too.
+
     ``cycles`` bounds the reminder loop for tests; None means forever.
     """
     _set_state(State.HALTED)
+    log.error(
+        f"ALERT_HALTED mode={TRADING_MODE} state=HALTED "
+        f"reason=\"{reason}\"")
     log.error(f"HALTED: {reason}")
     log.error("No further login attempts will be made. Fix the cause and "
               "restart the container; VNC stays reachable if you want to "
@@ -4568,6 +4587,13 @@ def _warn_unsupported_env_vars():
 
 def main():
     global gateway_proc
+
+    # First line in the log: user-submitted logs previously carried no
+    # version at all, so triage had to infer it from behaviour (field
+    # report, 2026-09-27). Keep it cheap and greppable.
+    log.info(f"ibg-controller v{__version__} starting "
+             f"(mode={TRADING_MODE}, gateway={TWS_VERSION or 'unknown'}, "
+             f"product={GATEWAY_OR_TWS})")
 
     if not USERNAME or not PASSWORD:
         log.error("TWS_USERID and TWS_PASSWORD must be set")

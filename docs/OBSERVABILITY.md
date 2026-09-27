@@ -23,6 +23,17 @@ the container stays up and reachable but makes no further login
 attempts. The JSON body is the same
 either way, so parsers can inspect it regardless of status.
 
+> **Anything that restarts unhealthy containers defeats the halt.** The
+> shipped `HEALTHCHECK` curls `/health`, so a halted container goes
+> unhealthy after three failed probes. Plain Docker never restarts on
+> health status, so the halt holds there — the case it was designed for.
+> But a Kubernetes `livenessProbe` on `/health`, Docker Swarm, an
+> autoheal-style sidecar, or a monitor with a "restart unhealthy" rule
+> will restart the container and recreate the login storm the halt
+> exists to prevent. **Point liveness at `/ready`**, which stays 200
+> while the process is deliberately alive, and keep `/health` for
+> readiness. Reported from the field 2026-09-27.
+
 ## The `/health` endpoint
 
 ### Protocol
@@ -246,6 +257,13 @@ production box logged `Setting Auto Log Off Time = 05:01 PM` and
 configured boundary without ever logging off. Only a read-back after
 the commit distinguishes the two cases.
 
+**What this check cannot tell you**: it proves Gateway *kept* the
+value, not that Gateway will *act* on it. A box can log
+`Verified: … reads back as '05:01 PM'` and still run straight through
+the boundary without logging off — the original 2026-09-07 symptom. If
+that is what you are seeing, no token will fire, and an external
+scheduled restart is the remedy. Reported from the field 2026-09-27.
+
 **What the operator should do**: check the value in Gateway's UI over
 VNC. If Gateway is showing the *other* Lock and Exit field (it offers
 either Auto Log Off Time or Auto Restart Time, never both, depending on
@@ -336,6 +354,50 @@ statuses. Grep on the prefix and read `status=`.
 **Recommended debounce**: none. One line per night per mode is the
 expected rate with `AUTO_RESTART_TIME` set; zero is expected without
 it.
+
+### `ALERT_2FA_MANUAL_WINDOW`
+
+```
+ALERT_2FA_MANUAL_WINDOW mode=live timeout_seconds=300 remediation="finish the login over VNC (port 5900) within 300s …"
+```
+
+**When fired**: once, when a 2FA failure that only an operator can clear
+opens its rescue window, immediately before the controller waits for a
+manual login.
+
+**What it means**: this is the only moment operator action still changes
+the outcome. Finish the login over VNC inside the window and the
+controller picks the session up and resumes; miss it and the controller
+halts and stops trying.
+
+**What the operator should do**: go to the VNC console now. The
+`ALERT_2FA_FAILED` line immediately above says what blocked the
+automated attempt.
+
+**Recommended debounce**: none — it fires once per failure and is
+time-critical.
+
+### `ALERT_HALTED`
+
+```
+ALERT_HALTED mode=live state=HALTED reason="2FA needs a change only an operator can make; see the ALERT_2FA_FAILED line above"
+```
+
+**When fired**: when the controller stops on purpose and will make no
+further login attempts, after the window above lapsed. The process stays
+alive, so nothing else announces it.
+
+**What it means**: distinct from an exit. An exit means the container
+went away and a restart policy may retry it; `ALERT_HALTED` means
+nothing will ever proceed until a person acts. Those need opposite
+responses: wait, versus get up and fix it.
+
+**What the operator should do**: fix the cause named by the preceding
+`ALERT_2FA_FAILED`, then restart the container. `/health` reports
+`"state": "HALTED"` with HTTP 503 for as long as this lasts.
+
+**Recommended debounce**: 1 h — the halt repeats its reason every 5 min
+so the log never goes silent.
 
 ### `ALERT_JVM_RESTART_EXHAUSTED`
 
@@ -807,7 +869,7 @@ Alert on `probe_success == 0` for 5m.
 
 ```bash
 # Tier 1: wake somebody up (ERROR-level only)
-docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|CCP_PERSISTENT_HALT|JVM_RESTART_EXHAUSTED|2FA_FAILED|PASSWORD_EXPIRED|LOGIN_FAILED)'
+docker logs --since=5m ibkr 2>&1 | grep -E 'ALERT_(CCP_PERSISTENT|CCP_PERSISTENT_HALT|JVM_RESTART_EXHAUSTED|2FA_FAILED|2FA_MANUAL_WINDOW|HALTED|PASSWORD_EXPIRED|LOGIN_FAILED)'
 
 # Just the latest occurrence of each (ERROR-level only)
 docker logs ibkr 2>&1 | grep -E '^[0-9]+:[0-9]+ \[ERROR\] ALERT_' | tail
