@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.11.0
 
 - **A 2FA failure you have to fix now halts instead of exiting.** When
   the account's 2FA setup is the blocker — two methods enabled, a
