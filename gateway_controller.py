@@ -4126,10 +4126,12 @@ def wait_for_api_port_with_retry(app, port_timeout=180,
                       "creds, wrong server, or network)")
             _diagnose_login_failure()
             log.error("Final state dump:")
-            log.error(f"  windows: {agent_windows()}")
+            log.error(_redact_logs(f"  windows: {agent_windows()}"))
             labels = agent_labels()
             for wtitle, text in labels[:30]:
-                log.error(f"  label [{wtitle}] {text!r}")
+                log.error(_redact_logs(f"  label [{wtitle}] {text!r}"))
+            if _recover_mode_in_place("the API port never opened after login"):
+                return True
             sys.exit(1)
         log.warning(f"API port timeout with lockout signature "
                     f"(ccp_timeout={ccp}, stuck_connecting={stuck}); "
@@ -4148,6 +4150,20 @@ def wait_for_api_port_with_retry(app, port_timeout=180,
               "long-cool-down JVM restart (v0.4.5 — dual-mode container's "
               "run.sh does NOT restart on sys.exit, so we self-heal)")
     return _escalate_to_jvm_restart(f"{max_attempts} in-JVM relogin attempts exhausted")
+
+
+def _sibling_mode_ready():
+    """In dual mode, True when the other trading mode has signalled
+    readiness in this container.
+
+    That proves the network path to IBKR works. It does not prove this
+    mode's credentials — live and paper log in with different accounts —
+    so the diagnosis says only what it shows.
+    """
+    for mine, other in (("live", "paper"), ("paper", "live")):
+        if READY_FILE.endswith(f"_{mine}"):
+            return os.path.exists(READY_FILE[: -len(mine)] + other)
+    return False
 
 
 def _diagnose_login_failure():
@@ -4171,12 +4187,14 @@ def _diagnose_login_failure():
          Nothing from the server — it's ignoring us or we can't
          reach it.
 
-      b) Wrong credentials:
+      b) Handshake answered, login never completed:
          'Authenticating' appears, 'NS_AUTH_START' appears, but
-         PostAuthenticate never happens (the server processed our
-         hello but rejected our credentials). Usually also surfaces
-         as a dialog we'd normally catch; if we got here, the dialog
-         was either missed or dismissed.
+         PostAuthenticate never happens. With a CCP Timeout! after it,
+         that is the credentials being rejected. WITHOUT one, it is
+         "post-auth-no-progress", which is not reliably a credential
+         problem: a 2026-09-30 field report saw the same account fail
+         this way twice and succeed on the third attempt with no
+         change at all. Treat it as retryable first.
 
       c) Never reached Authenticating:
          Usually means the SSL handshake failed, the server was
@@ -4246,20 +4264,35 @@ def _diagnose_login_failure():
         return
 
     if has_ns_auth_start and not has_timeout:
+        # Not the bad-credentials signature: that one has a CCP Timeout!
+        # after NS_AUTH_START (next branch). A field report on 2026-09-30
+        # had an operator about to audit a correct password because this
+        # message led with credentials; the same account then logged in
+        # on its third plain retry.
         log.error(
             f"ALERT_LOGIN_FAILED mode={TRADING_MODE} "
             f"reason=\"post-auth-no-progress\" "
-            f"suggested_action=\"server accepted the auth handshake but "
-            f"login never completed; verify TWS_USERID / TWS_PASSWORD "
-            f"(or _PAPER variants) and scan logs for an unrecognized "
-            f"post-auth dialog\"")
+            f"suggested_action=\"IBKR answered the auth handshake but the "
+            f"login never completed. This has cleared on a plain retry with "
+            f"no configuration change, so retry before auditing "
+            f"credentials; if it repeats, look for an unrecognized "
+            f"post-auth dialog in the window dump\"")
         log.error("Diagnosis: auth request sent, server responded with "
                   "NS_AUTH_START, but we never reached PostAuthenticate.")
-        log.error("  Most likely causes:")
-        log.error("    (1) Wrong username or password — verify your "
-                  "TWS_USERID / TWS_PASSWORD (or _PAPER variants)")
+        log.error("  NS_AUTH_START means IBKR answered the handshake, so "
+                  "this is not the bad-credentials signature — that one "
+                  "times out after the handshake.")
+        if _sibling_mode_ready():
+            log.error("  The other trading mode is logged in on this "
+                      "container, so the network path to IBKR works.")
+        log.error("  Most likely causes, in order:")
+        log.error("    (1) A transient stall on IBKR's side. The same "
+                  "account has failed this way twice and then logged in "
+                  "on the third try with nothing changed. Retry.")
         log.error("    (2) A post-auth dialog appeared that we didn't "
-                  "recognize — check the window dump above")
+                  "recognize — check the window dump below")
+        log.error("    (3) Only if it persists across several retries: "
+                  "verify TWS_USERID / TWS_PASSWORD (or _PAPER variants)")
         return
 
     if has_ns_auth_start and has_timeout:
@@ -4381,6 +4414,58 @@ def _halt_for_operator(reason, cycles=None):
         time.sleep(_HALT_LOG_INTERVAL_SECONDS)
         n += 1
         log.error(f"HALTED: {reason} (waiting for an operator)")
+
+
+# How many times a mode relaunches its own Gateway before giving up and
+# handing recovery back to the container. Pauses double from 60 s.
+_MODE_RECOVERY_ATTEMPTS = 3
+
+
+def _recover_mode_in_place(reason, attempts=None):
+    """Relaunch this mode's Gateway and log in again before giving up.
+
+    Field report 2026-09-30: a live login failed with post-auth-no-progress,
+    the controller exited, and in dual mode nothing restarted it for about
+    nine hours. The same account then logged in on a plain retry. Exiting
+    hands recovery to the container, which in dual mode disturbs the other
+    mode too; healing here keeps the other mode untouched.
+
+    Uses the monitor loop's proven relaunch (``do_restart_in_place``): it
+    tears the JVM down and runs the whole pipeline, 2FA included. That is
+    deliberately not ``attempt_inplace_relogin``, which only re-drives the
+    login form and would stall at a TOTP prompt.
+
+    Bounded, with pauses of 60, 120 and 240 s, so a failure that persists
+    still reaches the container within about ten minutes instead of
+    looping. A 2FA failure only an operator can clear is not retried: it
+    takes the same rescue-window-then-halt path main() uses, because
+    retrying it is the login storm v0.11.0 exists to prevent.
+    """
+    attempts = _MODE_RECOVERY_ATTEMPTS if attempts is None else attempts
+    for attempt in range(1, attempts + 1):
+        delay = min(60 * 2 ** (attempt - 1), 600)
+        log.warning(f"Recovery: {reason}. Relaunching Gateway in {delay}s "
+                    f"(attempt {attempt}/{attempts}) before handing this "
+                    "mode back to the container.")
+        time.sleep(delay)
+        try:
+            if do_restart_in_place():
+                log.info("Recovery: this mode is back, without a container "
+                         "restart")
+                return True
+        except Exception as e:
+            log.error(f"Recovery: relaunch raised {type(e).__name__}: {e}")
+        if _twofa_needs_operator:
+            if _await_manual_login():
+                log.info("Manual login detected — resuming the normal flow")
+                return True
+            _halt_for_operator(
+                "2FA needs a change only an operator can make; see the "
+                "ALERT_2FA_FAILED line above")
+            return False
+    log.error(f"Recovery: {attempts} relaunches did not bring this mode "
+              "back; exiting so the container can act")
+    return False
 
 
 def signal_ready():
@@ -4799,7 +4884,7 @@ def main():
                 _halt_for_operator(
                     "2FA needs a change only an operator can make; see the "
                     "ALERT_2FA_FAILED line above")
-        else:
+        elif not _recover_mode_in_place("2FA handling failed"):
             sys.exit(1)
 
     _set_state(State.DISCLAIMERS)

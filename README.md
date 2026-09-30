@@ -38,6 +38,7 @@ build arg if you need a different base.
 docker pull ghcr.io/code-hustler-ft3d/ibg-controller:latest
 
 docker run -d --name ibkr \
+  --restart on-failure:3 \
   --env-file /path/to/your/.env \
   -e USE_IBG_CONTROLLER=yes \
   -e TRADING_MODE=paper \
@@ -48,6 +49,11 @@ docker run -d --name ibkr \
 
 `USE_IBG_CONTROLLER=yes` is required. Without it the image starts the
 IBC build that ships in its base image.
+
+Set a restart policy. When the controller can't recover a login on its
+own it exits, and `on-failure:3` lets Docker retry a bounded number of
+times before leaving the container stopped where you'll see it. Without
+one, an exit stops the container for good.
 
 Tags: `:latest`, `:<major>.<minor>`, `:<major>.<minor>.<patch>` and
 `:v<major>.<minor>.<patch>`. All
@@ -63,6 +69,7 @@ short strands IBKR session slots on every restart
 services:
   ib-gateway:
     image: ghcr.io/code-hustler-ft3d/ibg-controller:latest
+    restart: on-failure:3
     stop_grace_period: 90s   # required
     environment:
       TRADING_MODE: paper
@@ -206,7 +213,7 @@ real product.
 | `TWS_USERID_PAPER` / `TWS_PASSWORD_PAPER` | Paper credentials, used when `TRADING_MODE=paper` |
 | `TWOFACTOR_CODE` | The **base32 secret** from IBKR's Mobile Authenticator enrolment — not a generated six-digit code. Validated at startup; a wrong-shaped value exits with `ALERT_2FA_FAILED reason="TWOFACTOR_CODE is not a base32 secret"`. Leave unset for IB Key push. |
 | `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
-| `TRADING_MODE` | `live`, `paper` (default), or `both` |
+| `TRADING_MODE` | `live`, `paper` (default), or `both`. In `both`, a mode that fails to log in relaunches its own Gateway up to three times without touching the other. If that fails, live takes priority: a dead live controller stops the container so its restart policy brings both back, while a dead paper controller leaves live running and waits for the next restart. Run two single-mode containers if the modes must stay fully independent. |
 | `TWOFA_DEVICE` | Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Matched against Gateway's device list without regard to case or spacing; if nothing matches, the log lists the entries it found. Ignored on single-method accounts. **Setting this rarely makes a two-method account work unattended** — on most accounts we've seen, IBKR kicks the session when the method is switched mid-login. See [2FA](#2fa). |
 | `PASSKEY_AUTHENTICATE` | `yes` makes the controller press **Authenticate** on Gateway's passkey prompt; an authenticator running alongside the container completes the WebAuthn ceremony. Unset, a passkey prompt fails loudly. Needs an amd64 base and extra browser libraries; see [2FA](#2fa). |
 

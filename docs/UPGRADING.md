@@ -76,6 +76,29 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **A mode that fails to log in now heals itself first.** On the
+  failure behind the 2026-09-30 incident (the API port never opening
+  after login) and on a 2FA failure that isn't the operator's to fix,
+  the controller relaunches its own Gateway and logs in again, up to
+  three times with pauses of 60, 120 and 240 s. The relaunch runs the
+  full pipeline including 2FA, and the other mode in a dual-mode
+  container is not touched. Only if that fails does the controller exit.
+- **Dual mode: when a controller does exit, live takes priority.** If
+  live's controller exits, paper is stopped cleanly and the container
+  exits non-zero, so Docker's restart policy brings both back. If
+  paper's exits, live keeps running undisturbed and paper returns on the
+  next restart; the container reports unhealthy until then. Previously
+  either one dying was masked by the other and nothing restarted it — a
+  field report lost about nine hours of live trading that way.
+- **Set a restart policy if you haven't.** The README examples now
+  include `on-failure:3`. Without a restart policy, a controller that
+  gives up stops the container for good.
+- **`post-auth-no-progress` no longer tells you to check your password
+  first.** It isn't the bad-credentials signature and has been seen to
+  clear on a plain retry. The message now leads with retrying.
+
 ### v0.11.1
 
 - **A clean Gateway exit no longer logs at `ERROR`.** A scheduled Lock

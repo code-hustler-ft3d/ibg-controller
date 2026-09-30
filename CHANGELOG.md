@@ -4,6 +4,48 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **A mode that fails to log in heals itself before exiting.** A field
+  report on 2026-09-30 lost about nine hours of live trading: a login
+  failed with `post-auth-no-progress`, the controller exited, and
+  nothing brought live back until a watchdog restarted the container.
+  The same account logged in on a plain retry. Now, when the API port
+  never opens after login, or 2FA fails for a reason that isn't the
+  operator's to fix, the controller relaunches its own Gateway and logs
+  in again, up to three times with pauses of 60, 120 and 240 s. It uses
+  the monitor loop's proven relaunch, which runs 2FA — not the in-JVM
+  relogin, which only re-drives the login form and would stall at a TOTP
+  prompt. A 2FA failure only an operator can clear is still not retried.
+- **Dual mode: a controller that does exit reaches Docker, and live
+  takes priority.** `run.sh` ended with a plain `wait` on both
+  controllers, which returns only when both have exited, so one mode
+  dying was masked by the other and the restart policy never fired. Now
+  a dead live controller stops paper cleanly and exits the container
+  non-zero so the restart policy brings both back; a dead paper
+  controller leaves live running untouched. Single mode and the legacy
+  IBC path keep a plain `wait`, and a halted controller never exits.
+  `run.sh` gains its first tests, which drive the real function against
+  stub controllers.
+- **The README examples set a restart policy** (`on-failure:3`). The
+  recovery above ends in an exit when it fails, and without a restart
+  policy that stops the container for good.
+
+### Fixed
+
+- **`post-auth-no-progress` stopped leading with "wrong username or
+  password".** IBKR answering the handshake is not the bad-credentials
+  signature, which times out after it, and the same account in the
+  field report logged in on its third plain retry. An operator was
+  about to audit a correct password. The message now leads with
+  retrying, lists credentials last, and in dual mode says when the other
+  mode is logged in, which proves the network path.
+- **The terminal failure dump redacts the account number.** The window
+  and label lines printed after a failed login carried the config
+  window title, which embeds it.
+
 ## [0.11.1] - 2026-09-27
 
 ### Fixed

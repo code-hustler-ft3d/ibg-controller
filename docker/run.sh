@@ -248,6 +248,63 @@ wait_for_controller_ready() {
 	return 0
 }
 
+# Wait for the controllers. In dual mode, a live controller dying must reach
+# Docker; a paper controller dying must not disturb live.
+#
+# A plain `wait` on both PIDs returns only when BOTH have exited, so one mode
+# dying was masked by the other: Docker's restart policy never fired, and a
+# 2026-09-30 field report lost about nine hours of live trading that way while
+# paper stayed healthy. Each controller now tries to heal its own mode first
+# (it relaunches its Gateway up to three times before exiting), so reaching
+# this point means that failed.
+#
+# Live takes priority. If live's controller exits, paper is stopped cleanly
+# (stop_ibc drives a proper logout) and the container exits non-zero so the
+# restart policy brings both back. If paper's exits, live keeps running and
+# is not touched; paper returns on the next container restart, and the
+# container reports unhealthy until then because the healthcheck probes both
+# modes. A controller that halts on purpose (v0.11.0) never exits, so it
+# never trips either path.
+wait_for_controllers() {
+	local rc=0 p dead="" live
+	if [ "$USE_IBG_CONTROLLER" != "yes" ] || [ "${#pid[@]}" -lt 2 ]; then
+		wait "${pid[@]}" || rc=$?
+		return "$rc"
+	fi
+	# run.sh always starts live first, so pid[0] is live and pid[1] paper.
+	live="${pid[0]}"
+	# A controller can already be gone before we get here: run.sh stops
+	# waiting for live's readiness after 300s and starts paper regardless.
+	for p in "${pid[@]}"; do
+		if ! kill -0 "$p" 2>/dev/null; then
+			dead="$p"
+			break
+		fi
+	done
+	if [ -n "$dead" ]; then
+		wait "$dead" || rc=$?
+	else
+		wait -n -p dead "${pid[@]}" || rc=$?
+	fi
+	if [ -n "${_SHUTTING_DOWN:-}" ]; then
+		wait "${pid[@]}" 2>/dev/null || true
+		return "$rc"
+	fi
+	if [ "$dead" != "$live" ]; then
+		echo ".> The paper controller exited (status ${rc}). Live keeps running undisturbed;"
+		echo ".> paper returns on the next container restart, and the container reports unhealthy until then."
+		rc=0
+		wait "$live" || rc=$?
+		if [ -n "${_SHUTTING_DOWN:-}" ]; then
+			return "$rc"
+		fi
+	fi
+	echo ".> The live controller exited (status ${rc}). Stopping the container so its restart policy can bring it back."
+	stop_ibc
+	[ "$rc" -eq 0 ] && rc=1
+	return "$rc"
+}
+
 start_process() {
 	# set API and socat ports
 	set_ports
@@ -382,6 +439,7 @@ if [ "$USE_IBG_CONTROLLER" = "yes" ] && [ -n "${CONTROLLER_SCRIPTS:-}" ]; then
 	run_scripts "$HOME/$CONTROLLER_SCRIPTS"
 fi
 
-trap stop_ibc SIGINT SIGTERM
-wait "${pid[@]}"
-exit $?
+trap '_SHUTTING_DOWN=1; stop_ibc' SIGINT SIGTERM
+_rc=0
+wait_for_controllers || _rc=$?
+exit "$_rc"

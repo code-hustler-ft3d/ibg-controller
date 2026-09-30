@@ -495,9 +495,12 @@ class TestWaitForApiPortWithRetry(unittest.TestCase):
             reset.assert_called_once()
 
     def test_terminal_failure_when_no_lockout_signature(self):
-        # Port didn't open AND neither detector fires. Treat as wrong-
-        # creds / wrong-server / network failure. Must exit, must NOT
-        # attempt relogin (no point retrying a terminal failure).
+        # Port didn't open AND neither detector fires. Since the 2026-09-30
+        # field report this is no longer exit-at-once: the mode relaunches
+        # its own Gateway first (_recover_mode_in_place, covered by
+        # TestRecoverModeInPlace), and exits only when that fails. It must
+        # still never use attempt_inplace_relogin here — that re-drives the
+        # login form without 2FA and would stall on a TOTP account.
         app = self._fake_app()
         with patch.object(gc, "wait_for_api_port", return_value=False), \
              patch.object(gc, "_detect_ccp_lockout", return_value=False), \
@@ -505,10 +508,12 @@ class TestWaitForApiPortWithRetry(unittest.TestCase):
              patch.object(gc, "_diagnose_login_failure"), \
              patch.object(gc, "agent_windows", return_value=[]), \
              patch.object(gc, "agent_labels", return_value=[]), \
+             patch.object(gc, "_recover_mode_in_place", return_value=False) as rec, \
              patch.object(gc, "attempt_inplace_relogin") as relogin:
             with self.assertRaises(SystemExit) as ctx:
                 gc.wait_for_api_port_with_retry(app)
             self.assertEqual(ctx.exception.code, 1)
+            rec.assert_called_once()
             relogin.assert_not_called()
 
     def test_escalates_to_jvm_restart_on_max_attempts_exceeded(self):
@@ -3524,6 +3529,137 @@ class TestMeridiemAndLogHygiene(unittest.TestCase):
         red = gc._redact_logs(line)
         self.assertNotIn("DU1234567", red)
         self.assertIn("Trader Workstation Configuration", red)
+
+class TestPostAuthNoProgressDiagnosis(unittest.TestCase):
+    """Field report 2026-09-30: post-auth-no-progress led with "wrong
+    username or password", and an operator nearly audited a correct
+    password. The same account logged in on its third plain retry. The
+    bad-credentials signature is different (a CCP Timeout! after the
+    handshake), so this one must lead with retry.
+    """
+
+    HANDSHAKE_ONLY = "Authenticating\nReceived NS_AUTH_START: 1\n"
+    HANDSHAKE_THEN_TIMEOUT = ("Authenticating\nReceived NS_AUTH_START: 1\n"
+                              "AuthTimeoutMonitor-CCP: Timeout!\n")
+
+    def _diagnose(self, content, sibling_ready=False):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "launcher.log"), "w") as f:
+                f.write(content)
+            if sibling_ready:
+                open(os.path.join(d, "gateway_ready_paper"), "w").close()
+            with patch.object(gc, "JTS_CONFIG_DIR", d), \
+                 patch.object(gc, "READY_FILE", os.path.join(d, "gateway_ready_live")), \
+                 _capture_controller_errors() as errors:
+                gc._diagnose_login_failure()
+        return errors
+
+    def test_leads_with_retry_not_credentials(self):
+        errors = self._diagnose(self.HANDSHAKE_ONLY)
+        self.assertTrue(any('reason="post-auth-no-progress"' in l for l in errors))
+        first_cause = next(l for l in errors if "(1)" in l)
+        self.assertIn("Retry", first_cause)
+        self.assertNotIn("TWS_PASSWORD", first_cause)
+        alert = next(l for l in errors if "ALERT_LOGIN_FAILED" in l)
+        self.assertIn("retry before auditing credentials", alert)
+
+    def test_says_the_handshake_rules_out_bad_credentials(self):
+        errors = self._diagnose(self.HANDSHAKE_ONLY)
+        self.assertTrue(any("not the bad-credentials signature" in l for l in errors))
+
+    def test_names_the_sibling_mode_when_it_is_logged_in(self):
+        with_sibling = self._diagnose(self.HANDSHAKE_ONLY, sibling_ready=True)
+        without = self._diagnose(self.HANDSHAKE_ONLY, sibling_ready=False)
+        self.assertTrue(any("other trading mode is logged in" in l for l in with_sibling))
+        self.assertFalse(any("other trading mode is logged in" in l for l in without))
+
+    def test_bad_credentials_signature_is_unchanged(self):
+        errors = self._diagnose(self.HANDSHAKE_THEN_TIMEOUT)
+        self.assertTrue(any('reason="bad-credentials"' in l for l in errors))
+        self.assertFalse(any("post-auth-no-progress" in l for l in errors))
+
+    def test_final_state_dump_redacts_the_account_number(self):
+        # The config window title embeds the account number; the terminal
+        # dump printed window titles and labels raw.
+        title = "U1234567 Trader Workstation Configuration"
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=False), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_diagnose_login_failure"), \
+             patch.object(gc, "agent_windows", return_value=[("aw", title, False)]), \
+             patch.object(gc, "agent_labels", return_value=[(title, "API Type")]), \
+             patch.object(gc, "_recover_mode_in_place", return_value=False), \
+             _capture_controller_errors() as errors:
+            with self.assertRaises(SystemExit):
+                gc.wait_for_api_port_with_retry(None)
+        dump = [l for l in errors if "windows:" in l or "label [" in l]
+        self.assertTrue(dump, f"no dump lines in: {errors}")
+        self.assertFalse(any("U1234567" in l for l in dump), dump)
+
+
+
+class TestRecoverModeInPlace(unittest.TestCase):
+    """Field report 2026-09-30: a transient login failure made the live
+    controller exit, and in dual mode nothing restarted it for about nine
+    hours. A mode now relaunches its own Gateway before giving up, using the
+    relaunch path that runs 2FA, so the other mode is never disturbed.
+    """
+
+    def setUp(self):
+        gc._twofa_needs_operator = False
+
+    def test_recovers_on_a_later_attempt(self):
+        with patch.object(gc, "do_restart_in_place", side_effect=[False, True]) as r, \
+             patch.object(gc.time, "sleep") as slept, \
+             _capture_controller_errors():
+            self.assertTrue(gc._recover_mode_in_place("probe"))
+        self.assertEqual(r.call_count, 2)
+        self.assertEqual([c.args[0] for c in slept.call_args_list], [60, 120])
+
+    def test_bounded_and_backs_off(self):
+        with patch.object(gc, "do_restart_in_place", return_value=False) as r, \
+             patch.object(gc.time, "sleep") as slept, \
+             _capture_controller_errors():
+            self.assertFalse(gc._recover_mode_in_place("probe"))
+        self.assertEqual(r.call_count, gc._MODE_RECOVERY_ATTEMPTS)
+        self.assertEqual([c.args[0] for c in slept.call_args_list], [60, 120, 240])
+
+    def test_an_exception_counts_as_a_failed_attempt(self):
+        with patch.object(gc, "do_restart_in_place",
+                          side_effect=[RuntimeError("boom"), True]), \
+             patch.object(gc.time, "sleep"), \
+             _capture_controller_errors():
+            self.assertTrue(gc._recover_mode_in_place("probe"))
+
+    def test_operator_actionable_2fa_is_not_retried(self):
+        # Retrying a 2FA failure only a person can clear is the storm the
+        # halt exists to prevent: rescue window, then halt, no second try.
+        def fails_needing_operator():
+            gc._twofa_needs_operator = True
+            return False
+        with patch.object(gc, "do_restart_in_place",
+                          side_effect=fails_needing_operator) as r, \
+             patch.object(gc, "_await_manual_login", return_value=False), \
+             patch.object(gc, "_halt_for_operator") as halt, \
+             patch.object(gc.time, "sleep"), \
+             _capture_controller_errors():
+            self.assertFalse(gc._recover_mode_in_place("probe"))
+        self.assertEqual(r.call_count, 1)
+        halt.assert_called_once()
+
+    def test_api_port_failure_heals_instead_of_exiting(self):
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=False), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_diagnose_login_failure"), \
+             patch.object(gc, "agent_windows", return_value=[]), \
+             patch.object(gc, "agent_labels", return_value=[]), \
+             patch.object(gc, "_recover_mode_in_place", return_value=True) as rec, \
+             _capture_controller_errors():
+            self.assertTrue(gc.wait_for_api_port_with_retry(None))
+        rec.assert_called_once()
+
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

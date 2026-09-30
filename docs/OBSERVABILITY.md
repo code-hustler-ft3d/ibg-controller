@@ -504,9 +504,16 @@ token (`reason=` distinguishes them):
   postauth).
 - `reason="post-auth-no-progress"` from `_diagnose_login_failure` —
   terminal initial-login path, `NS_AUTH_START` appeared but neither
-  success nor an auth timeout followed. Usually also bad credentials,
-  but can indicate an unrecognized post-auth dialog we failed to
-  dismiss.
+  success nor an auth timeout followed. **This is not the
+  bad-credentials signature**, which has a timeout after the handshake.
+  A field report on 2026-09-30 saw the same account fail this way twice
+  and log in on the third plain retry with nothing changed. The
+  controller now does that retry itself: it relaunches Gateway up to
+  three times (pauses of 60, 120 and 240 s) before exiting. If it still
+  fails, suspect an unrecognized post-auth dialog, and credentials only
+  if it persists across several container restarts. In dual mode
+  the log also says when the other mode is logged in, which rules out
+  the network path.
 
 **What it means**: IBKR rejected the username/password. The usual
 trigger is a password rotation in the IBKR web portal that wasn't
@@ -520,7 +527,9 @@ the same bad password, and waits longer. `ALERT_LOGIN_FAILED` fires
 *before* the CCP streak escalates, so monitoring can page a human
 earlier.
 
-**What the operator should do**: verify the credentials in the
+**What the operator should do**: for `post-auth-no-progress`,
+restart and retry before touching credentials — see above. For
+`bad-credentials`, verify the credentials in the
 container env (`TWS_USERID` / `TWS_PASSWORD`, or `_PAPER` variants)
 against IBKR Account Management. If the password was recently
 rotated, update the env (or the secret file referenced by
