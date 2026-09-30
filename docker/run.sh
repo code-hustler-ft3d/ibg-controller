@@ -248,22 +248,31 @@ wait_for_controller_ready() {
 	return 0
 }
 
-# Wait for the controllers, and in dual mode make one of them dying visible.
+# Wait for the controllers. In dual mode, a live controller dying must reach
+# Docker; a paper controller dying must not disturb live.
 #
-# A plain `wait` on both PIDs returns only when BOTH have exited. If one mode
-# dies, the other keeps the container up, Docker's restart policy never fires,
-# and the dead mode stays down until someone restarts the container by hand.
-# A 2026-09-30 field report lost about nine hours of live trading that way
-# while paper stayed healthy. Here the first controller to exit stops the
-# other one cleanly (stop_ibc drives a proper logout) and the container exits
-# non-zero, so the restart policy brings both modes back. A controller that
-# halts on purpose (v0.11.0) keeps its process alive, so it never trips this.
+# A plain `wait` on both PIDs returns only when BOTH have exited, so one mode
+# dying was masked by the other: Docker's restart policy never fired, and a
+# 2026-09-30 field report lost about nine hours of live trading that way while
+# paper stayed healthy. Each controller now tries to heal its own mode first
+# (it relaunches its Gateway up to three times before exiting), so reaching
+# this point means that failed.
+#
+# Live takes priority. If live's controller exits, paper is stopped cleanly
+# (stop_ibc drives a proper logout) and the container exits non-zero so the
+# restart policy brings both back. If paper's exits, live keeps running and
+# is not touched; paper returns on the next container restart, and the
+# container reports unhealthy until then because the healthcheck probes both
+# modes. A controller that halts on purpose (v0.11.0) never exits, so it
+# never trips either path.
 wait_for_controllers() {
-	local rc=0 p dead=""
+	local rc=0 p dead="" live
 	if [ "$USE_IBG_CONTROLLER" != "yes" ] || [ "${#pid[@]}" -lt 2 ]; then
 		wait "${pid[@]}" || rc=$?
 		return "$rc"
 	fi
+	# run.sh always starts live first, so pid[0] is live and pid[1] paper.
+	live="${pid[0]}"
 	# A controller can already be gone before we get here: run.sh stops
 	# waiting for live's readiness after 300s and starts paper regardless.
 	for p in "${pid[@]}"; do
@@ -275,14 +284,22 @@ wait_for_controllers() {
 	if [ -n "$dead" ]; then
 		wait "$dead" || rc=$?
 	else
-		wait -n "${pid[@]}" || rc=$?
+		wait -n -p dead "${pid[@]}" || rc=$?
 	fi
 	if [ -n "${_SHUTTING_DOWN:-}" ]; then
 		wait "${pid[@]}" 2>/dev/null || true
 		return "$rc"
 	fi
-	echo ".> A Gateway controller exited (status ${rc}) while the other mode was still running."
-	echo ".> Stopping the container so its restart policy can bring both modes back."
+	if [ "$dead" != "$live" ]; then
+		echo ".> The paper controller exited (status ${rc}). Live keeps running undisturbed;"
+		echo ".> paper returns on the next container restart, and the container reports unhealthy until then."
+		rc=0
+		wait "$live" || rc=$?
+		if [ -n "${_SHUTTING_DOWN:-}" ]; then
+			return "$rc"
+		fi
+	fi
+	echo ".> The live controller exited (status ${rc}). Stopping the container so its restart policy can bring it back."
 	stop_ibc
 	[ "$rc" -eq 0 ] && rc=1
 	return "$rc"

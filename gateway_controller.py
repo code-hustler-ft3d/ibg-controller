@@ -4130,6 +4130,8 @@ def wait_for_api_port_with_retry(app, port_timeout=180,
             labels = agent_labels()
             for wtitle, text in labels[:30]:
                 log.error(_redact_logs(f"  label [{wtitle}] {text!r}"))
+            if _recover_mode_in_place("the API port never opened after login"):
+                return True
             sys.exit(1)
         log.warning(f"API port timeout with lockout signature "
                     f"(ccp_timeout={ccp}, stuck_connecting={stuck}); "
@@ -4412,6 +4414,58 @@ def _halt_for_operator(reason, cycles=None):
         time.sleep(_HALT_LOG_INTERVAL_SECONDS)
         n += 1
         log.error(f"HALTED: {reason} (waiting for an operator)")
+
+
+# How many times a mode relaunches its own Gateway before giving up and
+# handing recovery back to the container. Pauses double from 60 s.
+_MODE_RECOVERY_ATTEMPTS = 3
+
+
+def _recover_mode_in_place(reason, attempts=None):
+    """Relaunch this mode's Gateway and log in again before giving up.
+
+    Field report 2026-09-30: a live login failed with post-auth-no-progress,
+    the controller exited, and in dual mode nothing restarted it for about
+    nine hours. The same account then logged in on a plain retry. Exiting
+    hands recovery to the container, which in dual mode disturbs the other
+    mode too; healing here keeps the other mode untouched.
+
+    Uses the monitor loop's proven relaunch (``do_restart_in_place``): it
+    tears the JVM down and runs the whole pipeline, 2FA included. That is
+    deliberately not ``attempt_inplace_relogin``, which only re-drives the
+    login form and would stall at a TOTP prompt.
+
+    Bounded, with pauses of 60, 120 and 240 s, so a failure that persists
+    still reaches the container within about ten minutes instead of
+    looping. A 2FA failure only an operator can clear is not retried: it
+    takes the same rescue-window-then-halt path main() uses, because
+    retrying it is the login storm v0.11.0 exists to prevent.
+    """
+    attempts = _MODE_RECOVERY_ATTEMPTS if attempts is None else attempts
+    for attempt in range(1, attempts + 1):
+        delay = min(60 * 2 ** (attempt - 1), 600)
+        log.warning(f"Recovery: {reason}. Relaunching Gateway in {delay}s "
+                    f"(attempt {attempt}/{attempts}) before handing this "
+                    "mode back to the container.")
+        time.sleep(delay)
+        try:
+            if do_restart_in_place():
+                log.info("Recovery: this mode is back, without a container "
+                         "restart")
+                return True
+        except Exception as e:
+            log.error(f"Recovery: relaunch raised {type(e).__name__}: {e}")
+        if _twofa_needs_operator:
+            if _await_manual_login():
+                log.info("Manual login detected — resuming the normal flow")
+                return True
+            _halt_for_operator(
+                "2FA needs a change only an operator can make; see the "
+                "ALERT_2FA_FAILED line above")
+            return False
+    log.error(f"Recovery: {attempts} relaunches did not bring this mode "
+              "back; exiting so the container can act")
+    return False
 
 
 def signal_ready():
@@ -4830,7 +4884,7 @@ def main():
                 _halt_for_operator(
                     "2FA needs a change only an operator can make; see the "
                     "ALERT_2FA_FAILED line above")
-        else:
+        elif not _recover_mode_in_place("2FA handling failed"):
             sys.exit(1)
 
     _set_state(State.DISCLAIMERS)

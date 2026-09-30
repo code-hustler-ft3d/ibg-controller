@@ -126,6 +126,39 @@ class TestWaitForControllers(unittest.TestCase):
         self.assertEqual(self._rc(r.stdout), 5)
         self.assertLess(took, 10)
 
+    def test_paper_exiting_leaves_live_alone(self):
+        # Live takes priority: a paper failure must not bounce live. Live's
+        # own exit code (7) coming back proves stop_ibc never killed it early
+        # (a SIGTERM'd sleep would report 143).
+        r, took = self._run("""
+            pid=()
+            sleep 1.0 & pid+=("$!")
+            ( sleep 0.2; exit 4 ) & pid+=("$!")
+            ( sleep 1.0; exit 7 ) & live_exit=$!
+            pid[0]=$live_exit
+            rc=0; wait_for_controllers || rc=$?
+            echo "RC=$rc"
+            """)
+        self.assertIn("paper controller exited (status 4)", r.stdout)
+        self.assertEqual(self._rc(r.stdout), 7)
+        self.assertGreaterEqual(took, 0.9, "must keep waiting on live")
+        # stop_ibc runs only once live has gone, never on paper's account
+        self.assertEqual(r.stdout.count("STOP_IBC"), 1)
+        self.assertLess(r.stdout.index("paper controller exited"),
+                        r.stdout.index("STOP_IBC"))
+
+    def test_paper_already_dead_before_the_wait(self):
+        r, _ = self._run("""
+            pid=()
+            ( sleep 0.8; exit 6 ) & pid+=("$!")
+            ( exit 2 ) & pid+=("$!")
+            sleep 0.3
+            rc=0; wait_for_controllers || rc=$?
+            echo "RC=$rc"
+            """)
+        self.assertIn("paper controller exited (status 2)", r.stdout)
+        self.assertEqual(self._rc(r.stdout), 6)
+
     def test_single_mode_is_a_plain_wait(self):
         r, _ = self._run("""
             pid=()

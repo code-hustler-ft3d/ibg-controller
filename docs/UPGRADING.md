@@ -78,17 +78,23 @@ anything from you.
 
 ### Unreleased
 
-- **Dual mode: one mode failing now restarts the container.** With
-  `TRADING_MODE=both`, if either controller exits, the other is stopped
-  cleanly and the container exits non-zero, so Docker's restart policy
-  brings both modes back. Previously the surviving mode kept the
-  container up, the restart policy never fired, and the dead mode
-  stayed down until someone restarted the container by hand — a field
-  report lost about nine hours of live trading that way while paper
-  looked healthy. **What changes for you:** paper now goes through a
-  restart when live fails, and vice versa. If the modes must stay
-  independent, run two single-mode containers instead. A controller
-  that halts on purpose keeps running, so it does not trigger this.
+- **A mode that fails to log in now heals itself first.** On the
+  failure behind the 2026-09-30 incident (the API port never opening
+  after login) and on a 2FA failure that isn't the operator's to fix,
+  the controller relaunches its own Gateway and logs in again, up to
+  three times with pauses of 60, 120 and 240 s. The relaunch runs the
+  full pipeline including 2FA, and the other mode in a dual-mode
+  container is not touched. Only if that fails does the controller exit.
+- **Dual mode: when a controller does exit, live takes priority.** If
+  live's controller exits, paper is stopped cleanly and the container
+  exits non-zero, so Docker's restart policy brings both back. If
+  paper's exits, live keeps running undisturbed and paper returns on the
+  next restart; the container reports unhealthy until then. Previously
+  either one dying was masked by the other and nothing restarted it — a
+  field report lost about nine hours of live trading that way.
+- **Set a restart policy if you haven't.** The README examples now
+  include `on-failure:3`. Without a restart policy, a controller that
+  gives up stops the container for good.
 - **`post-auth-no-progress` no longer tells you to check your password
   first.** It isn't the bad-credentials signature and has been seen to
   clear on a plain retry. The message now leads with retrying.

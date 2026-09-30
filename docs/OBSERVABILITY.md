@@ -507,9 +507,11 @@ token (`reason=` distinguishes them):
   success nor an auth timeout followed. **This is not the
   bad-credentials signature**, which has a timeout after the handshake.
   A field report on 2026-09-30 saw the same account fail this way twice
-  and log in on the third plain retry with nothing changed. Retry
-  first; suspect an unrecognized post-auth dialog if it repeats, and
-  credentials only if it persists across several retries. In dual mode
+  and log in on the third plain retry with nothing changed. The
+  controller now does that retry itself: it relaunches Gateway up to
+  three times (pauses of 60, 120 and 240 s) before exiting. If it still
+  fails, suspect an unrecognized post-auth dialog, and credentials only
+  if it persists across several container restarts. In dual mode
   the log also says when the other mode is logged in, which rules out
   the network path.
 

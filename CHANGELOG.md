@@ -8,18 +8,30 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Dual mode: a controller exiting now restarts the container.** With
-  `TRADING_MODE=both`, `run.sh` ended with a plain `wait` on both
-  controllers, which returns only when both have exited. One mode dying
-  was masked by the other: Docker's restart policy never fired and the
-  dead mode stayed down until someone restarted the container by hand.
-  A field report on 2026-09-30 lost about nine hours of live trading
-  that way while paper stayed healthy. Now the first controller to exit
-  stops the other cleanly and the container exits non-zero, so the
-  restart policy brings both back. Single-mode containers and the
-  legacy IBC path are unchanged, and a controller that halts on purpose
-  keeps running, so it never triggers this. `run.sh` also gains its
-  first tests, which drive the real function against stub controllers.
+- **A mode that fails to log in heals itself before exiting.** A field
+  report on 2026-09-30 lost about nine hours of live trading: a login
+  failed with `post-auth-no-progress`, the controller exited, and
+  nothing brought live back until a watchdog restarted the container.
+  The same account logged in on a plain retry. Now, when the API port
+  never opens after login, or 2FA fails for a reason that isn't the
+  operator's to fix, the controller relaunches its own Gateway and logs
+  in again, up to three times with pauses of 60, 120 and 240 s. It uses
+  the monitor loop's proven relaunch, which runs 2FA — not the in-JVM
+  relogin, which only re-drives the login form and would stall at a TOTP
+  prompt. A 2FA failure only an operator can clear is still not retried.
+- **Dual mode: a controller that does exit reaches Docker, and live
+  takes priority.** `run.sh` ended with a plain `wait` on both
+  controllers, which returns only when both have exited, so one mode
+  dying was masked by the other and the restart policy never fired. Now
+  a dead live controller stops paper cleanly and exits the container
+  non-zero so the restart policy brings both back; a dead paper
+  controller leaves live running untouched. Single mode and the legacy
+  IBC path keep a plain `wait`, and a halted controller never exits.
+  `run.sh` gains its first tests, which drive the real function against
+  stub controllers.
+- **The README examples set a restart policy** (`on-failure:3`). The
+  recovery above ends in an exit when it fails, and without a restart
+  policy that stops the container for good.
 
 ### Fixed
 
