@@ -4126,10 +4126,10 @@ def wait_for_api_port_with_retry(app, port_timeout=180,
                       "creds, wrong server, or network)")
             _diagnose_login_failure()
             log.error("Final state dump:")
-            log.error(f"  windows: {agent_windows()}")
+            log.error(_redact_logs(f"  windows: {agent_windows()}"))
             labels = agent_labels()
             for wtitle, text in labels[:30]:
-                log.error(f"  label [{wtitle}] {text!r}")
+                log.error(_redact_logs(f"  label [{wtitle}] {text!r}"))
             sys.exit(1)
         log.warning(f"API port timeout with lockout signature "
                     f"(ccp_timeout={ccp}, stuck_connecting={stuck}); "
@@ -4148,6 +4148,20 @@ def wait_for_api_port_with_retry(app, port_timeout=180,
               "long-cool-down JVM restart (v0.4.5 — dual-mode container's "
               "run.sh does NOT restart on sys.exit, so we self-heal)")
     return _escalate_to_jvm_restart(f"{max_attempts} in-JVM relogin attempts exhausted")
+
+
+def _sibling_mode_ready():
+    """In dual mode, True when the other trading mode has signalled
+    readiness in this container.
+
+    That proves the network path to IBKR works. It does not prove this
+    mode's credentials — live and paper log in with different accounts —
+    so the diagnosis says only what it shows.
+    """
+    for mine, other in (("live", "paper"), ("paper", "live")):
+        if READY_FILE.endswith(f"_{mine}"):
+            return os.path.exists(READY_FILE[: -len(mine)] + other)
+    return False
 
 
 def _diagnose_login_failure():
@@ -4171,12 +4185,14 @@ def _diagnose_login_failure():
          Nothing from the server — it's ignoring us or we can't
          reach it.
 
-      b) Wrong credentials:
+      b) Handshake answered, login never completed:
          'Authenticating' appears, 'NS_AUTH_START' appears, but
-         PostAuthenticate never happens (the server processed our
-         hello but rejected our credentials). Usually also surfaces
-         as a dialog we'd normally catch; if we got here, the dialog
-         was either missed or dismissed.
+         PostAuthenticate never happens. With a CCP Timeout! after it,
+         that is the credentials being rejected. WITHOUT one, it is
+         "post-auth-no-progress", which is not reliably a credential
+         problem: a 2026-09-30 field report saw the same account fail
+         this way twice and succeed on the third attempt with no
+         change at all. Treat it as retryable first.
 
       c) Never reached Authenticating:
          Usually means the SSL handshake failed, the server was
@@ -4246,20 +4262,35 @@ def _diagnose_login_failure():
         return
 
     if has_ns_auth_start and not has_timeout:
+        # Not the bad-credentials signature: that one has a CCP Timeout!
+        # after NS_AUTH_START (next branch). A field report on 2026-09-30
+        # had an operator about to audit a correct password because this
+        # message led with credentials; the same account then logged in
+        # on its third plain retry.
         log.error(
             f"ALERT_LOGIN_FAILED mode={TRADING_MODE} "
             f"reason=\"post-auth-no-progress\" "
-            f"suggested_action=\"server accepted the auth handshake but "
-            f"login never completed; verify TWS_USERID / TWS_PASSWORD "
-            f"(or _PAPER variants) and scan logs for an unrecognized "
-            f"post-auth dialog\"")
+            f"suggested_action=\"IBKR answered the auth handshake but the "
+            f"login never completed. This has cleared on a plain retry with "
+            f"no configuration change, so retry before auditing "
+            f"credentials; if it repeats, look for an unrecognized "
+            f"post-auth dialog in the window dump\"")
         log.error("Diagnosis: auth request sent, server responded with "
                   "NS_AUTH_START, but we never reached PostAuthenticate.")
-        log.error("  Most likely causes:")
-        log.error("    (1) Wrong username or password — verify your "
-                  "TWS_USERID / TWS_PASSWORD (or _PAPER variants)")
+        log.error("  NS_AUTH_START means IBKR answered the handshake, so "
+                  "this is not the bad-credentials signature — that one "
+                  "times out after the handshake.")
+        if _sibling_mode_ready():
+            log.error("  The other trading mode is logged in on this "
+                      "container, so the network path to IBKR works.")
+        log.error("  Most likely causes, in order:")
+        log.error("    (1) A transient stall on IBKR's side. The same "
+                  "account has failed this way twice and then logged in "
+                  "on the third try with nothing changed. Retry.")
         log.error("    (2) A post-auth dialog appeared that we didn't "
-                  "recognize — check the window dump above")
+                  "recognize — check the window dump below")
+        log.error("    (3) Only if it persists across several retries: "
+                  "verify TWS_USERID / TWS_PASSWORD (or _PAPER variants)")
         return
 
     if has_ns_auth_start and has_timeout:

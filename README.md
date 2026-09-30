@@ -206,7 +206,7 @@ real product.
 | `TWS_USERID_PAPER` / `TWS_PASSWORD_PAPER` | Paper credentials, used when `TRADING_MODE=paper` |
 | `TWOFACTOR_CODE` | The **base32 secret** from IBKR's Mobile Authenticator enrolment — not a generated six-digit code. Validated at startup; a wrong-shaped value exits with `ALERT_2FA_FAILED reason="TWOFACTOR_CODE is not a base32 secret"`. Leave unset for IB Key push. |
 | `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
-| `TRADING_MODE` | `live`, `paper` (default), or `both` |
+| `TRADING_MODE` | `live`, `paper` (default), or `both`. In `both`, if one mode's controller exits, the container stops so its restart policy brings both modes back; run two single-mode containers if the modes must stay independent. |
 | `TWOFA_DEVICE` | Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Matched against Gateway's device list without regard to case or spacing; if nothing matches, the log lists the entries it found. Ignored on single-method accounts. **Setting this rarely makes a two-method account work unattended** — on most accounts we've seen, IBKR kicks the session when the method is switched mid-login. See [2FA](#2fa). |
 | `PASSKEY_AUTHENTICATE` | `yes` makes the controller press **Authenticate** on Gateway's passkey prompt; an authenticator running alongside the container completes the WebAuthn ceremony. Unset, a passkey prompt fails loudly. Needs an amd64 base and extra browser libraries; see [2FA](#2fa). |
 

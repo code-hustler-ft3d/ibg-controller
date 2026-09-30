@@ -3525,5 +3525,72 @@ class TestMeridiemAndLogHygiene(unittest.TestCase):
         self.assertNotIn("DU1234567", red)
         self.assertIn("Trader Workstation Configuration", red)
 
+class TestPostAuthNoProgressDiagnosis(unittest.TestCase):
+    """Field report 2026-09-30: post-auth-no-progress led with "wrong
+    username or password", and an operator nearly audited a correct
+    password. The same account logged in on its third plain retry. The
+    bad-credentials signature is different (a CCP Timeout! after the
+    handshake), so this one must lead with retry.
+    """
+
+    HANDSHAKE_ONLY = "Authenticating\nReceived NS_AUTH_START: 1\n"
+    HANDSHAKE_THEN_TIMEOUT = ("Authenticating\nReceived NS_AUTH_START: 1\n"
+                              "AuthTimeoutMonitor-CCP: Timeout!\n")
+
+    def _diagnose(self, content, sibling_ready=False):
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "launcher.log"), "w") as f:
+                f.write(content)
+            if sibling_ready:
+                open(os.path.join(d, "gateway_ready_paper"), "w").close()
+            with patch.object(gc, "JTS_CONFIG_DIR", d), \
+                 patch.object(gc, "READY_FILE", os.path.join(d, "gateway_ready_live")), \
+                 _capture_controller_errors() as errors:
+                gc._diagnose_login_failure()
+        return errors
+
+    def test_leads_with_retry_not_credentials(self):
+        errors = self._diagnose(self.HANDSHAKE_ONLY)
+        self.assertTrue(any('reason="post-auth-no-progress"' in l for l in errors))
+        first_cause = next(l for l in errors if "(1)" in l)
+        self.assertIn("Retry", first_cause)
+        self.assertNotIn("TWS_PASSWORD", first_cause)
+        alert = next(l for l in errors if "ALERT_LOGIN_FAILED" in l)
+        self.assertIn("retry before auditing credentials", alert)
+
+    def test_says_the_handshake_rules_out_bad_credentials(self):
+        errors = self._diagnose(self.HANDSHAKE_ONLY)
+        self.assertTrue(any("not the bad-credentials signature" in l for l in errors))
+
+    def test_names_the_sibling_mode_when_it_is_logged_in(self):
+        with_sibling = self._diagnose(self.HANDSHAKE_ONLY, sibling_ready=True)
+        without = self._diagnose(self.HANDSHAKE_ONLY, sibling_ready=False)
+        self.assertTrue(any("other trading mode is logged in" in l for l in with_sibling))
+        self.assertFalse(any("other trading mode is logged in" in l for l in without))
+
+    def test_bad_credentials_signature_is_unchanged(self):
+        errors = self._diagnose(self.HANDSHAKE_THEN_TIMEOUT)
+        self.assertTrue(any('reason="bad-credentials"' in l for l in errors))
+        self.assertFalse(any("post-auth-no-progress" in l for l in errors))
+
+    def test_final_state_dump_redacts_the_account_number(self):
+        # The config window title embeds the account number; the terminal
+        # dump printed window titles and labels raw.
+        title = "U1234567 Trader Workstation Configuration"
+        with patch.object(gc, "wait_for_api_port", return_value=False), \
+             patch.object(gc, "_detect_ccp_lockout", return_value=False), \
+             patch.object(gc, "_detect_login_stuck_connecting", return_value=False), \
+             patch.object(gc, "_diagnose_login_failure"), \
+             patch.object(gc, "agent_windows", return_value=[("aw", title, False)]), \
+             patch.object(gc, "agent_labels", return_value=[(title, "API Type")]), \
+             _capture_controller_errors() as errors:
+            with self.assertRaises(SystemExit):
+                gc.wait_for_api_port_with_retry(None)
+        dump = [l for l in errors if "windows:" in l or "label [" in l]
+        self.assertTrue(dump, f"no dump lines in: {errors}")
+        self.assertFalse(any("U1234567" in l for l in dump), dump)
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

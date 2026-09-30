@@ -4,6 +4,36 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Dual mode: a controller exiting now restarts the container.** With
+  `TRADING_MODE=both`, `run.sh` ended with a plain `wait` on both
+  controllers, which returns only when both have exited. One mode dying
+  was masked by the other: Docker's restart policy never fired and the
+  dead mode stayed down until someone restarted the container by hand.
+  A field report on 2026-09-30 lost about nine hours of live trading
+  that way while paper stayed healthy. Now the first controller to exit
+  stops the other cleanly and the container exits non-zero, so the
+  restart policy brings both back. Single-mode containers and the
+  legacy IBC path are unchanged, and a controller that halts on purpose
+  keeps running, so it never triggers this. `run.sh` also gains its
+  first tests, which drive the real function against stub controllers.
+
+### Fixed
+
+- **`post-auth-no-progress` stopped leading with "wrong username or
+  password".** IBKR answering the handshake is not the bad-credentials
+  signature, which times out after it, and the same account in the
+  field report logged in on its third plain retry. An operator was
+  about to audit a correct password. The message now leads with
+  retrying, lists credentials last, and in dual mode says when the other
+  mode is logged in, which proves the network path.
+- **The terminal failure dump redacts the account number.** The window
+  and label lines printed after a failed login carried the config
+  window title, which embeds it.
+
 ## [0.11.1] - 2026-09-27
 
 ### Fixed
