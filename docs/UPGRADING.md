@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.12.0
 
 - **A mode that fails to log in now heals itself first.** On the
   failure behind the 2026-09-30 incident (the API port never opening
