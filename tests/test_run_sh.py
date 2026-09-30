@@ -44,7 +44,8 @@ def _bash_with_wait_n():
 
 
 def _extract(name):
-    src = open(RUN_SH, encoding="utf-8").read()
+    with open(RUN_SH, encoding="utf-8") as f:
+        src = f.read()
     m = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", src, re.S | re.M)
     if not m:
         raise AssertionError(f"{name}() not found in docker/run.sh")
