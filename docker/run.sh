@@ -248,6 +248,24 @@ wait_for_controller_ready() {
 	return 0
 }
 
+# Port forwarders, keyed by the PID of each mode's run_socat.sh wrapper; the
+# value is "API_PORT:SOCAT_PORT:TRADING_MODE" so a dead wrapper restarts with
+# the right ports after the shell has moved on to the next mode. The wrapper
+# restarts socat by itself, but nothing restarted the wrapper: a field report
+# on 2026-09-27 saw 4003/4004 refused for about 29 hours with no socat process
+# left in the container, while /health stayed green.
+forwarder=()
+
+respawn_forwarder() {
+	local spec="${forwarder[$1]}" ap sp tm
+	unset "forwarder[$1]"
+	IFS=: read -r ap sp tm <<<"$spec"
+	echo ".> The ${tm} port forwarder (:${sp} -> 127.0.0.1:${ap}) exited; restarting it."
+	sleep "${_FORWARDER_RESPAWN_DELAY:-5}"
+	API_PORT="$ap" SOCAT_PORT="$sp" TRADING_MODE="$tm" "${SCRIPT_PATH}/run_socat.sh" &
+	forwarder[$!]="$spec"
+}
+
 # Wait for the controllers. In dual mode, a live controller dying must reach
 # Docker; a paper controller dying must not disturb live.
 #
@@ -266,43 +284,53 @@ wait_for_controller_ready() {
 # modes. A controller that halts on purpose (v0.11.0) never exits, so it
 # never trips either path.
 wait_for_controllers() {
-	local rc=0 p dead="" live
-	if [ "$USE_IBG_CONTROLLER" != "yes" ] || [ "${#pid[@]}" -lt 2 ]; then
+	local rc p dead live="" watching
+	if [ "$USE_IBG_CONTROLLER" != "yes" ]; then
+		rc=0
 		wait "${pid[@]}" || rc=$?
 		return "$rc"
 	fi
-	# run.sh always starts live first, so pid[0] is live and pid[1] paper.
-	live="${pid[0]}"
-	# A controller can already be gone before we get here: run.sh stops
-	# waiting for live's readiness after 300s and starts paper regardless.
-	for p in "${pid[@]}"; do
-		if ! kill -0 "$p" 2>/dev/null; then
-			dead="$p"
-			break
-		fi
-	done
-	if [ -n "$dead" ]; then
-		wait "$dead" || rc=$?
-	else
-		wait -n -p dead "${pid[@]}" || rc=$?
-	fi
-	if [ -n "${_SHUTTING_DOWN:-}" ]; then
-		wait "${pid[@]}" 2>/dev/null || true
-		return "$rc"
-	fi
-	if [ "$dead" != "$live" ]; then
-		echo ".> The paper controller exited (status ${rc}). Live keeps running undisturbed;"
-		echo ".> paper returns on the next container restart, and the container reports unhealthy until then."
+	watching=("${pid[@]}")
+	# run.sh always starts live first, so in dual mode pid[0] is live.
+	[ "${#pid[@]}" -ge 2 ] && live="${pid[0]}"
+	while :; do
 		rc=0
-		wait "$live" || rc=$?
+		dead=""
+		# Something can already be gone before we wait: run.sh stops waiting
+		# for live's readiness after 300s and starts paper regardless.
+		for p in "${watching[@]}" "${!forwarder[@]}"; do
+			if ! kill -0 "$p" 2>/dev/null; then
+				dead="$p"
+				break
+			fi
+		done
+		if [ -n "$dead" ]; then
+			wait "$dead" 2>/dev/null || rc=$?
+		else
+			wait -n -p dead "${watching[@]}" "${!forwarder[@]}" || rc=$?
+		fi
 		if [ -n "${_SHUTTING_DOWN:-}" ]; then
+			wait "${pid[@]}" 2>/dev/null || true
 			return "$rc"
 		fi
-	fi
-	echo ".> The live controller exited (status ${rc}). Stopping the container so its restart policy can bring it back."
-	stop_ibc
-	[ "$rc" -eq 0 ] && rc=1
-	return "$rc"
+		[ -n "$dead" ] || return "$rc"
+		if [ -n "${forwarder[$dead]:-}" ]; then
+			respawn_forwarder "$dead"
+			continue
+		fi
+		# A controller exited. Single mode: report it, as a plain wait did.
+		[ -n "$live" ] || return "$rc"
+		if [ "$dead" != "$live" ]; then
+			echo ".> The paper controller exited (status ${rc}). Live keeps running undisturbed;"
+			echo ".> paper returns on the next container restart, and the container reports unhealthy until then."
+			watching=("$live")
+			continue
+		fi
+		echo ".> The live controller exited (status ${rc}). Stopping the container so its restart policy can bring it back."
+		stop_ibc
+		[ "$rc" -eq 0 ] && rc=1
+		return "$rc"
+	done
 }
 
 start_process() {
@@ -318,7 +346,15 @@ start_process() {
 		# in and accepting API connections.
 		start_controller
 		wait_for_controller_ready
+		local _before="$!"
 		port_forwarding
+		# Remember this mode's forwarder so wait_for_controllers can restart
+		# it if the wrapper dies. port_forwarding may have started an SSH
+		# tunnel instead, so check what the new background job actually is.
+		if [ "$!" != "$_before" ] &&
+			tr '\0' ' ' <"/proc/$!/cmdline" 2>/dev/null | grep -q run_socat.sh; then
+			forwarder[$!]="${API_PORT}:${SOCAT_PORT}:${TRADING_MODE}"
+		fi
 	else
 		# IBC path (default): legacy behavior — port forwarding starts
 		# immediately, racing the IBC login flow.

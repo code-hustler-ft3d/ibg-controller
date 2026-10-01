@@ -38,7 +38,7 @@ build arg if you need a different base.
 docker pull ghcr.io/code-hustler-ft3d/ibg-controller:latest
 
 docker run -d --name ibkr \
-  --restart on-failure:3 \
+  --restart on-failure \
   --env-file /path/to/your/.env \
   -e USE_IBG_CONTROLLER=yes \
   -e TRADING_MODE=paper \
@@ -51,9 +51,13 @@ docker run -d --name ibkr \
 IBC build that ships in its base image.
 
 Set a restart policy. When the controller can't recover a login on its
-own it exits, and `on-failure:3` lets Docker retry a bounded number of
-times before leaving the container stopped where you'll see it. Without
-one, an exit stops the container for good.
+own it exits, and `on-failure` lets Docker start it again. Leave off the
+retry count: Docker never resets it after a healthy run, only when you
+start or recreate the container yourself, so `on-failure:3` is a budget
+for the container's whole life and quietly runs out. The controller
+already bounds its own retries — it relaunches a failed login three
+times with growing pauses, and halts outright on problems only you can
+fix — so unlimited restarts don't turn into a login storm.
 
 Tags: `:latest`, `:<major>.<minor>`, `:<major>.<minor>.<patch>` and
 `:v<major>.<minor>.<patch>`. All
@@ -69,7 +73,7 @@ short strands IBKR session slots on every restart
 services:
   ib-gateway:
     image: ghcr.io/code-hustler-ft3d/ibg-controller:latest
-    restart: on-failure:3
+    restart: on-failure
     stop_grace_period: 90s   # required
     environment:
       TRADING_MODE: paper
@@ -278,6 +282,16 @@ real product.
 and last-auth timestamp — HTTP 200 when logged in and serving, 503
 otherwise. `GET /ready` is a process-liveness probe. The shipped
 Dockerfile wires this into a Docker `HEALTHCHECK`.
+
+**Probe the published port, not 4001.** Clients reach Gateway through a
+socat forwarder on 4003 (live) and 4004 (paper). Gateway's own port can
+be fine while every client is cut off, which is what happened when a
+forwarder died in the field. `/health` reports both: `api_port_open`
+for Gateway and `socat_port_open` for the forwarder. `run.sh` now
+restarts a forwarder that dies, so `socat_port_open: false` should only
+last a few seconds — longer means something is wrong. Expect it to read
+false briefly after every login too, since the forwarder starts just
+after Gateway is ready.
 
 **If anything in your stack restarts unhealthy containers, read this.**
 When a 2FA failure needs you, the controller halts instead of exiting,

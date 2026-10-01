@@ -30,6 +30,7 @@ What's NOT covered by this file (tracked separately):
 """
 
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -3658,6 +3659,58 @@ class TestRecoverModeInPlace(unittest.TestCase):
              _capture_controller_errors():
             self.assertTrue(gc.wait_for_api_port_with_retry(None))
         rec.assert_called_once()
+
+
+
+class TestHealthReportsTheForwarder(unittest.TestCase):
+    """Field report 2026-09-27: the forwarder died, every client was cut off
+    for ~29 hours, and /health stayed green because nothing looked at the
+    published port. /health now reports it alongside the API port, without
+    folding it into "status".
+    """
+
+    def _snapshot(self, socat_port):
+        env = {"SOCAT_PORT": str(socat_port)} if socat_port is not None else {}
+        with patch.dict(os.environ, env, clear=False), \
+             patch.object(gc, "api_port_for_mode", return_value=1):
+            if socat_port is None:
+                os.environ.pop("SOCAT_PORT", None)
+            return gc._build_health_snapshot()
+
+    def test_open_listener_reads_true(self):
+        srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+        port = srv.getsockname()[1]
+        try:
+            snap = self._snapshot(port)
+        finally:
+            srv.close()
+        self.assertEqual(snap["socat_port"], port)
+        self.assertIs(snap["socat_port_open"], True)
+
+    def test_nothing_listening_reads_false(self):
+        probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]; probe.close()
+        snap = self._snapshot(port)
+        self.assertEqual(snap["socat_port"], port)
+        self.assertIs(snap["socat_port_open"], False)
+
+    def test_outside_the_image_it_is_null(self):
+        snap = self._snapshot(None)
+        self.assertIsNone(snap["socat_port"])
+        self.assertIsNone(snap["socat_port_open"])
+
+    def test_status_ignores_the_forwarder(self):
+        # Counting it would flap every login: run.sh starts socat a moment
+        # after the controller signals ready.
+        probe = socket.socket(); probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]; probe.close()
+        with patch.object(gc, "_current_state", gc.State.MONITORING), \
+             patch.object(gc, "is_api_port_open", side_effect=lambda p=None: p != port), \
+             patch.object(gc, "GATEWAY_PROC", MagicMock(poll=MagicMock(return_value=None))), \
+             patch.dict(os.environ, {"SOCAT_PORT": str(port)}):
+            snap = gc._build_health_snapshot()
+        self.assertIs(snap["socat_port_open"], False)
+        self.assertEqual(snap["status"], "healthy")
 
 
 
