@@ -54,10 +54,16 @@ Set a restart policy. When the controller can't recover a login on its
 own it exits, and `on-failure` lets Docker start it again. Leave off the
 retry count: Docker never resets it after a healthy run, only when you
 start or recreate the container yourself, so `on-failure:3` is a budget
-for the container's whole life and quietly runs out. The controller
-already bounds its own retries — it relaunches a failed login three
-times with growing pauses, and halts outright on problems only you can
-fix — so unlimited restarts don't turn into a login storm.
+for the container's whole life and quietly runs out. Unlimited is safe
+for the two stops that need you — a 2FA setup problem and a persistent
+CCP lockout — because both halt instead of exiting: the container stays
+up and makes no further login attempts, so a restart policy never fires.
+Any other failed login is relaunched three times with growing pauses
+before the controller exits and the container restarts. That includes
+rejected credentials, so if you see `ALERT_LOGIN_FAILED
+reason="bad-credentials"`, stop the container until the password is
+fixed — every restart tries it again, and IBKR can lock an account after
+repeated failures.
 
 Tags: `:latest`, `:<major>.<minor>`, `:<major>.<minor>.<patch>` and
 `:v<major>.<minor>.<patch>`. All

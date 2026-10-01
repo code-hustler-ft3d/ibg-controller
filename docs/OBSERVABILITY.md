@@ -147,13 +147,19 @@ the internal JVM-restart cooldown cycle).
 ALERT_CCP_PERSISTENT_HALT mode=live reason="persistent CCP lockout after in-JVM relogin loop exhausted; CCP_LOCKOUT_MAX_JVM_RESTARTS=0" remediation="log into IBKR Mobile as this username to force-log-out the held TWS/Gateway slot (IBKR Client Portal login does NOT kick the slot — confirmed in production), then restart the container"
 ```
 
-**When fired**: exactly once, from `_escalate_to_jvm_restart`, just
-before the controller calls `sys.exit(1)`. v0.5.9 made halt-by-default
+**When fired**: exactly once, from `_escalate_to_jvm_restart`, after it
+has released the IBKR session (clean logout, then SIGTERM; SIGKILL only
+for a JVM that ignores SIGTERM for 30 s). The controller then **halts**: it stays up with `/health`
+reporting `"state": "HALTED"` and makes no further login attempts, and
+`ALERT_HALTED` follows. Before v0.13.0 it exited instead, and since a
+live exit restarts the container, a fresh container re-authenticated at
+once against the still-held slot — the loop this halt exists to prevent,
+endless under an unlimited restart policy. v0.5.9 made halt-by-default
 the new behaviour: pre-v0.5.9 the controller would cycle up to 5
 SIGKILL-capable teardown attempts with adaptive cool-downs before
 emitting `ALERT_JVM_RESTART_EXHAUSTED`. That loop is now opt-in via
 `CCP_LOCKOUT_MAX_JVM_RESTARTS` (default `0`); with the default, the
-controller emits this alert and exits immediately rather than
+controller emits this alert and halts immediately rather than
 participating in the slot-stranding feedback loop.
 
 **What it means**: a persistent CCP lockout that the in-JVM relogin
@@ -430,21 +436,29 @@ so the log never goes silent.
 ALERT_JVM_RESTART_EXHAUSTED mode=live attempts=5 reason="5 in-JVM relogins exhausted in main CCP pre-loop"
 ```
 
-**When fired**: exactly once, just before the controller calls
-`sys.exit(1)` after all `_JVM_RESTART_MAX_ATTEMPTS` (default 5) silent
-cool-down / relaunch cycles have failed.
+**When fired**: exactly once, after every opt-in
+(`CCP_LOCKOUT_MAX_JVM_RESTARTS` > 0) silent cool-down / relaunch cycle
+has failed. The controller releases the last JVM's session the same
+way and then **halts** — `/health` `"state":
+"HALTED"`, no further login attempts, `ALERT_HALTED` follows. Before
+v0.13.0 it exited, which restarted the container into the same lockout.
 
-**What it means**: the controller has fully given up. The Python
-process is about to exit. Whether the container then restarts depends
-on your Docker restart policy (and in dual-mode containers, one mode
-exiting does NOT bring the container down — the other mode's PID keeps
-it alive; see [MIGRATION.md](MIGRATION.md#dual-mode-run-sh-wait-semantics)).
+**What it means**: the controller has fully given up and is waiting for
+a person. Nothing restarts it automatically, whatever your restart
+policy.
 
 **What the operator should do**: verify IBKR account state (web login
 to confirm credentials still work, check for account-side restrictions),
 then `docker compose restart` the Gateway container.
 
 **Recommended debounce**: 1 hour.
+
+> **Parsing `/health` with `jq`?** `socat_port_open` and `api_port_open`
+> are booleans, and `jq`'s `//` alternative operator treats `false` the
+> same as missing: `.socat_port_open // "absent"` yields `"absent"` for
+> a dead forwarder. Use `has("socat_port_open")` to test presence, or
+> compare explicitly (`.socat_port_open == false`). Reported from the
+> field 2026-10-01.
 
 ### `ALERT_PASSWORD_EXPIRED`
 

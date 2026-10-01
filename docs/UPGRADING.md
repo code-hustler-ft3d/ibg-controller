@@ -76,6 +76,26 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **A persistent CCP lockout now halts instead of exiting.** When the
+  controller gives up on a CCP lockout (`ALERT_CCP_PERSISTENT_HALT`, or
+  `ALERT_JVM_RESTART_EXHAUSTED` with `CCP_LOCKOUT_MAX_JVM_RESTARTS` set),
+  it releases the IBKR session cleanly and then stays up with `/health`
+  reporting `"state": "HALTED"`, followed by `ALERT_HALTED`. It used to
+  exit, and since v0.12.0 a live exit restarts the container: a fresh
+  container re-authenticated at once against the slot that was still
+  held, which is the loop the halt exists to prevent, and endless under
+  an unlimited restart policy. **What changes for you:** after clearing
+  the slot (log into IBKR Mobile as that user), restart the container
+  yourself, exactly as the alert's remediation already said. A monitor
+  that keys on `HALTED` now covers both halts.
+- **Unlimited `on-failure` (v0.12.1's advice) needs this release.** On
+  older versions a persistent CCP lockout exits and restarts into the same
+  lockout, endlessly. One case still retries under any restart policy:
+  rejected credentials (`ALERT_LOGIN_FAILED reason="bad-credentials"`) —
+  stop the container until the password is fixed.
+
 ### v0.12.1
 
 - **A dead port forwarder now restarts itself.** `run.sh` watches each

@@ -3790,6 +3790,38 @@ def _recover_jvm_or_escalate(reason, *, exit_code=None):
     return _escalate_to_jvm_restart(reason)
 
 
+def _quiet_jvm_for_halt():
+    """Release the IBKR session slot and stop the JVM before halting.
+
+    Clean UI logout first, then SIGTERM with 30 s grace so Gateway's
+    shutdown hook can close the IBKR session; SIGKILL strands the slot and
+    extends IBKR's server-side zombie timer (2026-04-19), so it is only the
+    last resort for a JVM that ignores SIGTERM. That is the same end the
+    JVM met when the controller exited and the container stopped, and the
+    halt promises no further login attempts, which only a dead JVM keeps.
+    Lifted from the default CCP halt (2026-04-27) so the opt-in path, which
+    used to exit without releasing the slot, uses it too.
+    """
+    if GATEWAY_PROC is None or GATEWAY_PROC.poll() is not None:
+        return
+    pid = GATEWAY_PROC.pid
+    clean_success, clean_status, clean_reason = _attempt_clean_logout()
+    log.info(
+        f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
+        f"status={clean_status} reason=\"{clean_reason}\"")
+    if clean_success:
+        return
+    log.warning("Clean logout failed; falling back to JVM SIGTERM with 30s "
+                "grace before halting")
+    try:
+        GATEWAY_PROC.terminate()
+        GATEWAY_PROC.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        log.error("JVM did not exit within 30s of SIGTERM; killing it so "
+                  "nothing keeps talking to IBKR while halted")
+        GATEWAY_PROC.kill()
+
+
 def _escalate_to_jvm_restart(reason):
     """v0.4.5: Dual-mode-aware escape hatch for CCP lockout.
 
@@ -3817,9 +3849,10 @@ def _escalate_to_jvm_restart(reason):
     the limiter. v0.4.6 keeps the 20min duration but positions it so
     the JVM is dead for the full wait.
 
-    Returns True on successful JVM restart. Calls ``sys.exit(1)`` if
-    restart keeps failing past ``_JVM_RESTART_MAX_ATTEMPTS`` (the fresh
-    JVM keeps hitting CCP lockout even after each silent cool-down).
+    Returns True on successful JVM restart. When restarting keeps
+    failing, or is disabled (the default), it HALTS — stays up with state
+    HALTED — rather than exiting (field report 2026-10-01: an exit restarts
+    the container, which re-authenticates against a slot still held).
 
     v0.5.9: halt-by-default via ``CCP_LOCKOUT_MAX_JVM_RESTARTS``. When
     that env var is 0 (the new default), this function emits
@@ -3839,36 +3872,9 @@ def _escalate_to_jvm_restart(reason):
             "recovery is to halt and let an operator investigate. Set "
             "CCP_LOCKOUT_MAX_JVM_RESTARTS to a positive integer to "
             "restore the pre-v0.5.9 auto-restart loop.")
-        # 2026-04-27: attempt clean logout BEFORE sys.exit so the IBKR
-        # session slot is released cleanly. Without this, the JVM is
-        # orphan-killed by docker process-tree teardown on container exit
-        # (SIGKILL), which strands the slot for hours and creates an
-        # infinite restart cascade under restart: on-failure. The disposed-
-        # login-frame state still has a top-level "IBKR Gateway" main
-        # window (see _looks_like_disposed_shell), so WINDOW_CLOSING via
-        # the input agent fires Gateway's WindowListener and triggers a
-        # proper CCP session-close.
-        if GATEWAY_PROC is not None and GATEWAY_PROC.poll() is None:
-            pid = GATEWAY_PROC.pid
-            clean_success, clean_status, clean_reason = _attempt_clean_logout()
-            log.info(
-                f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
-                f"status={clean_status} reason=\"{clean_reason}\"")
-            if not clean_success:
-                # Fallback: SIGTERM the JVM directly so it gets a chance
-                # to run its shutdown hook (which sends an IBKR-protocol
-                # session-close) before docker SIGKILLs it on container
-                # exit. 30s grace matches _teardown_jvm_for_restart.
-                log.warning(
-                    "Clean logout failed; falling back to JVM SIGTERM "
-                    "with 30s grace before sys.exit")
-                try:
-                    GATEWAY_PROC.terminate()
-                    GATEWAY_PROC.wait(timeout=30)
-                except subprocess.TimeoutExpired:
-                    log.error(
-                        "JVM did not exit within 30s of SIGTERM; "
-                        "docker will SIGKILL it after we sys.exit")
+        # Release the slot cleanly first (2026-04-27): a JVM killed by
+        # process-tree teardown strands it for hours.
+        _quiet_jvm_for_halt()
         # Stable grep token for external monitoring. Emitted exactly once
         # per terminal halt. See docs/OBSERVABILITY.md for the grep-contract.
         log.error(
@@ -3878,7 +3884,16 @@ def _escalate_to_jvm_restart(reason):
             f"force-log-out the held TWS/Gateway slot (IBKR Client "
             f"Portal login does NOT kick the slot — confirmed in "
             f"production), then restart the container\"")
-        sys.exit(1)
+        # HALT, don't exit. Exiting hands the container to its restart
+        # policy, and since v0.12.0 a live exit restarts the whole
+        # container: a fresh container re-authenticates at once against a
+        # slot that is still held, which is the 2026-04-19 loop this halt
+        # exists to prevent (field report 2026-10-01). Staying up keeps
+        # the auth pipe closed until a person clears the slot.
+        _halt_for_operator(
+            "persistent CCP lockout; see ALERT_CCP_PERSISTENT_HALT above. "
+            "Clear the held slot, then restart the container")
+        return False
 
     cap = _CCP_LOCKOUT_MAX_JVM_RESTARTS
     for attempt in range(1, cap + 1):
@@ -3897,14 +3912,21 @@ def _escalate_to_jvm_restart(reason):
             return True
         log.error(f"JVM restart attempt {attempt} failed")
     log.error(f"JVM restart limit ({cap}) exhausted "
-              "after silent cool-downs; exiting")
+              "after silent cool-downs; halting")
+    # Stop the last relaunched JVM retrying against IBKR, and release its
+    # slot, before going quiet.
+    _quiet_jvm_for_halt()
     # Stable grep token for external monitoring. Emitted exactly once per
     # terminal escalation. See docs/OBSERVABILITY.md for the grep-contract.
     log.error(
         f"ALERT_JVM_RESTART_EXHAUSTED mode={TRADING_MODE} "
         f"attempts={cap} "
         f"reason=\"{reason}\"")
-    sys.exit(1)
+    # Halt rather than exit, for the same reason as the default path.
+    _halt_for_operator(
+        f"{cap} JVM restarts did not clear the CCP lockout; see "
+        "ALERT_JVM_RESTART_EXHAUSTED above")
+    return False
 
 
 def _looks_like_disposed_shell(windows):

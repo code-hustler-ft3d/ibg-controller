@@ -639,17 +639,18 @@ class TestEscalateToJvmRestart(unittest.TestCase):
             self.assertEqual(cooldown.call_count, 3)
             self.assertEqual(relaunch.call_count, 3)
 
-    def test_exits_after_restart_cap(self):
-        # Every relaunch fails. Must sys.exit(1) after the cap and not
-        # loop forever.
+    def test_halts_after_restart_cap(self):
+        # Every relaunch fails. Must stop after the cap and not loop
+        # forever — by HALTING, not exiting (field report 2026-10-01: an
+        # exit restarts the container, which re-authenticates at once).
         with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
              patch.object(gc, "_teardown_jvm_for_restart") as teardown, \
              patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
              patch.object(gc, "_relaunch_and_login_in_place", return_value=False) as relaunch, \
-             patch.object(gc, "_reset_ccp_backoff"):
-            with self.assertRaises(SystemExit) as ctx:
-                gc._escalate_to_jvm_restart("test reason")
-            self.assertEqual(ctx.exception.code, 1)
+             patch.object(gc, "_reset_ccp_backoff"), \
+             patch.object(gc, "_halt_for_operator") as halt:
+            self.assertFalse(gc._escalate_to_jvm_restart("test reason"))
+            halt.assert_called_once()
             self.assertEqual(teardown.call_count, 5)
             self.assertEqual(cooldown.call_count, 5)
             self.assertEqual(relaunch.call_count, 5)
@@ -676,19 +677,20 @@ class TestCcpPersistentHalt(unittest.TestCase):
              patch.object(gc, "_reset_ccp_backoff"), \
              patch.object(gc.log, "error",
                           side_effect=lambda msg: errors.append(msg)), \
-             patch.object(gc.log, "warning"):
-            with self.assertRaises(SystemExit) as ctx:
-                gc._escalate_to_jvm_restart("in-JVM relogin exhausted")
-        return ctx, errors, teardown, cooldown, relaunch
+             patch.object(gc.log, "warning"), \
+             patch.object(gc, "_halt_for_operator") as halt:
+            result = gc._escalate_to_jvm_restart("in-JVM relogin exhausted")
+        return (result, halt), errors, teardown, cooldown, relaunch
 
     def test_default_env_halts_without_touching_jvm(self):
         """Default (env=0) must NOT call _teardown_jvm_for_restart —
         that's the whole point: each teardown's SIGKILL fallback is
         what re-strands the slot. Halt first, let operator intervene."""
         with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 0):
-            ctx, errors, teardown, cooldown, relaunch = (
+            (result, halt), errors, teardown, cooldown, relaunch = (
                 self._run_escalate_capturing_errors())
-        self.assertEqual(ctx.exception.code, 1)
+        self.assertFalse(result)
+        halt.assert_called_once()
         teardown.assert_not_called()
         cooldown.assert_not_called()
         relaunch.assert_not_called()
@@ -716,10 +718,10 @@ class TestCcpPersistentHalt(unittest.TestCase):
              patch.object(gc, "_apply_ccp_long_cooldown") as cooldown, \
              patch.object(gc, "_relaunch_and_login_in_place",
                           return_value=False) as relaunch, \
-             patch.object(gc, "_reset_ccp_backoff"):
-            with self.assertRaises(SystemExit) as ctx:
-                gc._escalate_to_jvm_restart("test")
-        self.assertEqual(ctx.exception.code, 1)
+             patch.object(gc, "_reset_ccp_backoff"), \
+             patch.object(gc, "_halt_for_operator") as halt:
+            self.assertFalse(gc._escalate_to_jvm_restart("test"))
+        halt.assert_called_once()
         self.assertEqual(teardown.call_count, 3)
         self.assertEqual(cooldown.call_count, 3)
         self.assertEqual(relaunch.call_count, 3)
@@ -893,17 +895,17 @@ class TestAlertJvmRestartExhausted(unittest.TestCase):
       ALERT_JVM_RESTART_EXHAUSTED mode=<live|paper> attempts=N reason="..."
     Stable prefix, key=value pairs, one line per terminal escalation."""
 
-    def test_emits_alert_token_before_exit(self):
+    def test_emits_alert_token_before_halting(self):
         # v0.5.9: opt into the pre-v0.5.9 JVM-restart loop so the
         # exhaustion branch is actually reachable. Default is halt.
         with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 5), \
              patch.object(gc, "_teardown_jvm_for_restart"), \
              patch.object(gc, "_apply_ccp_long_cooldown"), \
              patch.object(gc, "_relaunch_and_login_in_place", return_value=False), \
-             patch.object(gc, "_reset_ccp_backoff"):
+             patch.object(gc, "_reset_ccp_backoff"), \
+             patch.object(gc, "_halt_for_operator"):
             with self.assertLogs("controller", level="ERROR") as ctx:
-                with self.assertRaises(SystemExit):
-                    gc._escalate_to_jvm_restart("unit test exhaustion")
+                gc._escalate_to_jvm_restart("unit test exhaustion")
         output = "\n".join(ctx.output)
         self.assertIn("ALERT_JVM_RESTART_EXHAUSTED", output)
         self.assertIn("mode=", output)
@@ -3711,6 +3713,61 @@ class TestHealthReportsTheForwarder(unittest.TestCase):
             snap = gc._build_health_snapshot()
         self.assertIs(snap["socat_port_open"], False)
         self.assertEqual(snap["status"], "healthy")
+
+
+
+class TestCcpHaltStaysUp(unittest.TestCase):
+    """Field report 2026-10-01: the CCP lockout halt exited by design, and
+    since v0.12.0 a live exit restarts the container. A fresh container
+    re-authenticates at once against a slot that is still held, which is
+    the 2026-04-19 loop the halt exists to prevent; with an unlimited
+    restart policy it never ends. Both terminal CCP paths now halt.
+    """
+
+    def test_default_halt_never_exits_the_process(self):
+        with patch.object(gc, "_CCP_LOCKOUT_MAX_JVM_RESTARTS", 0), \
+             patch.object(gc, "_halt_for_operator") as halt, \
+             _capture_controller_errors():
+            try:
+                gc._escalate_to_jvm_restart("probe")
+            except SystemExit:  # pragma: no cover - the regression itself
+                self.fail("the CCP halt must not exit: an exit restarts the "
+                          "container, which re-authenticates at once")
+        halt.assert_called_once()
+        self.assertIn("CCP", halt.call_args.args[0])
+
+    def test_release_kills_only_a_jvm_that_ignores_sigterm(self):
+        # SIGKILL strands the IBKR slot, so it is the last resort: only
+        # after the clean logout and SIGTERM both failed.
+        proc = MagicMock()
+        proc.poll.return_value = None
+        proc.wait.side_effect = subprocess.TimeoutExpired("java", 30)
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_attempt_clean_logout",
+                          return_value=(False, "failed_timeout", "stalled")), \
+             _capture_controller_errors():
+            gc._quiet_jvm_for_halt()
+        proc.terminate.assert_called_once()
+        proc.kill.assert_called_once()
+
+    def test_release_stops_at_a_clean_logout(self):
+        proc = MagicMock()
+        proc.poll.return_value = None
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_attempt_clean_logout",
+                          return_value=(True, "ok", "closed")), \
+             _capture_controller_errors():
+            gc._quiet_jvm_for_halt()
+        proc.terminate.assert_not_called()
+        proc.kill.assert_not_called()
+
+    def test_release_skips_a_jvm_that_is_already_gone(self):
+        proc = MagicMock()
+        proc.poll.return_value = 0
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_attempt_clean_logout") as logout:
+            gc._quiet_jvm_for_halt()
+        logout.assert_not_called()
 
 
 
