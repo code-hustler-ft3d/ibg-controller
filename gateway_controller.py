@@ -5119,6 +5119,19 @@ _health_server_thread = None
 _health_server_httpd = None
 
 
+def _socat_port():
+    """The published port run.sh forwards to this mode's API port.
+
+    run.sh's set_ports exports SOCAT_PORT before starting the controller
+    (4003 live, 4004 paper on Gateway). None outside the image, where
+    nothing forwards.
+    """
+    try:
+        return int(os.environ.get("SOCAT_PORT", "") or 0) or None
+    except ValueError:
+        return None
+
+
 def _build_health_snapshot():
     """Return a dict describing the controller's current health. Pure
     read of module globals — safe to call from any thread. Does NOT
@@ -5130,6 +5143,22 @@ def _build_health_snapshot():
         api_open = is_api_port_open(api_port)
     except Exception:
         api_open = False
+
+    # The port clients actually use. A connect here tests socat's LISTENER,
+    # not the path through to Gateway — socat accepts and only then dials
+    # 127.0.0.1:<api_port> — so this answers "is the forwarder alive", and
+    # api_port_open answers "is Gateway serving". Both are needed: a field
+    # report on 2026-09-27 had Gateway healthy and every client cut off for
+    # about 29 hours because the forwarder was gone. Not counted into
+    # "status": run.sh starts socat a moment after readiness, so counting it
+    # would flap every login, and run.sh now restarts a dead forwarder.
+    socat_port = _socat_port()
+    socat_open = None
+    if socat_port:
+        try:
+            socat_open = is_api_port_open(socat_port)
+        except Exception:
+            socat_open = False
 
     jvm_pid = JVM_PID
     jvm_alive = False
@@ -5161,6 +5190,8 @@ def _build_health_snapshot():
         "jvm_alive": jvm_alive,
         "api_port": api_port,
         "api_port_open": api_open,
+        "socat_port": socat_port,
+        "socat_port_open": socat_open,
         "last_auth_success_ts": last_auth_ts,
         "last_auth_success_age_seconds": last_auth_age,
         "ccp_lockout_streak": _ccp_lockout_streak,

@@ -60,6 +60,8 @@ BASH = _bash_with_wait_n()
 PREAMBLE = textwrap.dedent("""\
     set -Eeo pipefail
     USE_IBG_CONTROLLER=yes
+    forwarder=()
+    _FORWARDER_RESPAWN_DELAY=0.1
     stop_ibc() {
         echo STOP_IBC
         kill -TERM "${pid[@]}" 2>/dev/null || true
@@ -73,7 +75,7 @@ PREAMBLE = textwrap.dedent("""\
 class TestWaitForControllers(unittest.TestCase):
 
     def _run(self, body, timeout=30):
-        script = PREAMBLE + _extract("wait_for_controllers") + textwrap.dedent(body)
+        script = PREAMBLE + _extract("respawn_forwarder") + _extract("wait_for_controllers") + textwrap.dedent(body)
         start = time.monotonic()
         r = subprocess.run([BASH, "-c", script], capture_output=True,
                            text=True, timeout=timeout)
@@ -159,6 +161,71 @@ class TestWaitForControllers(unittest.TestCase):
         self.assertIn("paper controller exited (status 2)", r.stdout)
         self.assertEqual(self._rc(r.stdout), 6)
 
+    def _fake_socat(self, d, exit_after=None):
+        """A stand-in run_socat.sh that records the ports it was started with.
+        With exit_after it dies after that many seconds, otherwise it runs."""
+        path = os.path.join(d, "run_socat.sh")
+        body = 'echo "$API_PORT:$SOCAT_PORT:$TRADING_MODE" >> "$MARK"\n'
+        body += (f"sleep {exit_after}\n" if exit_after else "sleep 30\n")
+        with open(path, "w") as f:
+            f.write("#!/bin/bash\n" + body)
+        os.chmod(path, 0o755)
+
+    def test_dead_forwarder_is_restarted_with_its_own_ports(self):
+        # Field report 2026-09-27: the run_socat.sh wrapper itself died, so
+        # nothing restarted socat and 4003 stayed refused for ~29 hours.
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self._fake_socat(d)
+            r, _ = self._run(f"""
+                SCRIPT_PATH={d}; MARK={d}/mark
+                pid=()
+                ( sleep 1.5; exit 4 ) & pid+=("$!")
+                ( sleep 0.2 ) & forwarder[$!]="4001:4003:live"
+                rc=0; wait_for_controllers || rc=$?
+                echo "RC=$rc"
+                cat {d}/mark
+                """)
+        self.assertIn("live port forwarder (:4003 -> 127.0.0.1:4001) exited", r.stdout)
+        self.assertIn("4001:4003:live", r.stdout)
+        self.assertEqual(self._rc(r.stdout), 4, "the controller's own exit still decides")
+        self.assertNotIn("STOP_IBC", r.stdout)
+
+    def test_a_restarted_forwarder_stays_supervised(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self._fake_socat(d, exit_after="0.2")
+            r, _ = self._run(f"""
+                SCRIPT_PATH={d}; MARK={d}/mark
+                pid=()
+                ( sleep 1.5; exit 0 ) & pid+=("$!")
+                ( sleep 0.1 ) & forwarder[$!]="4002:4004:paper"
+                rc=0; wait_for_controllers || rc=$?
+                echo "RC=$rc"
+                echo "STARTS=$(wc -l < {d}/mark | tr -d ' ')"
+                """)
+        starts = int(re.search(r"STARTS=(\d+)", r.stdout).group(1))
+        self.assertGreaterEqual(starts, 2, f"respawn must keep working: {r.stdout}")
+
+    def test_paper_forwarder_dying_never_touches_live(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            self._fake_socat(d)
+            r, _ = self._run(f"""
+                SCRIPT_PATH={d}; MARK={d}/mark
+                pid=()
+                ( sleep 1.5; exit 7 ) & pid+=("$!")
+                sleep 30 & pid+=("$!")
+                ( sleep 0.2 ) & forwarder[$!]="4002:4004:paper"
+                rc=0; wait_for_controllers || rc=$?
+                echo "RC=$rc"
+                cat {d}/mark
+                """)
+        self.assertIn("4002:4004:paper", r.stdout)
+        self.assertEqual(self._rc(r.stdout), 7, "live exited on its own schedule")
+        self.assertEqual(r.stdout.count("STOP_IBC"), 1)
+        self.assertLess(r.stdout.index("port forwarder"), r.stdout.index("STOP_IBC"))
+
     def test_single_mode_is_a_plain_wait(self):
         r, _ = self._run("""
             pid=()
@@ -196,7 +263,7 @@ class TestWaitForControllers(unittest.TestCase):
     def test_sigterm_during_the_wait_stops_everything_exactly_once(self):
         # docker stop: the trap sets _SHUTTING_DOWN and runs stop_ibc. The
         # function must not run stop_ibc a second time on the way out.
-        script = PREAMBLE + _extract("wait_for_controllers") + textwrap.dedent("""
+        script = PREAMBLE + _extract("respawn_forwarder") + _extract("wait_for_controllers") + textwrap.dedent("""
             trap '_SHUTTING_DOWN=1; stop_ibc' SIGTERM
             pid=()
             sleep 30 & pid+=("$!")

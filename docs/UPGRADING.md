@@ -76,6 +76,25 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **A dead port forwarder now restarts itself.** `run.sh` watches each
+  mode's socat wrapper alongside the controllers and restarts one that
+  exits, with that mode's ports. Previously the wrapper restarted socat
+  but nothing restarted the wrapper: a field report saw 4003/4004
+  refused for about 29 hours while `/health` stayed green.
+- **`/health` gains `socat_port` and `socat_port_open`.** Additive, and
+  not counted into `status`. If you monitor client reachability, read
+  `socat_port_open` or probe 4003/4004 directly — not 4001, which can
+  be fine while every client is cut off. Give it a grace period: it
+  reads false briefly after each login, before the forwarder starts.
+- **Drop the retry count from your restart policy.** Use `on-failure`,
+  not `on-failure:3`. Docker never resets that count after a healthy
+  run — only when you start or recreate the container — so three exits
+  spread over months use it up for good. Checked in Docker's source.
+  The controller bounds its own retries, so unlimited restarts can't
+  storm.
+
 ### v0.12.0
 
 - **A mode that fails to log in now heals itself first.** On the

@@ -4,6 +4,34 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A dead port forwarder now restarts itself (field report
+  2026-09-27).** Clients reach Gateway through upstream's
+  `run_socat.sh`, which restarts socat in a loop — but nothing restarted
+  the wrapper. When it died, 4003/4004 stayed refused for about 29
+  hours with no socat process left, while `/health` stayed green and
+  the controller noticed nothing. `run.sh` now records each mode's
+  wrapper and restarts one that exits, with that mode's ports, from the
+  same event wait that supervises the controllers.
+- **The README recommended a restart policy that quietly runs out.**
+  Docker's source shows a healthy run resets only the restart backoff,
+  never the count `on-failure:N` checks; that count is zeroed only by a
+  manual start or recreate. So `on-failure:3` is a budget for the
+  container's whole life. The examples now use `on-failure`. The
+  controller bounds its own retries, so unlimited restarts can't storm.
+
+### Added
+
+- **`/health` reports the forwarder: `socat_port` and
+  `socat_port_open`.** A probe of socat's listener, fresh per request,
+  so monitors can watch client reachability without probing the network
+  themselves. Not counted into `status`, because the forwarder starts a
+  moment after readiness and counting it would flap every login. The
+  docs now tell operators to probe the published port, not 4001.
+
 ## [0.12.0] - 2026-09-30
 
 ### Changed
