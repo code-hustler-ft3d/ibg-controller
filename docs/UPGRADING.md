@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.12.1
 
 - **A dead port forwarder now restarts itself.** `run.sh` watches each
   mode's socat wrapper alongside the controllers and restarts one that
