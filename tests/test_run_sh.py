@@ -182,7 +182,7 @@ class TestWaitForControllers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._fake_socat(d)
             r, _ = self._run(f"""
-                SCRIPT_PATH={d}; MARK={d}/mark
+                SCRIPT_PATH={d}; export MARK={d}/mark
                 pid=()
                 ( sleep 1.5; exit 4 ) & pid+=("$!")
                 ( sleep 0.2 ) & forwarder[$!]="4001:4003:live"
@@ -201,7 +201,7 @@ class TestWaitForControllers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._fake_socat(d, exit_after="0.2")
             r, _ = self._run(f"""
-                SCRIPT_PATH={d}; MARK={d}/mark
+                SCRIPT_PATH={d}; export MARK={d}/mark
                 pid=()
                 ( sleep 1.5; exit 0 ) & pid+=("$!")
                 ( sleep 0.1 ) & forwarder[$!]="4002:4004:paper"
@@ -218,7 +218,7 @@ class TestWaitForControllers(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self._fake_socat(d)
             r, _ = self._run(f"""
-                SCRIPT_PATH={d}; MARK={d}/mark
+                SCRIPT_PATH={d}; export MARK={d}/mark
                 pid=()
                 ( sleep 1.5; exit 7 ) & pid+=("$!")
                 sleep 30 & pid+=("$!")
