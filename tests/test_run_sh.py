@@ -165,7 +165,11 @@ class TestWaitForControllers(unittest.TestCase):
         """A stand-in run_socat.sh that records the ports it was started with.
         With exit_after it dies after that many seconds, otherwise it runs."""
         path = os.path.join(d, "run_socat.sh")
-        body = 'echo "$API_PORT:$SOCAT_PORT:$TRADING_MODE" >> "$MARK"\n'
+        # Detach from the test's stdout first: a background child holding the
+        # pipe makes subprocess.run wait for it. In run.sh nothing waits on
+        # it, and the container's exit takes it down.
+        body = 'exec >/dev/null 2>&1\n'
+        body += 'echo "$API_PORT:$SOCAT_PORT:$TRADING_MODE" >> "$MARK"\n'
         body += (f"sleep {exit_after}\n" if exit_after else "sleep 30\n")
         with open(path, "w") as f:
             f.write("#!/bin/bash\n" + body)
@@ -185,6 +189,7 @@ class TestWaitForControllers(unittest.TestCase):
                 rc=0; wait_for_controllers || rc=$?
                 echo "RC=$rc"
                 cat {d}/mark
+                kill "${{!forwarder[@]}}" 2>/dev/null || true
                 """)
         self.assertIn("live port forwarder (:4003 -> 127.0.0.1:4001) exited", r.stdout)
         self.assertIn("4001:4003:live", r.stdout)
@@ -203,6 +208,7 @@ class TestWaitForControllers(unittest.TestCase):
                 rc=0; wait_for_controllers || rc=$?
                 echo "RC=$rc"
                 echo "STARTS=$(wc -l < {d}/mark | tr -d ' ')"
+                kill "${{!forwarder[@]}}" 2>/dev/null || true
                 """)
         starts = int(re.search(r"STARTS=(\d+)", r.stdout).group(1))
         self.assertGreaterEqual(starts, 2, f"respawn must keep working: {r.stdout}")
@@ -220,6 +226,7 @@ class TestWaitForControllers(unittest.TestCase):
                 rc=0; wait_for_controllers || rc=$?
                 echo "RC=$rc"
                 cat {d}/mark
+                kill "${{!forwarder[@]}}" 2>/dev/null || true
                 """)
         self.assertIn("4002:4004:paper", r.stdout)
         self.assertEqual(self._rc(r.stdout), 7, "live exited on its own schedule")
