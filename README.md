@@ -55,15 +55,14 @@ own it exits, and `on-failure` lets Docker start it again. Leave off the
 retry count: Docker never resets it after a healthy run, only when you
 start or recreate the container yourself, so `on-failure:3` is a budget
 for the container's whole life and quietly runs out. Unlimited is safe
-for the two stops that need you — a 2FA setup problem and a persistent
-CCP lockout — because both halt instead of exiting: the container stays
-up and makes no further login attempts, so a restart policy never fires.
-Any other failed login is relaunched three times with growing pauses
-before the controller exits and the container restarts. That includes
-rejected credentials, so if you see `ALERT_LOGIN_FAILED
-reason="bad-credentials"`, stop the container until the password is
-fixed — every restart tries it again, and IBKR can lock an account after
-repeated failures.
+because the stops that need you halt instead of exiting — a 2FA setup
+problem, a persistent CCP lockout, and rejected credentials (at once when
+Gateway says the password is wrong, or after two attempts in a row show
+IBKR's rejection pattern in its log). A halted container stays up and
+makes no further login attempts, so a restart policy never fires on it;
+fix the cause and restart it yourself. Any other failed login is
+relaunched three times with growing pauses before the controller exits
+and the container restarts.
 
 Tags: `:latest`, `:<major>.<minor>`, `:<major>.<minor>.<patch>` and
 `:v<major>.<minor>.<patch>`. All

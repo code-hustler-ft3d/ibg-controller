@@ -3610,6 +3610,11 @@ class TestRecoverModeInPlace(unittest.TestCase):
 
     def setUp(self):
         gc._twofa_needs_operator = False
+        # Never read a real launcher.log (the image has a Jts directory).
+        p = patch.object(gc, "_latest_login_rejected_credentials",
+                         return_value=False)
+        p.start()
+        self.addCleanup(p.stop)
 
     def test_recovers_on_a_later_attempt(self):
         with patch.object(gc, "do_restart_in_place", side_effect=[False, True]) as r, \
@@ -3768,6 +3773,130 @@ class TestCcpHaltStaysUp(unittest.TestCase):
              patch.object(gc, "_attempt_clean_logout") as logout:
             gc._quiet_jvm_for_halt()
         logout.assert_not_called()
+
+
+
+class TestCredentialHalt(unittest.TestCase):
+    """A rejected password halts instead of being retried. Since v0.12.0 a
+    failed login is relaunched three times and then the container restarts,
+    so a wrong password was retried indefinitely, and IBKR locks an account
+    after repeated failures. Gateway's own rejection dialog halts at once;
+    the weaker launcher.log fingerprint halts when two consecutive attempts
+    show it.
+    """
+
+    REJECTED = ("Connection to server failed: Invalid username or password. "
+                "Please check the Caps Lock key; passwords are case sensitive.\nOK")
+    FINGERPRINT = ("Authenticating\nReceived NS_AUTH_START: 1\n"
+                   "AuthTimeoutMonitor-CCP: Timeout!\n")
+
+    def setUp(self):
+        gc._twofa_needs_operator = False
+
+    def _latest(self, content):
+        with tempfile.TemporaryDirectory() as d:
+            if content is not None:
+                with open(os.path.join(d, "launcher.log"), "w") as f:
+                    f.write(content)
+            with patch.object(gc, "JTS_CONFIG_DIR", d):
+                return gc._latest_login_rejected_credentials()
+
+    # --- the launcher.log fingerprint, scoped to the latest attempt ---
+
+    def test_fingerprint_on_the_latest_attempt(self):
+        self.assertTrue(self._latest(self.FINGERPRINT))
+
+    def test_handshake_without_timeout_is_not_a_rejection(self):
+        # post-auth-no-progress: cleared on a plain retry in the field.
+        self.assertFalse(self._latest(
+            "Authenticating\nReceived NS_AUTH_START: 1\n"))
+
+    def test_lines_from_different_attempts_do_not_combine(self):
+        # An earlier silent CCP timeout plus a later answered handshake.
+        # The whole-file diagnosis reads that as bad credentials; the
+        # scoped check must not.
+        log = ("Authenticating\nAuthTimeoutMonitor-CCP: Timeout!\n"
+               "Authenticating\nReceived NS_AUTH_START: 1\n")
+        self.assertFalse(self._latest(log))
+
+    def test_a_new_attempt_in_progress_hides_the_old_rejection(self):
+        self.assertFalse(self._latest(self.FINGERPRINT + "Authenticating\n"))
+
+    def test_missing_log_is_not_a_rejection(self):
+        self.assertFalse(self._latest(None))
+
+    # --- recovery halts on two consecutive fingerprints ---
+
+    def _recover(self, fingerprints):
+        with patch.object(gc, "_latest_login_rejected_credentials",
+                          side_effect=fingerprints), \
+             patch.object(gc, "do_restart_in_place", return_value=False) as r, \
+             patch.object(gc, "_halt_for_operator") as halt, \
+             patch.object(gc.time, "sleep"), \
+             _capture_controller_errors():
+            result = gc._recover_mode_in_place("probe")
+        return result, r, halt
+
+    def test_two_consecutive_fingerprints_halt_after_one_relaunch(self):
+        result, relaunch, halt = self._recover([True, True])
+        self.assertFalse(result)
+        self.assertEqual(relaunch.call_count, 1)
+        halt.assert_called_once()
+        self.assertIn("TWS_PASSWORD", halt.call_args.args[0])
+
+    def test_one_fingerprint_gets_one_more_try(self):
+        # Entry clean, first relaunch shows it, second relaunch shows it.
+        result, relaunch, halt = self._recover([False, True, True])
+        self.assertEqual(relaunch.call_count, 2)
+        halt.assert_called_once()
+
+    def test_interrupted_fingerprints_never_halt(self):
+        result, relaunch, halt = self._recover([True, False, True, False])
+        self.assertFalse(result)
+        self.assertEqual(relaunch.call_count, gc._MODE_RECOVERY_ATTEMPTS)
+        halt.assert_not_called()
+
+    # --- Gateway's own rejection dialog halts where it is seen ---
+
+    def _post_login(self, body):
+        with patch.object(gc, "agent_windows",
+                          return_value=[("x", "Login failed", True)]), \
+             patch.object(gc, "agent_window", return_value=body), \
+             patch.object(gc, "agent_click_in_window", return_value=True) as click, \
+             patch.object(gc, "_halt_for_operator") as halt, \
+             patch.object(gc.time, "sleep"), \
+             _capture_controller_errors():
+            gc.handle_post_login_dialogs(object())
+        return click, halt
+
+    def test_rejection_dialog_after_login_halts(self):
+        click, halt = self._post_login(self.REJECTED)
+        click.assert_called()  # dismissed first, so VNC shows the login form
+        halt.assert_called_once()
+
+    def test_password_expiry_warning_does_not_halt(self):
+        _click, halt = self._post_login(
+            "Your password will expire in 5 days.\nOK")
+        halt.assert_not_called()
+
+    def _relogin(self, body):
+        with patch.object(gc, "agent_windows",
+                          return_value=[("x", "Login", True)]), \
+             patch.object(gc, "agent_window", return_value=body), \
+             patch.object(gc, "agent_click_in_window", return_value=True), \
+             patch.object(gc, "agent_wait_login_frame", return_value=True), \
+             patch.object(gc, "handle_login", return_value=True), \
+             patch.object(gc, "_halt_for_operator") as halt, \
+             _capture_controller_errors():
+            gc.attempt_inplace_relogin(object())
+        return halt
+
+    def test_rejection_dialog_during_relogin_halts(self):
+        self._relogin(self.REJECTED).assert_called_once()
+
+    def test_generic_login_failed_wording_does_not_halt(self):
+        # Can also come from a second-factor failure: alert only.
+        self._relogin("Login failed. Please try again.\nOK").assert_not_called()
 
 
 

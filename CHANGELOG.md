@@ -4,6 +4,31 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Rejected credentials halt instead of retrying.** Until now a
+  credential rejection was only an alert and the login was retried, a
+  v0.5.0 non-goal kept for fear of false positives. Since v0.12.0 a
+  failed login is relaunched three times and then the container
+  restarts, so with a restart policy a wrong password was retried
+  indefinitely, and IBKR locks an account after repeated failures. Now:
+  - Gateway's own "Invalid username or password" dialog, after login or
+    during an in-JVM relogin, is dismissed and the controller halts.
+  - The launcher.log fingerprint (NS_AUTH_START, then the CCP auth
+    timer expiring) halts when two consecutive attempts show it.
+    `_latest_login_rejected_credentials` checks only the text after the
+    last "Authenticating" line; `_diagnose_login_failure` reads the
+    whole file, so it can combine lines from different attempts.
+  - The generic "Login failed" / "Authentication failed" wordings stay
+    alert-only: they can also come from a second-factor failure.
+
+  A halted container stays up with `/health` reporting `HALTED`, and
+  `ALERT_HALTED` follows `ALERT_LOGIN_FAILED reason="bad-credentials"`.
+  The JVM and VNC stay up, as with the 2FA halt. Fix the credentials and
+  restart the container.
+
 ## [0.13.0] - 2026-10-02
 
 ### Changed

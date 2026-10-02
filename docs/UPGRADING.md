@@ -76,6 +76,21 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **Rejected credentials now halt instead of retrying.** When Gateway
+  says the username or password is invalid, the controller dismisses the
+  dialog and halts: the container stays up, `/health` reports
+  `"state": "HALTED"`, and `ALERT_HALTED` follows `ALERT_LOGIN_FAILED
+  reason="bad-credentials"`. The weaker launcher.log fingerprint (IBKR
+  answered the handshake, then the auth timer expired) halts when two
+  consecutive attempts show it. Before, the login was retried, and with
+  heal-in-place plus a restart policy that meant indefinitely, which
+  risks IBKR locking the account. **What changes for you:** after fixing
+  `TWS_USERID` / `TWS_PASSWORD`, restart the container yourself. The
+  generic "Login failed" / "Authentication failed" wordings stay
+  alert-only.
+
 ### v0.13.0
 
 - **A persistent CCP lockout now halts instead of exiting.** When the

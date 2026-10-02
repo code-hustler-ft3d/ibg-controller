@@ -507,17 +507,22 @@ token (`reason=` distinguishes them):
 
 - `reason="bad-credentials"` from `handle_post_login_dialogs` — initial
   post-login path; Gateway popped the "Invalid username or password"
-  credential-rejection modal. The controller dismisses it and lets the
-  normal login retry proceed (same suggested_action wording as the
-  `attempt_inplace_relogin` modal case below).
+  credential-rejection modal. The controller dismisses it and **halts**
+  (same suggested_action wording as the `attempt_inplace_relogin` modal
+  case below).
 - `reason="bad-credentials"` from `attempt_inplace_relogin` — Gateway
   popped a visible "Login failed" / "Authentication failed" / "Invalid
   username or password" modal during re-auth; the controller dismisses
-  it and retries.
+  it. On the explicit "Invalid username or password" wording it
+  **halts**; the generic wordings stay alert-only, because they can also
+  come from a second-factor failure.
 - `reason="bad-credentials"` from `_diagnose_login_failure` — terminal
   initial-login path, `launcher.log` shows `NS_AUTH_START` *and* a
   `CCP: Timeout!` (handshake completed, credentials rejected at
-  postauth).
+  postauth). This reading covers the whole log, so it can combine lines
+  from different attempts; it is not acted on by itself. The controller
+  relaunches Gateway, and **halts** if the next attempt shows the same
+  fingerprint again, checked against that attempt alone.
 - `reason="post-auth-no-progress"` from `_diagnose_login_failure` —
   terminal initial-login path, `NS_AUTH_START` appeared but neither
   success nor an auth timeout followed. **This is not the
@@ -535,6 +540,13 @@ token (`reason=` distinguishes them):
 trigger is a password rotation in the IBKR web portal that wasn't
 mirrored into the container's env file.
 
+**Since v0.14.0 a rejection halts.** The container stays up, `/health`
+reports `"state": "HALTED"`, `ALERT_HALTED` follows, and no further
+login is attempted: at once on Gateway's own rejection dialog, or after
+two consecutive attempts with the log fingerprint. Before v0.14.0 the
+login was retried, and with heal-in-place (v0.12.0) plus a restart
+policy that meant indefinitely, which risks IBKR locking the account.
+
 **Why this matters separately from `ALERT_CCP_PERSISTENT`**: with
 only the CCP alert, an operator would watch the streak counter climb
 and eventually assume an IBKR silent cooldown. But CCP backoff
@@ -549,13 +561,12 @@ restart and retry before touching credentials — see above. For
 container env (`TWS_USERID` / `TWS_PASSWORD`, or `_PAPER` variants)
 against IBKR Account Management. If the password was recently
 rotated, update the env (or the secret file referenced by
-`TWS_PASSWORD_FILE`) and restart the container. Repeating the
-rejected attempt risks IBKR account lockout.
+`TWS_PASSWORD_FILE`) and restart the container. The halt waits for that
+restart.
 
 **Recommended debounce**: 15 minutes (first alert should page
-immediately; re-auth retries repeat the alert every ~3 minutes, and
-the `_diagnose_login_failure` terminal path emits once per process
-lifetime before the controller exits).
+immediately; a rejection now halts, but the alert-only generic wordings
+and `post-auth-no-progress` can repeat across retries).
 
 ### `ALERT_SHUTDOWN`
 
