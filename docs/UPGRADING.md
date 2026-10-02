@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.13.0
 
 - **A persistent CCP lockout now halts instead of exiting.** When the
   controller gives up on a CCP lockout (`ALERT_CCP_PERSISTENT_HALT`, or
