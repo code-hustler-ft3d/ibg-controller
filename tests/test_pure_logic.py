@@ -3827,14 +3827,17 @@ class TestCredentialHalt(unittest.TestCase):
 
     # --- recovery halts on two consecutive fingerprints ---
 
-    def _recover(self, fingerprints):
+    def _recover(self, fingerprints, maintenance=False):
         with patch.object(gc, "_latest_login_rejected_credentials",
                           side_effect=fingerprints), \
+             patch.object(gc, "_is_ibkr_maintenance_window",
+                          return_value=maintenance), \
              patch.object(gc, "do_restart_in_place", return_value=False) as r, \
              patch.object(gc, "_halt_for_operator") as halt, \
              patch.object(gc.time, "sleep"), \
-             _capture_controller_errors():
+             _capture_controller_errors() as errors:
             result = gc._recover_mode_in_place("probe")
+        self.errors = errors
         return result, r, halt
 
     def test_two_consecutive_fingerprints_halt_after_one_relaunch(self):
@@ -3849,6 +3852,24 @@ class TestCredentialHalt(unittest.TestCase):
         result, relaunch, halt = self._recover([False, True, True])
         self.assertEqual(relaunch.call_count, 2)
         halt.assert_called_once()
+
+    def test_the_fingerprint_halt_raises_the_alert_monitors_page_on(self):
+        # Relaunched attempts run no diagnosis, so without this a halt from
+        # two relaunches in a row carried no ALERT_LOGIN_FAILED at all.
+        _result, _relaunch, halt = self._recover([False, True, True])
+        alerts = [e for e in self.errors
+                  if e.startswith("ALERT_LOGIN_FAILED ")
+                  and 'reason="bad-credentials"' in e]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("IBKR-side stall", halt.call_args.args[0])
+
+    def test_maintenance_window_fingerprints_never_halt(self):
+        # Field report 2026-10-02: a server-side stall can leave the same
+        # fingerprint, and IBKR's maintenance window is when one is likely.
+        result, relaunch, halt = self._recover([True] * 4, maintenance=True)
+        self.assertFalse(result)
+        self.assertEqual(relaunch.call_count, gc._MODE_RECOVERY_ATTEMPTS)
+        halt.assert_not_called()
 
     def test_interrupted_fingerprints_never_halt(self):
         result, relaunch, halt = self._recover([True, False, True, False])
