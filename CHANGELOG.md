@@ -4,6 +4,24 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **The two-in-a-row credential halt raises its own alert.** Relaunched
+  attempts run no diagnosis, so a halt from two relaunches in a row could
+  arrive with no `ALERT_LOGIN_FAILED reason="bad-credentials"` before it,
+  and monitors that page on that alert stayed quiet. It is now emitted
+  just before the halt.
+- **The log fingerprint is ignored inside IBKR's maintenance window**
+  (23:30–00:30 ET), where a server-side stall is the likelier cause of
+  an answered handshake that then times out (field report 2026-10-02).
+  Outside the window the halt message now says a stall can look the
+  same, and that if the password is right a restart is all it takes.
+  Gateway's own rejection dialog still halts at any hour.
+- **Comments that still described the CCP halt as an exit** now match
+  v0.13.0's behaviour.
+
 ## [0.14.0] - 2026-10-02
 
 ### Changed

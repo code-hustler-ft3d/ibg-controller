@@ -522,7 +522,12 @@ token (`reason=` distinguishes them):
   postauth). This reading covers the whole log, so it can combine lines
   from different attempts; it is not acted on by itself. The controller
   relaunches Gateway, and **halts** if the next attempt shows the same
-  fingerprint again, checked against that attempt alone.
+  fingerprint again, checked against that attempt alone; that halt
+  raises its own `ALERT_LOGIN_FAILED reason="bad-credentials"` first.
+  Inside IBKR's daily maintenance window (23:30–00:30 ET) the
+  fingerprint is ignored, because a server-side stall is the likelier
+  cause there. Outside it a stall can still look the same, so if the
+  password is right, restarting the container is all it takes.
 - `reason="post-auth-no-progress"` from `_diagnose_login_failure` —
   terminal initial-login path, `NS_AUTH_START` appeared but neither
   success nor an auth timeout followed. **This is not the

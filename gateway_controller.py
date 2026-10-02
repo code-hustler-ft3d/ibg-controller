@@ -1376,7 +1376,8 @@ def _detect_bad_credentials(dump):
 
 
 def _halt_credentials_rejected(evidence="Gateway reported the username or "
-                                        "password as invalid"):
+                                        "password as invalid",
+                                if_right=""):
     """Stop logging in once IBKR has rejected the credentials.
 
     Until v0.14.0 a rejection was only an alert and the login was retried
@@ -1389,7 +1390,8 @@ def _halt_credentials_rejected(evidence="Gateway reported the username or "
     """
     _halt_for_operator(
         f"{evidence}; see ALERT_LOGIN_FAILED above. Fix TWS_USERID / "
-        "TWS_PASSWORD (or the _PAPER variants), then restart the container")
+        "TWS_PASSWORD (or the _PAPER variants), then restart the container"
+        f"{if_right}")
 
 
 def _latest_login_rejected_credentials():
@@ -1401,7 +1403,9 @@ def _latest_login_rejected_credentials():
     an earlier attempt cannot combine with a later one's —
     ``_diagnose_login_failure`` reads the whole file and can. A weaker
     signal than Gateway's own rejection dialog, so recovery halts only
-    when two consecutive attempts show it.
+    when two consecutive attempts show it, and ignores it inside IBKR's
+    daily maintenance window, when a server-side stall is the likelier
+    explanation (field report 2026-10-02).
     """
     path = os.path.join(JTS_CONFIG_DIR, "launcher.log")
     try:
@@ -3092,7 +3096,7 @@ _INPLACE_RELOGIN_MAX_ATTEMPTS = 8
 # cool-down + ``do_restart_in_place``. 5 × CCP_COOLDOWN_SECONDS (default
 # 1200s = 20min) = 100 min of wall clock at the cap, which is more than
 # enough for IBKR's CCP rate limiter to clear if it's going to clear.
-# Past this cap the controller exits (``sys.exit(1)``).
+# Past this cap the controller halts (since v0.13.0; it used to exit).
 _JVM_RESTART_MAX_ATTEMPTS = int(os.environ.get("JVM_RESTART_MAX_ATTEMPTS", "5"))
 
 # v0.5.9: CCP-lockout-triggered JVM restarts are now opt-in. The
@@ -3101,9 +3105,10 @@ _JVM_RESTART_MAX_ATTEMPTS = int(os.environ.get("JVM_RESTART_MAX_ATTEMPTS", "5"))
 # retry loop re-stranded an IBKR auth slot 5 times and extended IBKR's
 # server-side zombie timer each time. Default 0 means: on the first
 # path that would call ``_escalate_to_jvm_restart``, emit
-# ``ALERT_CCP_PERSISTENT_HALT`` and exit the controller — Docker's
-# healthcheck flags the container unhealthy and the operator
-# investigates before the controller re-opens the auth pipe. Set to a
+# ``ALERT_CCP_PERSISTENT_HALT`` and halt (since v0.13.0; it used to exit,
+# which restarted the container into the same lockout) — the healthcheck
+# flags the container unhealthy and the operator investigates before the
+# controller re-opens the auth pipe. Set to a
 # positive integer to restore the pre-v0.5.9 auto-recovery loop, capped
 # at that many attempts (supersedes ``JVM_RESTART_MAX_ATTEMPTS``).
 _CCP_LOCKOUT_MAX_JVM_RESTARTS = int(
@@ -3774,9 +3779,9 @@ def _recover_jvm_or_escalate(reason, *, exit_code=None):
     fail (CCP lockout on the relaunched JVM, for instance), we fall
     through to the silent-cool-down escalation.
 
-    Never returns False. Returns True on recovery; if everything fails,
-    ``_escalate_to_jvm_restart`` calls ``sys.exit(1)`` after exhausting
-    ``_JVM_RESTART_MAX_ATTEMPTS``.
+    Never returns False in production: it returns True on recovery, and
+    if everything fails ``_escalate_to_jvm_restart`` halts (since v0.13.0),
+    which never returns.
 
     v0.5.10: maintenance-window guard. When ``exit_code == 0`` AND
     wallclock is inside IBKR's daily maintenance window (23:30-00:30 ET),
@@ -3899,8 +3904,9 @@ def _escalate_to_jvm_restart(reason):
 
     v0.5.9: halt-by-default via ``CCP_LOCKOUT_MAX_JVM_RESTARTS``. When
     that env var is 0 (the new default), this function emits
-    ``ALERT_CCP_PERSISTENT_HALT`` and exits immediately without touching
-    the JVM. This prevents the 2026-04-19 re-stranding pattern — each
+    ``ALERT_CCP_PERSISTENT_HALT`` straight away, with no teardown and
+    relaunch loop (since v0.13.0 it then releases the session and halts
+    rather than exiting). This prevents the 2026-04-19 re-stranding pattern — each
     prior escalation cycle's SIGKILL teardown was extending IBKR's
     server-side zombie-slot timer, compounding the lockout we were
     trying to clear. When set to a positive integer, restores the
@@ -4515,8 +4521,12 @@ def _recover_mode_in_place(reason, attempts=None):
     halt here.
     """
     attempts = _MODE_RECOVERY_ATTEMPTS if attempts is None else attempts
+    def rejected():
+        # A stall is the likelier story inside IBKR's maintenance window.
+        return (_latest_login_rejected_credentials()
+                and not _is_ibkr_maintenance_window())
     # The attempt that brought us here.
-    rejected_before = _latest_login_rejected_credentials()
+    rejected_before = rejected()
     for attempt in range(1, attempts + 1):
         delay = min(60 * 2 ** (attempt - 1), 600)
         log.warning(f"Recovery: {reason}. Relaunching Gateway in {delay}s "
@@ -4538,11 +4548,22 @@ def _recover_mode_in_place(reason, attempts=None):
                 "2FA needs a change only an operator can make; see the "
                 "ALERT_2FA_FAILED line above")
             return False
-        rejected_now = _latest_login_rejected_credentials()
+        rejected_now = rejected()
         if rejected_before and rejected_now:
+            # Relaunched attempts run no diagnosis, so the alert monitors
+            # page on may not have fired yet.
+            log.error(
+                f"ALERT_LOGIN_FAILED mode={TRADING_MODE} "
+                f"reason=\"bad-credentials\" "
+                f"suggested_action=\"two logins in a row were answered by "
+                f"IBKR and then timed out; verify TWS_USERID / TWS_PASSWORD "
+                f"(or _PAPER variants). If they are right, this was an "
+                f"IBKR-side stall: restart the container\"")
             _halt_credentials_rejected(
                 "two logins in a row were answered by IBKR and then timed "
-                "out, the fingerprint of rejected credentials")
+                "out, the fingerprint of rejected credentials",
+                if_right=". If the password is right, an IBKR-side stall "
+                         "can look the same: just restart the container")
             return False
         rejected_before = rejected_now
     log.error(f"Recovery: {attempts} relaunches did not bring this mode "
