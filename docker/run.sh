@@ -281,8 +281,10 @@ respawn_forwarder() {
 # restart policy brings both back. If paper's exits, live keeps running and
 # is not touched; paper returns on the next container restart, and the
 # container reports unhealthy until then because the healthcheck probes both
-# modes. A controller that halts on purpose (v0.11.0) never exits, so it
-# never trips either path.
+# modes. A controller that halts on purpose never exits, so it never trips
+# either path: that covers the 2FA halt (v0.11.0) and, since v0.13.0, the
+# CCP lockout halt, which used to exit and so restarted the container into
+# the same lockout.
 wait_for_controllers() {
 	local rc p dead live="" watching
 	if [ "$USE_IBG_CONTROLLER" != "yes" ]; then

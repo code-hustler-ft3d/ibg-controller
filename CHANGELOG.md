@@ -4,6 +4,34 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **A persistent CCP lockout halts instead of exiting (field report
+  2026-10-01).** `_escalate_to_jvm_restart` exited after
+  `ALERT_CCP_PERSISTENT_HALT`, by design, so an operator could clear the
+  held IBKR slot before anything re-opened the auth pipe. Since v0.12.0 a
+  live exit restarts the container, and nothing persists CCP state across
+  that, so a fresh container re-authenticated at once against the slot
+  still held — the 2026-04-19 loop the halt exists to prevent. v0.12.1's
+  README then recommended unlimited `on-failure`, which made it endless.
+  Both terminal paths — the default halt and the opt-in restart loop's
+  exhaustion (`ALERT_JVM_RESTART_EXHAUSTED`) — now release the session
+  and halt: the container stays up, `/health` reports `HALTED`, and
+  `ALERT_HALTED` follows. The opt-in path previously exited without
+  releasing the slot at all; it now gets the same clean logout and
+  SIGTERM, with SIGKILL only for a JVM that ignores SIGTERM for 30 s.
+
+### Fixed
+
+- **v0.12.1's restart-policy advice was unsafe for CCP lockouts.** It
+  said the controller halts on problems only an operator can fix; the CCP
+  lockout was an exit. The README now names the two halts and the one
+  exit that still retries against IBKR: rejected credentials.
+- **Documented a `jq` trap when parsing `/health`.** `//` treats `false`
+  as missing, so `.socat_port_open // default` hides a dead forwarder.
+
 ## [0.12.1] - 2026-10-01
 
 ### Fixed
