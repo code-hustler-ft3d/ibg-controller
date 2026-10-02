@@ -1366,13 +1366,57 @@ def _detect_bad_credentials(dump):
     rejected (Gateway's "Invalid username or password" modal and close
     variants).
 
-    Detection is a *signal*, not a corrective action (see the Non-goals
-    note in CHANGELOG): the caller emits ALERT_LOGIN_FAILED and dismisses
-    the dialog, then the normal CCP-backoff login retry proceeds.
+    The caller emits ALERT_LOGIN_FAILED, dismisses the dialog and halts
+    (``_halt_credentials_rejected``): this is IBKR saying the password is
+    wrong, and every retry counts towards locking the account.
     """
     if not dump:
         return False
     return bool(_BAD_CREDENTIALS_MATCH.search(dump))
+
+
+def _halt_credentials_rejected(evidence="Gateway reported the username or "
+                                        "password as invalid"):
+    """Stop logging in once IBKR has rejected the credentials.
+
+    Until v0.14.0 a rejection was only an alert and the login was retried
+    (a v0.5.0 non-goal, for fear of false positives). Since v0.12.0 the
+    controller relaunches a failed login three times and then restarts
+    the container, so a wrong password was retried indefinitely, and IBKR
+    locks an account after repeated failures. Halting keeps the JVM and
+    VNC up, like the 2FA halt; Gateway does not retry a rejected login by
+    itself.
+    """
+    _halt_for_operator(
+        f"{evidence}; see ALERT_LOGIN_FAILED above. Fix TWS_USERID / "
+        "TWS_PASSWORD (or the _PAPER variants), then restart the container")
+
+
+def _latest_login_rejected_credentials():
+    """True when the most recent auth attempt in launcher.log carries the
+    bad-credentials fingerprint: IBKR answered the handshake
+    (NS_AUTH_START) and the CCP auth timer then expired.
+
+    Scoped to the text after the last "Authenticating" line, so lines from
+    an earlier attempt cannot combine with a later one's —
+    ``_diagnose_login_failure`` reads the whole file and can. A weaker
+    signal than Gateway's own rejection dialog, so recovery halts only
+    when two consecutive attempts show it.
+    """
+    path = os.path.join(JTS_CONFIG_DIR, "launcher.log")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = f.read()
+    except OSError:
+        return False
+    start = tail.rfind("Authenticating")
+    if start < 0:
+        return False
+    latest = tail[start:]
+    return ("NS_AUTH_START" in latest
+            and "AuthTimeoutMonitor-CCP: Timeout!" in latest)
 
 
 def handle_post_login_dialogs(app):
@@ -1482,10 +1526,6 @@ def handle_post_login_dialogs(app):
                 f"rejection modal; verify TWS_USERID / TWS_PASSWORD "
                 f"(or _PAPER variants) and update env if password "
                 f"was rotated in IBKR Account Settings\"")
-            # Detection is a signal, not a corrective action (see the
-            # Non-goals note in CHANGELOG): dismiss the modal so it
-            # doesn't wedge the post-login flow, then let the normal
-            # login retry / CCP backoff proceed. Do NOT abort here.
             dismissed = False
             for btn in ("OK", "Close", "Continue"):
                 if btn in dump and agent_click_in_window(title, btn):
@@ -1496,6 +1536,9 @@ def handle_post_login_dialogs(app):
                 log.warning(
                     "Credential-rejection dialog detected but no known "
                     "dismiss button present; leaving dialog in place")
+            # Retrying a password IBKR just rejected only counts towards
+            # locking the account.
+            _halt_credentials_rejected()
         else:
             log.info(f"Unrecognized modal — leaving in place to let Gateway flow proceed")
 
@@ -4028,9 +4071,12 @@ def attempt_inplace_relogin(app):
             "unable to connect",
             "server cannot be reached",
         )
+        # Halt only on Gateway's explicit wording: the generic markers can
+        # also come from a second-factor failure.
+        is_rejected = _detect_bad_credentials(body)
         is_credential_error = (
             any(m in body_lower for m in credential_error_markers)
-            or _detect_bad_credentials(body))
+            or is_rejected)
         is_network_error = any(
             m in body_lower for m in network_error_markers)
         if is_credential_error or is_network_error:
@@ -4046,6 +4092,8 @@ def attempt_inplace_relogin(app):
             for btn in ("OK", "Close"):
                 if agent_click_in_window(title, btn):
                     break
+            if is_rejected:
+                _halt_credentials_rejected()
 
     # 2. Wait for the login frame to redisplay, but short-circuit the
     # wait when we can tell in-JVM relogin is impossible.
@@ -4461,9 +4509,14 @@ def _recover_mode_in_place(reason, attempts=None):
     still reaches the container within about ten minutes instead of
     looping. A 2FA failure only an operator can clear is not retried: it
     takes the same rescue-window-then-halt path main() uses, because
-    retrying it is the login storm v0.11.0 exists to prevent.
+    retrying it is the login storm v0.11.0 exists to prevent. Neither are
+    rejected credentials: Gateway's own rejection dialog halts where it is
+    seen, and two consecutive attempts with the launcher.log fingerprint
+    halt here.
     """
     attempts = _MODE_RECOVERY_ATTEMPTS if attempts is None else attempts
+    # The attempt that brought us here.
+    rejected_before = _latest_login_rejected_credentials()
     for attempt in range(1, attempts + 1):
         delay = min(60 * 2 ** (attempt - 1), 600)
         log.warning(f"Recovery: {reason}. Relaunching Gateway in {delay}s "
@@ -4485,6 +4538,13 @@ def _recover_mode_in_place(reason, attempts=None):
                 "2FA needs a change only an operator can make; see the "
                 "ALERT_2FA_FAILED line above")
             return False
+        rejected_now = _latest_login_rejected_credentials()
+        if rejected_before and rejected_now:
+            _halt_credentials_rejected(
+                "two logins in a row were answered by IBKR and then timed "
+                "out, the fingerprint of rejected credentials")
+            return False
+        rejected_before = rejected_now
     log.error(f"Recovery: {attempts} relaunches did not bring this mode "
               "back; exiting so the container can act")
     return False
