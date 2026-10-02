@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.14.0
 
 - **Rejected credentials now halt instead of retrying.** When Gateway
   says the username or password is invalid, the controller dismisses the
