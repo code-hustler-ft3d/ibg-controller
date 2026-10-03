@@ -159,6 +159,20 @@ def main():
                ["jlist_item_ambiguous"], "refused, not guessed")
         select("Ambiguous Case", "Mobile Authenticator app", True, 0, (), "exact still wins")
 
+        print("\n--- a modal titled like the main window (2026-10-03) ---")
+        # The frame comes first in window order and has no OK button; the
+        # agent used to search only the first match and miss the dialog.
+        reply = ""
+        for _ in range(10):  # the modal is shown asynchronously
+            reply = request("CLICK_IN_WIN Same Title Gateway|OK")
+            if reply.startswith("OK"):
+                break
+            time.sleep(0.5)
+        check("same-title modal: CLICK_IN_WIN replies OK", reply.startswith("OK"), reply)
+        time.sleep(0.8)
+        check("same-title modal: the dialog's own OK was clicked",
+              "CLICKED|same-title-modal" in lines, reply)
+
         print("\n--- errors that must not change ---")
         r = request("JLIST_SELECT No Such Window|x")
         check("missing window: ERR not_found", r.startswith("ERR not_found"), r)

@@ -4,6 +4,69 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Upstream watchdog (field report 2026-10-03).** Gateway lost its
+  connection to IBKR on a Friday night, showed "Connection to server
+  failed ... SSLHandshakeException", and never reconnected. Its API port
+  stayed open, so `/health` said healthy while every API request timed
+  out, for about 17 hours. The monitor loop now reads Gateway's status
+  label (the text after "Interactive Brokers API Server") every 30 s:
+  - `/health` gains `upstream_connected`, `upstream_down_seconds`,
+    `upstream_recovery_active` and `next_relaunch_in_seconds`, always
+    accurate, measured on a monotonic clock so host sleep doesn't count.
+  - Not connected on every check for 10 minutes
+    (`UPSTREAM_DOWN_GRACE_SECONDS`) outside IBKR's reset window: state
+    `UPSTREAM_DOWN` (503), `ALERT_UPSTREAM_DOWN` once, the window list,
+    modal text, labels and `launcher.log` tail logged, then this mode is
+    relaunched. Retries wait 10, 20, 40, then 60 minutes;
+    `UPSTREAM_RESTORED` when it reconnects.
+  - During recovery the watchdog alone decides: a dead JVM or closed
+    port waits for its next relaunch instead of escalating to the CCP
+    halt. A wrong password or 2FA problem still halts.
+- **Logoff backstop.** Gateway's own Lock and Exit timer fired on 1 of 5
+  observed days. When the JVM that was running at `AUTO_LOGOFF_TIME` is
+  still up 5 minutes later, the controller does the clean logout itself
+  (`LOGOFF_BACKSTOP` INFO line) and the normal exit recovery logs in.
+  Once per day, never for a JVM started after the boundary, only without
+  `AUTO_RESTART_TIME`. The time comes from the env value, so AM works
+  here; a bare `05:01` is ambiguous and turns it off with one warning.
+- **`IBKR_RESET_WINDOWS` / `IBKR_RESET_TZ`** for accounts hosted in
+  Europe or Asia, which reset at other times.
+
+### Changed
+
+- **The reset window now matches IBKR's published schedule.** IBKR's
+  system status page gives North America 00:15-01:45 ET Sunday-Friday
+  and 00:00-02:00 ET Saturday; the code said 23:45-00:15 and used
+  23:30-00:30. The default is now 23:30-02:00 ET. It governs the 8-minute
+  re-auth delay after a clean exit, the cold-start delay, the
+  bad-credentials fingerprint, and upstream disconnects.
+- **`CLICK_IN_WIN` tries modal dialogs first.** Gateway titles its error
+  modals "IBKR Gateway", like its main frame, and the agent searched
+  only the first match, so it never found the modal's button
+  (`ERR not_found`). Closing a window still targets the main frame. The
+  Swing drill gains a same-title case: 35/35 on this agent, 33/35 on
+  v0.14.0's.
+
+### Fixed
+
+- **The two-in-a-row credential halt raises its own alert.** Relaunched
+  attempts run no diagnosis, so a halt from two relaunches in a row could
+  arrive with no `ALERT_LOGIN_FAILED reason="bad-credentials"` before it,
+  and monitors that page on that alert stayed quiet. It is now emitted
+  just before the halt.
+- **The log fingerprint is ignored inside IBKR's reset window**
+  (see Changed), where a server-side stall is the likelier cause of
+  an answered handshake that then times out (field report 2026-10-02).
+  Outside the window the halt message now says a stall can look the
+  same, and that if the password is right a restart is all it takes.
+  Gateway's own rejection dialog still halts at any hour.
+- **Comments that still described the CCP halt as an exit** now match
+  v0.13.0's behaviour.
+
 ## [0.14.0] - 2026-10-02
 
 ### Changed

@@ -18,9 +18,10 @@ curl http://ibkr:8081/health   # paper
 
 HTTP 200 = controller is in `MONITORING` state, API port is open,
 JVM is alive. HTTP 503 = anything else, including `HALTED` — the
-deliberate stop after a 2FA failure only an operator can clear, where
+deliberate stop after a failure only an operator can clear, where
 the container stays up and reachable but makes no further login
-attempts. The JSON body is the same
+attempts — and `UPSTREAM_DOWN`, where Gateway has lost its connection
+to IBKR and the controller is relaunching it on a schedule. The JSON body is the same
 either way, so parsers can inspect it regardless of status.
 
 > **Anything that restarts unhealthy containers defeats the halt.** The
@@ -66,7 +67,11 @@ for Kubernetes-style readiness where "process up" is the signal.
   "last_auth_success_age_seconds": 42.5,
   "ccp_lockout_streak": 0,
   "ccp_backoff_seconds": 0.0,
-  "uptime_seconds": 3456.7
+  "uptime_seconds": 3456.7,
+  "upstream_connected": true,
+  "upstream_down_seconds": null,
+  "upstream_recovery_active": false,
+  "next_relaunch_in_seconds": null
 }
 ```
 
@@ -75,7 +80,7 @@ for Kubernetes-style readiness where "process up" is the signal.
 | `status` | `"healthy"` \| `"unhealthy"` | `healthy` iff `state == "MONITORING"` AND `api_port_open` AND `jvm_alive`. Everything else is `unhealthy`. |
 | `version` | string | Controller version (`__version__`). |
 | `mode` | `"live"` \| `"paper"` | The `TRADING_MODE` this controller is driving. |
-| `state` | string | Controller state machine position. One of `INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`, `POST_LOGIN`, `TWO_FA`, `DISCLAIMERS`, `API_WAIT`, `CONFIG`, `COMMAND_SERVER`, `READY`, `MONITORING`, `HALTED` (added v0.11.0). |
+| `state` | string | Controller state machine position. One of `INIT`, `LAUNCHING`, `AGENT_WAIT`, `APP_DISCOVERY`, `LOGIN`, `POST_LOGIN`, `TWO_FA`, `DISCLAIMERS`, `API_WAIT`, `CONFIG`, `COMMAND_SERVER`, `READY`, `MONITORING`, `HALTED` (added v0.11.0), `UPSTREAM_DOWN` (added v0.15.0). |
 | `jvm_pid` | int \| null | OS PID of the Gateway JVM. `null` before agent discovery completes. |
 | `jvm_alive` | bool | `true` iff the controller's handle on the Gateway JVM reports it hasn't exited. Normally a `subprocess.Popen`; after Gateway's own auto-restart it is a signal-based stand-in for a JVM the controller didn't spawn (issue #23), which reports liveness but not an exit code. |
 | `api_port` | int | `4001` (live) or `4002` (paper). |
@@ -87,6 +92,10 @@ for Kubernetes-style readiness where "process up" is the signal.
 | `ccp_lockout_streak` | int | Number of consecutive CCP lockouts seen. Resets to 0 on auth success. `>= 3` triggers `ALERT_CCP_PERSISTENT` in the logs (see below). |
 | `ccp_backoff_seconds` | float | Current CCP backoff duration (exponential: 60 → 120 → 240 → 480 → 600). `0` when no backoff is active. |
 | `uptime_seconds` | float | Seconds since the Python controller module loaded. |
+| `upstream_connected` | bool \| null | Gateway's own status label: the text after "Interactive Brokers API Server" in its main window, read every 30 s by the monitor loop. `true` = "connected". `null` when it can't be read (logging in, no main window, agent unreachable). The API port stays open when this is `false`, which is how a ~17 h outage once passed as healthy. Added v0.15.0. |
+| `upstream_down_seconds` | float \| null | How long `upstream_connected` has read not-connected without a break, on a clock that stops while the host sleeps. Always the truth, inside IBKR's reset window too. `null` when connected. Added v0.15.0. |
+| `upstream_recovery_active` | bool | `true` from `ALERT_UPSTREAM_DOWN` until Gateway reports connected again. While it is, the controller relaunches this mode on its own schedule — **defer any container restart** you'd otherwise make for a 503. Added v0.15.0. |
+| `next_relaunch_in_seconds` | float \| null | Seconds until the next relaunch while recovery is active (backoff 10, 20, 40, then 60 min). `null` otherwise. Added v0.15.0. |
 
 ### Healthy vs. unhealthy — what to do
 
@@ -101,6 +110,11 @@ for Kubernetes-style readiness where "process up" is the signal.
   playbook](DISCONNECT_RECOVERY.md#scenario-ccp-lockout).
 - **Unhealthy (503) with `jvm_alive == false`**: Gateway JVM has
   exited. The controller will relaunch it.
+- **Unhealthy (503) with `state == "UPSTREAM_DOWN"`**: Gateway has
+  been disconnected from IBKR for over 10 minutes outside the reset
+  window, and the controller is relaunching this mode. Don't restart
+  the container — that would also log out a healthy other mode. Watch
+  `next_relaunch_in_seconds`; see `ALERT_UPSTREAM_DOWN` below.
 - **Endpoint not reachable at all**: controller process is down.
   Restart the container.
 
@@ -209,9 +223,13 @@ ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds=480 mode=paper reason="cold start 
 ```
 
 **When fired**: the JVM exited with code 0 (or the controller cold-
-started) while the wallclock sat inside 23:30-00:30 America/New_York —
-i.e., inside IBKR's daily server-side maintenance window (published
-~23:45-00:15 ET, widened slightly for safety). The controller sleeps
+started) while the wallclock sat inside IBKR's reset window — by
+default 23:30-02:00 America/New_York, which covers IBKR's published
+North America resets (00:15-01:45 ET Sunday-Friday, 00:00-02:00 ET
+Saturday) and starts early because Gateway was seen shutting down at
+23:45 ET. Before v0.15.0 the window was 23:30-00:30, from an older
+reading of IBKR's schedule. Accounts hosted in Europe or Asia reset at
+other times: set `IBKR_RESET_WINDOWS` and `IBKR_RESET_TZ`. The controller sleeps
 `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` (default 480 = 8 min) before
 re-auth so IBKR's auth server can finish draining the cooperatively-
 shutdown session. Emitted once per recovery-path entry.
@@ -430,6 +448,65 @@ responses: wait, versus get up and fix it.
 **Recommended debounce**: 1 h — the halt repeats its reason every 5 min
 so the log never goes silent.
 
+### `ALERT_UPSTREAM_DOWN` (added v0.15.0)
+
+```
+ALERT_UPSTREAM_DOWN mode=live down_seconds=612 reason="Gateway reports it is not connected to IBKR" action="relaunching this mode; retries back off to hourly"
+```
+
+**When fired**: once per outage, when Gateway's status label has read
+not-connected on every 30-second check for `UPSTREAM_DOWN_GRACE_SECONDS`
+(default 600) of time outside IBKR's reset window. The clock is
+monotonic, so host sleep does not count. Field report 2026-10-03:
+Gateway showed a "Connection to server failed ... SSLHandshakeException"
+modal and stayed disconnected for about 17 hours while `/health` said
+healthy and every API request timed out.
+
+**What happens**: the controller logs the evidence first (window
+list, every modal's text, the main-window labels, the tail of this
+mode's `launcher.log`), because the relaunch erases it. Then it
+relaunches this mode with a full login, leaving the other mode alone.
+If Gateway is still not connected, it tries again after 10, 20, 40,
+then every 60 minutes. While this lasts, `state` is `UPSTREAM_DOWN`,
+`/health` answers 503, and `upstream_recovery_active` is `true`. It
+never escalates to the CCP halt or a container restart: a server-side
+outage is IBKR's to end, and repeated logins during one are what trip
+the lockout. A wrong password or a 2FA problem found on the way still
+halts as usual.
+
+**When it ends**: an INFO line,
+
+```
+UPSTREAM_RESTORED mode=live down_seconds=1890 relaunches=1
+```
+
+**What the operator should do**: usually nothing. If it keeps
+relaunching for hours, check IBKR's system status page and the
+captured modal text.
+
+**Recommended debounce**: page once per outage.
+
+### `LOGOFF_BACKSTOP` (INFO line, added v0.15.0)
+
+```
+LOGOFF_BACKSTOP mode=live boundary=17:01 jvm_started=2026-10-02 13:57:05 reason="Gateway's scheduled logoff did not happen; logging off on its behalf"
+```
+
+**When fired**: `AUTO_LOGOFF_TIME` is set (and `AUTO_RESTART_TIME`
+isn't), the Gateway JVM running now started before today's logoff
+time, and it is still running 5 minutes after it. Gateway's own Lock
+and Exit timer fired on only 1 of 5 observed days in the field, with
+the value read back correctly every time. The controller then does the
+same clean logout Gateway would, and the normal exit recovery logs back
+in. It fires at most once per day, and never for a JVM started after
+the boundary. The time comes from the env value, so AM times work here
+even though the dialog stores them as PM. A bare `05:01` is ambiguous
+in Gateway's 12-hour field and turns the backstop off with one warning:
+write `05:01 PM` or `17:01`.
+
+**What the operator should do**: nothing; count it if you want to know
+how often Gateway's own timer misses. Don't page.
+
 ### `ALERT_JVM_RESTART_EXHAUSTED`
 
 ```
@@ -522,7 +599,12 @@ token (`reason=` distinguishes them):
   postauth). This reading covers the whole log, so it can combine lines
   from different attempts; it is not acted on by itself. The controller
   relaunches Gateway, and **halts** if the next attempt shows the same
-  fingerprint again, checked against that attempt alone.
+  fingerprint again, checked against that attempt alone; that halt
+  raises its own `ALERT_LOGIN_FAILED reason="bad-credentials"` first.
+  Inside IBKR's reset window (23:30–02:00 ET by default, see
+  `IBKR_RESET_WINDOWS`) the fingerprint is ignored, because a server-side stall is the likelier
+  cause there. Outside it a stall can still look the same, so if the
+  password is right, restarting the container is all it takes.
 - `reason="post-auth-no-progress"` from `_diagnose_login_failure` —
   terminal initial-login path, `NS_AUTH_START` appeared but neither
   success nor an auth timeout followed. **This is not the
@@ -885,6 +967,9 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | `CCP_LOCKOUT_MAX_JVM_RESTARTS` | `0` | Number of SIGKILL-capable JVM teardown cycles `_escalate_to_jvm_restart` will attempt before giving up. Default `0` = halt immediately and emit `ALERT_CCP_PERSISTENT_HALT` (v0.5.9's new behaviour; rationale: the retry loop can compound the lockout it's trying to clear by re-stranding slots on each teardown). Set to `5` to restore pre-v0.5.9 auto-retry behaviour. Supersedes the internal `_JVM_RESTART_MAX_ATTEMPTS` constant when set positive. Added v0.5.9. |
 | `AUTO_RESTART_ADOPT` | `yes` | When the Gateway JVM exits right after install4j's restarter ran (Gateway's own `AUTO_RESTART_TIME` restart), adopt the instance install4j brings up instead of launching a second one — no login, no second factor. `no` restores the always-relaunch behaviour that raced the restarter (issue #23). Added v0.9.0. |
 | `PASSKEY_AUTHENTICATE` | unset (`no`) | `yes` lets the controller press **Authenticate** on Gateway's passkey prompt; the WebAuthn ceremony itself must be completed by an authenticator you run alongside the container. Unset, a passkey prompt fails loudly (`ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow …"`) as it has since v0.8.1. Added v0.10.0. |
+| `UPSTREAM_DOWN_GRACE_SECONDS` | `600` | How long Gateway must report not-connected to IBKR, outside the reset window, before `ALERT_UPSTREAM_DOWN` and the first relaunch. |
+| `IBKR_RESET_WINDOWS` | `23:30-02:00` | IBKR's daily reset, `HH:MM-HH:MM`, comma-separated for regions with two. Inside it, the controller delays re-auth after a clean exit, ignores the bad-credentials log fingerprint, and doesn't count upstream disconnects. A window whose end is before its start crosses midnight. IBKR publishes Europe as 06:25-07:45 CET and APAC as 04:45-06:05 and 20:15-21:15 HKT. An unparseable value falls back to the default. |
+| `IBKR_RESET_TZ` | `America/New_York` | Time zone for `IBKR_RESET_WINDOWS` — the region hosting the account, not the container's `TIME_ZONE`. |
 | `AUTO_RESTART_PROBE_SECONDS` | `15` | When a clean JVM exit leaves no fresh `restarter.log`, how long to ask the agent socket whether a Gateway JVM the controller didn't spawn is already running (`ALERT_AUTO_RESTART detected_via=agent_socket`). Set to `0` to detect self-restarts only via `restarter.log`. This is the worst-case delay added to a genuine crash recovery on a clean exit, alongside the 5 s late-log grace. Added v0.9.0. |
 | `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` | `90` | How long to wait for the self-restarted JVM's agent to answer with a new PID before giving up on adoption and falling back to a relaunch (`ALERT_AUTO_RESTART status=failed_no_agent`). The issue #23 reporter observed 0-3 s on their host; the default leaves room for slower ones. Added v0.9.0. |
 
@@ -991,7 +1076,10 @@ four additional `ALERT_CLEAN_LOGOUT` `status=` values
 `cancelled_pending_2fa`, `failed_cancel_2fa`) in v0.5.9, and
 `ALERT_AUTO_RESTART` (INFO on `status=adopted`, WARNING on the
 `failed_*` statuses) in v0.9.0, and
-`ALERT_CONFIG_NOT_APPLIED` (ERROR) in v0.10.0 — all under the same
+`ALERT_CONFIG_NOT_APPLIED` (ERROR) in v0.10.0, and
+`ALERT_UPSTREAM_DOWN` (ERROR), the `upstream_*` and
+`next_relaunch_in_seconds` fields and the `UPSTREAM_DOWN` state in
+v0.15.0 — all under the same
 stability contract. Breaking changes will be called out in
 the CHANGELOG and accompany a minor version bump. Adding new fields
 to `/health`, new `ALERT_*` tokens, or new `status=` values to
