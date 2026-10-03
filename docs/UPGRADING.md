@@ -76,6 +76,27 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **`/health` can now be 503 while the API port is open.** A new state,
+  `UPSTREAM_DOWN`, means Gateway has reported no connection to IBKR for
+  10 minutes outside the reset window and the controller is relaunching
+  that mode (10, 20, 40, then 60 minutes apart). **What changes for
+  you:** if a monitor restarts containers on a 503, make it defer while
+  `upstream_recovery_active` is `true` — a container restart also logs
+  out the other mode. `ALERT_UPSTREAM_DOWN` is the page;
+  `UPSTREAM_RESTORED` is the all-clear.
+- **The controller logs off for Gateway when its own timer misses.**
+  With `AUTO_LOGOFF_TIME` set, expect an occasional `LOGOFF_BACKSTOP`
+  line about 5 minutes after the boundary, then the usual relogin.
+  Write the time as `05:01 PM` or `17:01`; a bare `05:01` turns the
+  backstop off.
+- **The reset window is wider:** 23:30-02:00 ET instead of 23:30-00:30,
+  matching IBKR's published North America schedule. A clean exit or a
+  cold start between 00:30 and 02:00 ET now waits the 8-minute re-auth
+  delay. Accounts hosted in Europe or Asia: set `IBKR_RESET_WINDOWS`
+  and `IBKR_RESET_TZ`.
+
 ### v0.14.0
 
 - **Rejected credentials now halt instead of retrying.** When Gateway

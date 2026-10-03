@@ -45,7 +45,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, time as dtime
+from datetime import datetime, time as dtime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from zoneinfo import ZoneInfo
 
@@ -90,6 +90,9 @@ class State(enum.Enum):
     READY = "READY"
     MONITORING = "MONITORING"
     HALTED = "HALTED"
+    # Gateway is up but reports no connection to IBKR, and recovery is in
+    # progress (upstream watchdog, field report 2026-10-03).
+    UPSTREAM_DOWN = "UPSTREAM_DOWN"
 
 
 _current_state = State.INIT
@@ -1197,6 +1200,8 @@ def launch_gateway():
         stderr=subprocess.STDOUT,
     )
     log.info(f"Gateway PID: {proc.pid} (JVM console -> {jvm_console_path})")
+    global _JVM_STARTED_WALL
+    _JVM_STARTED_WALL = datetime.now()
     return proc
 
 
@@ -3136,17 +3141,50 @@ _CCP_COOLDOWN_MULTIPLIER_DEFAULT = 1.5
 
 # v0.5.10: IBKR runs a daily server-side maintenance window during which
 # every Gateway/TWS session receives a cooperative shutdown (JVM exits
-# with code 0). IBKR's published window is 23:45-00:15 ET; we widen
-# slightly to 23:30-00:30 for safety margin. 2026-04-20/21 production
+# with code 0). IBKR's system status page publishes the North America
+# reset as 00:15-01:45 ET Sunday-Friday and 00:00-02:00 ET on Saturday
+# (checked 2026-10-03; this comment used to say 23:45-00:15). The default
+# window is 23:30-02:00 ET: it covers both, and keeps the 23:30 start
+# because Gateway was seen shutting down at 23:45 ET. Accounts hosted in
+# Europe or Asia reset at other times — set IBKR_RESET_WINDOWS and
+# IBKR_RESET_TZ (see _reset_windows_from_env). 2026-04-20/21 production
 # incident: re-auth within ~8s of the cooperative shutdown hits IBKR's
 # still-draining auth server and the request is silently dropped →
 # CCP LOCKOUT cascade across both live and paper. The delay lets IBKR's
 # server-side session teardown propagate before we re-auth. 8 min
 # default is empirical; tune via env var if a deployment sees different
 # drain timing.
-_CCP_MAINTENANCE_WINDOW_TZ = "America/New_York"
-_CCP_MAINTENANCE_WINDOW_START = dtime(23, 30)   # 23:30 ET
-_CCP_MAINTENANCE_WINDOW_END = dtime(0, 30)      # 00:30 ET next day (window crosses midnight)
+_RESET_WINDOWS_DEFAULT = "23:30-02:00"
+_RESET_TZ_DEFAULT = "America/New_York"
+
+
+def _reset_windows_from_env():
+    """Parse IBKR_RESET_WINDOWS ("HH:MM-HH:MM", comma-separated for
+    regions with more than one reset) and IBKR_RESET_TZ. A window whose
+    end is earlier than its start crosses midnight. Anything unparseable
+    falls back to the default with a warning, so a typo can never
+    silently disable the guard."""
+    raw = os.environ.get("IBKR_RESET_WINDOWS", "").strip() or _RESET_WINDOWS_DEFAULT
+    tz = os.environ.get("IBKR_RESET_TZ", "").strip() or _RESET_TZ_DEFAULT
+    try:
+        ZoneInfo(tz)
+        windows = []
+        for part in raw.split(","):
+            a, b = part.strip().split("-")
+            ah, am = (int(x) for x in a.strip().split(":"))
+            bh, bm = (int(x) for x in b.strip().split(":"))
+            windows.append((dtime(ah, am), dtime(bh, bm)))
+        if not windows:
+            raise ValueError("no windows")
+        return tuple(windows), tz
+    except Exception as e:
+        log.warning(f"IBKR_RESET_WINDOWS={raw!r} / IBKR_RESET_TZ={tz!r} not "
+                    f"understood ({type(e).__name__}: {e}); using "
+                    f"{_RESET_WINDOWS_DEFAULT} {_RESET_TZ_DEFAULT}")
+        return ((dtime(23, 30), dtime(2, 0)),), _RESET_TZ_DEFAULT
+
+
+_RESET_WINDOWS, _CCP_MAINTENANCE_WINDOW_TZ = _reset_windows_from_env()
 _CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS_DEFAULT = 480   # 8 min
 _CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS = int(os.environ.get(
     "CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS",
@@ -3285,13 +3323,11 @@ def _is_ibkr_maintenance_window(now=None):
     """v0.5.10: return True if the current wallclock is inside IBKR's
     daily server-side maintenance window.
 
-    IBKR publishes 23:45-00:15 ET; we widen to 23:30-00:30 for safety
-    margin around clock skew and near-boundary exits. The window crosses
-    midnight, so membership is ``t >= 23:30 or t < 00:30``.
-
-    TZ is hardcoded to ``America/New_York`` rather than read from the
-    container's ``TIME_ZONE`` env — IBKR's window is ET-anchored
-    regardless of where the container thinks it lives.
+    Default 23:30-02:00 America/New_York, covering IBKR's published North
+    America resets (00:15-01:45 ET Sunday-Friday, 00:00-02:00 ET
+    Saturday). The zone is IBKR's, not the container's ``TIME_ZONE``:
+    the reset is anchored to the region hosting the account. Override
+    both with IBKR_RESET_WINDOWS / IBKR_RESET_TZ.
 
     ``now`` is an injection seam for tests (pass a tz-aware datetime);
     production callers pass nothing and get the live ET clock.
@@ -3299,7 +3335,13 @@ def _is_ibkr_maintenance_window(now=None):
     if now is None:
         now = datetime.now(ZoneInfo(_CCP_MAINTENANCE_WINDOW_TZ))
     t = now.time()
-    return t >= _CCP_MAINTENANCE_WINDOW_START or t < _CCP_MAINTENANCE_WINDOW_END
+    for start, end in _RESET_WINDOWS:
+        if start <= end:
+            if start <= t < end:
+                return True
+        elif t >= start or t < end:
+            return True
+    return False
 
 
 def _apply_maintenance_recovery_delay(reason):
@@ -3319,7 +3361,7 @@ def _apply_maintenance_recovery_delay(reason):
         f"ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds={delay} "
         f"mode={TRADING_MODE} reason=\"{reason}\"")
     log.warning(
-        f"Inside IBKR maintenance window (~23:45-00:15 ET); sleeping "
+        f"Inside IBKR's reset window ({os.environ.get('IBKR_RESET_WINDOWS', '').strip() or _RESET_WINDOWS_DEFAULT} {_CCP_MAINTENANCE_WINDOW_TZ}); sleeping "
         f"{delay}s before re-auth to let IBKR's auth server drain the "
         f"prior session. Re-auth'ing too quickly during this window "
         f"hits a still-draining server and is silently dropped — the "
@@ -3688,6 +3730,8 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
         # opens, the fallback's _teardown_jvm_for_restart then cleanly kills
         # the adopted instance before relaunching.
         GATEWAY_PROC = _AdoptedProcess(new_pid)
+        global _JVM_STARTED_WALL
+        _JVM_STARTED_WALL = datetime.now()
         JVM_PID = new_pid
         new_app = find_app(APP_NAME_CANDIDATES, timeout=120, match_pid=new_pid)
         CURRENT_APP = new_app
@@ -3784,7 +3828,7 @@ def _recover_jvm_or_escalate(reason, *, exit_code=None):
     which never returns.
 
     v0.5.10: maintenance-window guard. When ``exit_code == 0`` AND
-    wallclock is inside IBKR's daily maintenance window (23:30-00:30 ET),
+    wallclock is inside IBKR's reset window (23:30-02:00 ET by default),
     sleep ``CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS`` (default 480)
     before attempting the fast restart. The 2026-04-20/21 incident
     showed that re-auth ~8s after a code-0 exit in this window hits
@@ -4436,6 +4480,307 @@ def wait_for_api_port(timeout=180):
 
 
 _OPERATOR_RESCUE_SECONDS = 300
+# --- Upstream watchdog ---------------------------------------------------
+# Field report 2026-10-03: Gateway lost its connection to IBKR on a Friday
+# night (a "Connection to server failed ... SSLHandshakeException" modal)
+# and never reconnected. The API port stayed open, so /health said healthy
+# and API clients connected, but every request timed out for about 17 hours
+# until someone restarted the container. Gateway shows the state in its main
+# window: a label "Interactive Brokers API Server" followed by "connected".
+#
+# Rules, from the operator who hit it:
+# - Measured on time.monotonic(): on a Docker VM it stops while the host
+#   sleeps, so a long sleep does not read as a long outage.
+# - The not-connected reading must hold on every poll for the whole grace
+#   period; any other reading starts the count again.
+# - upstream_connected / upstream_down_seconds always tell the truth. Only
+#   the 503, ALERT_UPSTREAM_DOWN and the relaunch wait for the reset window
+#   to end, and the grace period only counts time outside it.
+# - During recovery /health says so (upstream_recovery_active,
+#   next_relaunch_in_seconds), so an external monitor can defer instead of
+#   restarting the container mid-backoff.
+# - Before the first relaunch, the evidence is written to the log: a
+#   relaunch destroys it, and nobody may be at the box.
+# While recovery is active the watchdog alone decides what happens next: a
+# relaunch that cannot log in during an IBKR outage leaves the port closed,
+# and the port-closed path would otherwise escalate to the CCP halt.
+_UPSTREAM_GRACE_SECONDS = int(os.environ.get("UPSTREAM_DOWN_GRACE_SECONDS", "600"))
+_UPSTREAM_POLL_SECONDS = 30
+_UPSTREAM_RELAUNCH_BACKOFF = (600, 1200, 2400, 3600)
+_UPSTREAM_ANCHOR = "interactive brokers api server"
+
+_upstream_connected = None       # last reading: True, False, or None (unknown)
+_upstream_down_since = None      # monotonic; the truth, window or not
+_upstream_grace_since = None     # monotonic; counts time outside the window only
+_upstream_recovery = False
+_upstream_next_relaunch_at = None
+_upstream_relaunches = 0
+
+
+def _read_upstream_connected():
+    """True / False from Gateway's own status label, None when it cannot
+    be read (no main window yet, agent unreachable, or not Gateway).
+
+    The value is the label right after "Interactive Brokers API Server" in
+    the same window. Matching "connected" anywhere would also hit the
+    "API Client" count ("1 connected").
+    """
+    try:
+        labels = agent_labels()
+    except Exception:
+        return None
+    for i, (wtitle, text) in enumerate(labels):
+        if text.strip().lower() != _UPSTREAM_ANCHOR:
+            continue
+        for other_title, value in labels[i + 1:]:
+            if other_title == wtitle and value.strip():
+                return value.strip().lower() == "connected"
+        return None
+    return None
+
+
+def _upstream_reset():
+    global _upstream_down_since, _upstream_grace_since, _upstream_recovery
+    global _upstream_next_relaunch_at, _upstream_relaunches
+    _upstream_down_since = None
+    _upstream_grace_since = None
+    _upstream_recovery = False
+    _upstream_next_relaunch_at = None
+    _upstream_relaunches = 0
+
+
+def _upstream_health_fields():
+    now = time.monotonic()
+    nxt = None
+    if _upstream_recovery and _upstream_next_relaunch_at is not None:
+        nxt = max(0.0, _upstream_next_relaunch_at - now)
+    return {
+        "upstream_connected": _upstream_connected,
+        "upstream_down_seconds": (None if _upstream_down_since is None
+                                  else max(0.0, now - _upstream_down_since)),
+        "upstream_recovery_active": _upstream_recovery,
+        "next_relaunch_in_seconds": nxt,
+    }
+
+
+def _launcher_log_tail(lines=30):
+    path = os.path.join(JTS_CONFIG_DIR, "launcher.log")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - 65536))
+            tail = [ln for ln in f.read().splitlines() if ln.strip()]
+        return tail[-lines:]
+    except OSError as e:
+        return [f"(launcher.log unavailable: {type(e).__name__})"]
+
+
+def _capture_upstream_diagnostics():
+    """Log what the operator would want to see before the relaunch erases
+    it: the window list, every modal's text, the main-window labels, and
+    the tail of this mode's launcher.log."""
+    log.warning("Upstream diagnostics, captured before relaunching:")
+    try:
+        windows = agent_windows()
+        log.warning(_redact_logs(f"  windows: {windows}"))
+        for _wtype, title, modal in windows:
+            if not modal:
+                continue
+            lines = [ln for ln in agent_window(title).split("\n")
+                     if ln and ln not in ("OK", "END")]
+            for ln in lines[:40]:
+                log.warning(_redact_logs(f"  modal [{title}] {ln}"))
+    except Exception as e:
+        log.warning(f"  windows: unavailable ({type(e).__name__}: {e})")
+    try:
+        for wtitle, text in agent_labels()[:60]:
+            log.warning(_redact_logs(f"  label [{wtitle}] {text!r}"))
+    except Exception as e:
+        log.warning(f"  labels: unavailable ({type(e).__name__}: {e})")
+    for ln in _launcher_log_tail():
+        log.warning(_redact_logs(f"  launcher.log {ln}"))
+
+
+def _upstream_tick(now=None):
+    """Take one reading and advance the watchdog. True when a relaunch is
+    due now."""
+    global _upstream_connected, _upstream_down_since, _upstream_grace_since
+    global _upstream_recovery, _upstream_next_relaunch_at
+    now = time.monotonic() if now is None else now
+    reading = _read_upstream_connected()
+    _upstream_connected = reading
+    if reading is True:
+        if _upstream_down_since is not None or _upstream_recovery:
+            down = 0 if _upstream_down_since is None else now - _upstream_down_since
+            log.info(f"UPSTREAM_RESTORED mode={TRADING_MODE} "
+                     f"down_seconds={int(down)} relaunches={_upstream_relaunches}")
+        if _upstream_recovery and _current_state == State.UPSTREAM_DOWN:
+            _set_state(State.MONITORING)
+        _upstream_reset()
+        return False
+    if not _upstream_recovery:
+        if reading is None:
+            # Not a reading of "disconnected": the run is broken.
+            _upstream_down_since = None
+            _upstream_grace_since = None
+            return False
+        if _upstream_down_since is None:
+            _upstream_down_since = now
+            log.warning(
+                "Upstream: Gateway reports it is not connected to IBKR. "
+                f"Watching; relaunching this mode if it lasts "
+                f"{_UPSTREAM_GRACE_SECONDS // 60} min outside IBKR's reset "
+                "window.")
+    if _is_ibkr_maintenance_window():
+        _upstream_grace_since = None
+        return False
+    if not _upstream_recovery:
+        if _upstream_grace_since is None:
+            _upstream_grace_since = now
+        if now - _upstream_grace_since < _UPSTREAM_GRACE_SECONDS:
+            return False
+        _upstream_recovery = True
+        _upstream_next_relaunch_at = now
+        log.error(
+            f"ALERT_UPSTREAM_DOWN mode={TRADING_MODE} "
+            f"down_seconds={int(now - _upstream_down_since)} "
+            f"reason=\"Gateway reports it is not connected to IBKR\" "
+            f"action=\"relaunching this mode; retries back off to hourly\"")
+        _set_state(State.UPSTREAM_DOWN)
+        _capture_upstream_diagnostics()
+    return (_upstream_next_relaunch_at is not None
+            and now >= _upstream_next_relaunch_at)
+
+
+def _upstream_relaunch():
+    """Relaunch this mode to reconnect it. On success recovery ends; on
+    failure the next try waits 10, 20, 40, then at most 60 minutes. A
+    failure only an operator can clear still halts."""
+    global _upstream_relaunches, _upstream_next_relaunch_at, _upstream_connected
+    _upstream_relaunches += 1
+    n = _upstream_relaunches
+    log.warning(f"Upstream: relaunching this mode's Gateway to reconnect "
+                f"(attempt {n})")
+    ok = False
+    try:
+        ok = do_restart_in_place()
+    except Exception as e:
+        log.error(f"Upstream: relaunch raised {type(e).__name__}: {e}")
+    if not ok and _twofa_needs_operator:
+        if not _await_manual_login():
+            _halt_for_operator(
+                "2FA needs a change only an operator can make; see the "
+                "ALERT_2FA_FAILED line above")
+            return
+        ok = True
+    if ok:
+        log.info(f"UPSTREAM_RESTORED mode={TRADING_MODE} "
+                 f"relaunches={n} (logged in again)")
+        _upstream_reset()
+        _upstream_connected = None  # re-read on the next check
+        _set_state(State.MONITORING)
+        return
+    delay = _UPSTREAM_RELAUNCH_BACKOFF[min(n, len(_UPSTREAM_RELAUNCH_BACKOFF)) - 1]
+    _upstream_next_relaunch_at = time.monotonic() + delay
+    _set_state(State.UPSTREAM_DOWN)
+    log.warning(f"Upstream: relaunch did not log in; next attempt in "
+                f"{delay // 60} min")
+
+
+# --- Logoff backstop ------------------------------------------------------
+# Field reports 2026-10-01..03: Gateway's own Lock and Exit timer fired on
+# only 1 of 5 observed days at 05:01 PM, across fresh and reused settings
+# directories and three releases, with the value read back correctly each
+# time. When the same JVM is still running 5 minutes after the configured
+# logoff, log off on Gateway's behalf; the normal exit recovery logs in.
+_LOGOFF_BACKSTOP_GRACE_SECONDS = 300
+_JVM_STARTED_WALL = None
+_logoff_backstop_done_for = None
+_logoff_backstop_warned = False
+
+
+def _parse_wall_clock(value):
+    """(hour, minute) in 24-hour time, or None.
+
+    Accepts "05:01 PM" and 24-hour "17:01" / "00:30". A bare hour from 1
+    to 12 is ambiguous in Gateway's 12-hour field, so it is refused rather
+    than guessed. The boundary comes from this env value, never from the
+    dialog, so the AM/PM control the agent cannot set does not move it.
+    """
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])?\s*", value or "")
+    if not m:
+        return None
+    hour, minute, meridiem = int(m.group(1)), int(m.group(2)), m.group(3)
+    if minute > 59:
+        return None
+    if meridiem:
+        if not 1 <= hour <= 12:
+            return None
+        return hour % 12 + (12 if meridiem.lower() == "pm" else 0), minute
+    if hour == 0 or 13 <= hour <= 23:
+        return hour, minute
+    return None
+
+
+def _logoff_backstop_boundary(now=None):
+    """Today's logoff boundary when the backstop should act now, else None.
+
+    Only for AUTO_LOGOFF_TIME without AUTO_RESTART_TIME, only once per
+    boundary, and only for a JVM started before it: one launched at 17:30
+    is not logged out at once, its boundary is tomorrow's.
+    """
+    global _logoff_backstop_warned
+    value = os.environ.get("AUTO_LOGOFF_TIME", "").strip()
+    if not value or os.environ.get("AUTO_RESTART_TIME", "").strip():
+        return None
+    hm = _parse_wall_clock(value)
+    if hm is None:
+        if not _logoff_backstop_warned:
+            _logoff_backstop_warned = True
+            log.warning(
+                f"Logoff backstop off: AUTO_LOGOFF_TIME={value!r} is "
+                "ambiguous. Write it with AM or PM (05:01 PM) or in 24-hour "
+                "time (17:01).")
+        return None
+    now = datetime.now() if now is None else now
+    boundary = now.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+    if now < boundary + timedelta(seconds=_LOGOFF_BACKSTOP_GRACE_SECONDS):
+        return None
+    if _JVM_STARTED_WALL is None or _JVM_STARTED_WALL >= boundary:
+        return None
+    if _logoff_backstop_done_for == boundary:
+        return None
+    return boundary
+
+
+def _run_logoff_backstop(boundary):
+    """Log off the way Gateway's own Lock and Exit does: a clean logout,
+    then SIGTERM if that stalls. The JVM exit is picked up by the monitor
+    loop, which recovers and logs in as it does after a scheduled logoff."""
+    global _logoff_backstop_done_for
+    _logoff_backstop_done_for = boundary
+    started = (_JVM_STARTED_WALL.strftime("%Y-%m-%d %H:%M:%S")
+               if _JVM_STARTED_WALL else "unknown")
+    log.info(f"LOGOFF_BACKSTOP mode={TRADING_MODE} "
+             f"boundary={boundary:%H:%M} jvm_started={started} "
+             f"reason=\"Gateway's scheduled logoff did not happen; logging "
+             f"off on its behalf\"")
+    proc = GATEWAY_PROC
+    pid = proc.pid if proc is not None else None
+    ok, status, why = _attempt_clean_logout()
+    log.info(f"ALERT_CLEAN_LOGOUT mode={TRADING_MODE} pid={pid} "
+             f"status={status} reason=\"{why}\"")
+    if ok or proc is None or proc.poll() is not None:
+        return
+    log.warning("LOGOFF_BACKSTOP: clean logout failed; sending SIGTERM")
+    try:
+        proc.terminate()
+        proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        log.error("LOGOFF_BACKSTOP: JVM still alive 30s after SIGTERM; the "
+                  "monitor loop keeps watching it")
+
+
 _HALT_LOG_INTERVAL_SECONDS = 300
 
 
@@ -4884,7 +5229,7 @@ def main():
     log.info(f"App registered: {app.get_name()!r} (pid={JVM_PID})")
 
     # v0.5.10: cold-start maintenance-window guard. A container booting
-    # inside IBKR's daily server-side maintenance window (23:30-00:30 ET)
+    # inside IBKR's reset window (23:30-02:00 ET by default)
     # will drive Log In into a still-draining auth server; the click is
     # silently dropped → CCP LOCKOUT. Delay before the Log In click so
     # IBKR's teardown of any prior session on these credentials has time
@@ -5300,6 +5645,7 @@ def _build_health_snapshot():
         "ccp_lockout_streak": _ccp_lockout_streak,
         "ccp_backoff_seconds": _ccp_backoff_seconds,
         "uptime_seconds": max(0.0, now - _CONTROLLER_START_TS),
+        **_upstream_health_fields(),
     }
 
 
@@ -5740,6 +6086,7 @@ def monitor_loop(app):
     consecutive_failures = 0
     wedged_failures = 0
     last_heartbeat = time.monotonic()
+    last_upstream_check = time.monotonic()
     log.info(f"Monitor: JVM pid={GATEWAY_PROC.pid}, heartbeat API port {api_port} every {HEARTBEAT_INTERVAL}s")
 
     while True:
@@ -5748,8 +6095,9 @@ def monitor_loop(app):
         gw = GATEWAY_PROC
         live_app = CURRENT_APP if CURRENT_APP is not None else app
 
-        # JVM process check — fast, every iteration
-        if gw is None or gw.poll() is not None:
+        # JVM process check — fast, every iteration. During upstream
+        # recovery a dead JVM is the watchdog's to relaunch on its schedule.
+        if (gw is None or gw.poll() is not None) and not _upstream_recovery:
             rc = gw.returncode if gw is not None else 1
             if isinstance(gw, _AdoptedProcess):
                 # Issue #23: not our child, so waitpid can't tell us the
@@ -5795,7 +6143,28 @@ def monitor_loop(app):
             continue
 
         now = time.monotonic()
-        if now - last_heartbeat >= HEARTBEAT_INTERVAL:
+        if now - last_upstream_check >= _UPSTREAM_POLL_SECONDS:
+            last_upstream_check = now
+            if _upstream_tick(now):
+                _upstream_relaunch()
+                consecutive_failures = 0
+                wedged_failures = 0
+                last_heartbeat = time.monotonic()
+                continue
+
+        if not _upstream_recovery:
+            boundary = _logoff_backstop_boundary()
+            if boundary is not None:
+                _run_logoff_backstop(boundary)
+                continue
+
+        if _upstream_recovery:
+            # The port is expected to be closed while the watchdog waits to
+            # relaunch; the port-closed path would escalate to a CCP halt.
+            consecutive_failures = 0
+            wedged_failures = 0
+            last_heartbeat = now
+        elif now - last_heartbeat >= HEARTBEAT_INTERVAL:
             last_heartbeat = now
             if is_api_port_open(api_port):
                 if consecutive_failures > 0:

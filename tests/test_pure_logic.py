@@ -37,6 +37,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import MagicMock, patch
+from datetime import datetime
 
 
 def _load_module():
@@ -1989,14 +1990,45 @@ class TestIBKRMaintenanceWindow(unittest.TestCase):
     def test_at_00_00_is_in_window_crosses_midnight(self):
         self.assertTrue(gc._is_ibkr_maintenance_window(self._et(0, 0)))
 
-    def test_at_00_15_is_in_window_ibkr_published_end(self):
-        self.assertTrue(gc._is_ibkr_maintenance_window(self._et(0, 15)))
+    def test_ibkr_published_resets_are_covered(self):
+        # IBKR's system status page, checked 2026-10-03: North America
+        # resets 00:15-01:45 ET Sunday-Friday and 00:00-02:00 ET Saturday.
+        # The old window ended at 00:30 and missed most of both.
+        for h, m in ((0, 15), (0, 30), (1, 0), (1, 45), (1, 59)):
+            self.assertTrue(gc._is_ibkr_maintenance_window(self._et(h, m)),
+                            f"{h:02d}:{m:02d} ET is inside IBKR's reset")
 
-    def test_at_00_29_is_in_window_near_upper_boundary(self):
-        self.assertTrue(gc._is_ibkr_maintenance_window(self._et(0, 29)))
+    def test_at_02_00_is_outside_window_upper_boundary_exclusive(self):
+        self.assertFalse(gc._is_ibkr_maintenance_window(self._et(2, 0)))
 
-    def test_at_00_30_is_outside_window_upper_boundary_exclusive(self):
-        self.assertFalse(gc._is_ibkr_maintenance_window(self._et(0, 30)))
+    def _windows(self, raw, tz=""):
+        with patch.dict(os.environ, {"IBKR_RESET_WINDOWS": raw,
+                                     "IBKR_RESET_TZ": tz}):
+            return gc._reset_windows_from_env()
+
+    def test_a_window_that_does_not_cross_midnight(self):
+        # A Europe-hosted account: 06:25-07:45 CET.
+        windows, tz = self._windows("06:25-07:45", "Europe/Berlin")
+        self.assertEqual(tz, "Europe/Berlin")
+        with patch.object(gc, "_RESET_WINDOWS", windows):
+            self.assertTrue(gc._is_ibkr_maintenance_window(self._et(7, 0)))
+            self.assertFalse(gc._is_ibkr_maintenance_window(self._et(8, 0)))
+            self.assertFalse(gc._is_ibkr_maintenance_window(self._et(0, 0)))
+
+    def test_several_windows(self):
+        # APAC publishes two resets a day.
+        windows, _ = self._windows("04:45-06:05, 20:15-21:15", "Asia/Hong_Kong")
+        with patch.object(gc, "_RESET_WINDOWS", windows):
+            self.assertTrue(gc._is_ibkr_maintenance_window(self._et(5, 0)))
+            self.assertTrue(gc._is_ibkr_maintenance_window(self._et(20, 30)))
+            self.assertFalse(gc._is_ibkr_maintenance_window(self._et(12, 0)))
+
+    def test_a_typo_falls_back_instead_of_disabling_the_guard(self):
+        with _capture_controller_errors():
+            windows, tz = self._windows("23:30 to 02:00")
+        self.assertEqual(tz, "America/New_York")
+        with patch.object(gc, "_RESET_WINDOWS", windows):
+            self.assertTrue(gc._is_ibkr_maintenance_window(self._et(1, 0)))
 
     def test_at_noon_is_outside_window(self):
         self.assertFalse(gc._is_ibkr_maintenance_window(self._et(12, 0)))
@@ -3920,6 +3952,360 @@ class TestCredentialHalt(unittest.TestCase):
         self._relogin("Login failed. Please try again.\nOK").assert_not_called()
 
 
+
+class TestUpstreamWatchdog(unittest.TestCase):
+    """Field report 2026-10-03: Gateway lost IBKR for ~17 h while /health
+    said healthy, because the API port stays open when the upstream link is
+    gone. The watchdog reads Gateway's own status label instead.
+    """
+
+    CONNECTED = [("IBKR Gateway", "Interactive Brokers API Server"),
+                 ("IBKR Gateway", "connected"),
+                 ("IBKR Gateway", "Market Data Farm"),
+                 ("IBKR Gateway", "ON: usfarm"),
+                 ("IBKR Gateway", "API Client"),
+                 ("IBKR Gateway", "1 connected")]
+
+    def setUp(self):
+        gc._upstream_reset()
+        gc._upstream_connected = None
+        gc._twofa_needs_operator = False
+        self.prev_state = gc._current_state
+        gc._current_state = gc.State.MONITORING
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        gc._upstream_reset()
+        gc._upstream_connected = None
+        gc._current_state = self.prev_state
+
+    # --- reading Gateway's label ---
+
+    def _read(self, labels):
+        with patch.object(gc, "agent_labels", return_value=labels):
+            return gc._read_upstream_connected()
+
+    def test_reads_connected(self):
+        self.assertIs(self._read(self.CONNECTED), True)
+
+    def test_reads_disconnected(self):
+        labels = list(self.CONNECTED)
+        labels[1] = ("IBKR Gateway", "disconnected")
+        self.assertIs(self._read(labels), False)
+
+    def test_api_client_count_is_not_mistaken_for_the_server_state(self):
+        # "1 connected" belongs to API Client; with the server label
+        # missing the state is unknown, not connected.
+        self.assertIsNone(self._read(self.CONNECTED[2:]))
+
+    def test_unreadable_agent_is_unknown(self):
+        with patch.object(gc, "agent_labels", side_effect=OSError("gone")):
+            self.assertIsNone(gc._read_upstream_connected())
+
+    # --- the tick ---
+
+    def _tick(self, reading, now, in_window=False):
+        with patch.object(gc, "_read_upstream_connected", return_value=reading), \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=in_window), \
+             patch.object(gc, "_capture_upstream_diagnostics") as cap, \
+             _capture_controller_errors() as errors:
+            due = gc._tick_result = gc._upstream_tick(now)
+        return due, errors, cap
+
+    def test_declares_after_the_full_grace_and_alerts_once(self):
+        self._tick(False, 1000.0)
+        due, errors, _ = self._tick(False, 1000.0 + gc._UPSTREAM_GRACE_SECONDS - 1)
+        self.assertFalse(due)
+        self.assertFalse(gc._upstream_recovery)
+        due, errors, cap = self._tick(False, 1000.0 + gc._UPSTREAM_GRACE_SECONDS)
+        self.assertTrue(due)
+        self.assertTrue(gc._upstream_recovery)
+        self.assertEqual(gc._current_state, gc.State.UPSTREAM_DOWN)
+        self.assertEqual(sum(e.startswith("ALERT_UPSTREAM_DOWN ") for e in errors), 1)
+        cap.assert_called_once()  # evidence logged before any relaunch
+        _due, errors, _ = self._tick(False, 1000.0 + gc._UPSTREAM_GRACE_SECONDS + 30)
+        self.assertFalse(any(e.startswith("ALERT_UPSTREAM_DOWN ") for e in errors))
+
+    def test_any_other_reading_restarts_the_count(self):
+        self._tick(False, 1000.0)
+        self._tick(None, 1300.0)   # unreadable: the run is broken
+        self._tick(False, 1330.0)
+        due, _, _ = self._tick(False, 1330.0 + gc._UPSTREAM_GRACE_SECONDS - 1)
+        self.assertFalse(due)
+        due, _, _ = self._tick(False, 1330.0 + gc._UPSTREAM_GRACE_SECONDS)
+        self.assertTrue(due)
+
+    def test_reset_window_reports_the_truth_but_does_not_act(self):
+        self._tick(False, 0.0, in_window=True)
+        due, errors, _ = self._tick(False, 7200.0, in_window=True)
+        self.assertFalse(due)
+        self.assertFalse(gc._upstream_recovery)
+        fields = gc._upstream_health_fields()
+        self.assertIs(fields["upstream_connected"], False)
+        self.assertIsNotNone(fields["upstream_down_seconds"])
+        self.assertFalse(any(e.startswith("ALERT_") for e in errors))
+
+    def test_grace_counts_only_time_outside_the_window(self):
+        self._tick(False, 0.0, in_window=True)
+        self._tick(False, 3600.0, in_window=False)   # window just ended
+        due, _, _ = self._tick(False, 3600.0 + gc._UPSTREAM_GRACE_SECONDS - 1)
+        self.assertFalse(due)
+        due, _, _ = self._tick(False, 3600.0 + gc._UPSTREAM_GRACE_SECONDS)
+        self.assertTrue(due)
+
+    def test_connected_reading_ends_recovery(self):
+        self._tick(False, 0.0)
+        self._tick(False, float(gc._UPSTREAM_GRACE_SECONDS))
+        self.assertTrue(gc._upstream_recovery)
+        due, _, _ = self._tick(True, gc._UPSTREAM_GRACE_SECONDS + 30.0)
+        self.assertFalse(due)
+        self.assertFalse(gc._upstream_recovery)
+        self.assertEqual(gc._current_state, gc.State.MONITORING)
+        self.assertIsNone(gc._upstream_health_fields()["upstream_down_seconds"])
+
+    def test_unknown_reading_during_recovery_keeps_recovering(self):
+        # After a failed relaunch the main window may not exist at all.
+        self._tick(False, 0.0)
+        self._tick(False, float(gc._UPSTREAM_GRACE_SECONDS))
+        self._tick(None, gc._UPSTREAM_GRACE_SECONDS + 30.0)
+        self.assertTrue(gc._upstream_recovery)
+
+    # --- relaunching ---
+
+    def _relaunch(self, ok):
+        with patch.object(gc, "do_restart_in_place", return_value=ok) as r, \
+             patch.object(gc, "_halt_for_operator") as halt, \
+             patch.object(gc, "_await_manual_login", return_value=False), \
+             _capture_controller_errors():
+            gc._upstream_relaunch()
+        return r, halt
+
+    def test_failed_relaunches_back_off_to_hourly(self):
+        gc._upstream_recovery = True
+        delays = []
+        with patch.object(gc.time, "monotonic", return_value=0.0):
+            for _ in range(5):
+                self._relaunch(False)
+                delays.append(gc._upstream_next_relaunch_at)
+            countdown = gc._upstream_health_fields()["next_relaunch_in_seconds"]
+        self.assertEqual(delays, [600, 1200, 2400, 3600, 3600])
+        self.assertEqual(gc._current_state, gc.State.UPSTREAM_DOWN)
+        self.assertEqual(countdown, 3600)
+
+    def test_successful_relaunch_ends_recovery(self):
+        gc._upstream_recovery = True
+        self._relaunch(True)
+        self.assertFalse(gc._upstream_recovery)
+        self.assertEqual(gc._current_state, gc.State.MONITORING)
+
+    def test_operator_only_2fa_failure_still_halts(self):
+        gc._upstream_recovery = True
+        def fails_needing_operator():
+            gc._twofa_needs_operator = True
+            return False
+        with patch.object(gc, "do_restart_in_place", side_effect=fails_needing_operator), \
+             patch.object(gc, "_halt_for_operator") as halt, \
+             patch.object(gc, "_await_manual_login", return_value=False), \
+             _capture_controller_errors():
+            gc._upstream_relaunch()
+        halt.assert_called_once()
+
+    def test_health_reports_recovery_and_turns_unhealthy(self):
+        gc._upstream_recovery = True
+        gc._upstream_connected = False
+        gc._current_state = gc.State.UPSTREAM_DOWN
+        with patch.object(gc, "is_api_port_open", return_value=True), \
+             patch.object(gc, "GATEWAY_PROC", MagicMock(**{"poll.return_value": None, "pid": 7})):
+            snap = gc._build_health_snapshot()
+        self.assertEqual(snap["status"], "unhealthy")
+        self.assertEqual(snap["state"], "UPSTREAM_DOWN")
+        self.assertIs(snap["upstream_recovery_active"], True)
+        self.assertIs(snap["upstream_connected"], False)
+
+
+class _StopLoop(Exception):
+    pass
+
+
+class TestMonitorLoopUpstream(unittest.TestCase):
+    """The monitor loop end to end, on a fake clock: during an outage the
+    watchdog owns recovery and the CCP escalation paths stay out of it."""
+
+    def setUp(self):
+        gc._upstream_reset()
+        gc._upstream_connected = None
+        gc._twofa_needs_operator = False
+        self.prev_state = gc._current_state
+        gc._current_state = gc.State.MONITORING
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        gc._upstream_reset()
+        gc._upstream_connected = None
+        gc._current_state = self.prev_state
+
+    def _run(self, seconds, reading=False, jvm_alive=True, port_open=True,
+             relaunch_ok=False):
+        clock = {"t": 0.0}
+
+        def fake_sleep(dt):
+            clock["t"] += dt
+            if clock["t"] > seconds:
+                raise _StopLoop()
+
+        # Escalation paths end the run (they continue without sleeping, so
+        # the fake clock would never reach the end), and the assertions
+        # below then show they were reached.
+        proc = MagicMock(pid=11, returncode=0)
+        proc.poll.return_value = None if jvm_alive else 0
+        with patch.object(gc.time, "monotonic", side_effect=lambda: clock["t"]), \
+             patch.object(gc.time, "sleep", side_effect=fake_sleep), \
+             patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_read_upstream_connected", return_value=reading), \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=False), \
+             patch.object(gc, "_capture_upstream_diagnostics"), \
+             patch.object(gc, "_logoff_backstop_boundary", return_value=None), \
+             patch.object(gc, "is_api_port_open",
+                          side_effect=lambda *_: port_open(gc._upstream_recovery)
+                          if callable(port_open) else port_open), \
+             patch.object(gc, "do_restart_in_place", return_value=relaunch_ok) as relaunch, \
+             patch.object(gc, "_recover_jvm_or_escalate",
+                          side_effect=_StopLoop) as recover, \
+             patch.object(gc, "_escalate_to_jvm_restart",
+                          side_effect=_StopLoop) as escalate, \
+             patch.object(gc, "attempt_reauth") as reauth, \
+             _capture_controller_errors() as errors:
+            with self.assertRaises(_StopLoop):
+                gc.monitor_loop(object())
+        return relaunch, recover, escalate, reauth, errors
+
+    def test_outage_relaunches_on_schedule(self):
+        relaunch, recover, escalate, reauth, errors = self._run(2400)
+        # First reading at 30 s, declared and relaunched at 630 s, again at
+        # 1230 s; the next waits 1200 s, until 2430 s, past this run's end.
+        self.assertEqual(relaunch.call_count, 2)
+        self.assertEqual(sum(e.startswith("ALERT_UPSTREAM_DOWN ") for e in errors), 1)
+        recover.assert_not_called()
+        escalate.assert_not_called()
+
+    def test_closed_port_during_recovery_is_not_escalated(self):
+        # A relaunch that cannot log in leaves the port closed. Before the
+        # outage is declared the port is open, as it was in the field.
+        relaunch, recover, escalate, reauth, _ = self._run(
+            2400, port_open=lambda recovering: not recovering)
+        self.assertEqual(relaunch.call_count, 2)
+        reauth.assert_not_called()
+        recover.assert_not_called()
+        escalate.assert_not_called()
+
+    def test_dead_jvm_during_recovery_waits_for_the_watchdog(self):
+        gc._upstream_recovery = True
+        gc._upstream_next_relaunch_at = 10_000.0
+        relaunch, recover, escalate, _, _ = self._run(900, reading=None, jvm_alive=False)
+        recover.assert_not_called()
+        escalate.assert_not_called()
+        relaunch.assert_not_called()
+
+    def test_healthy_upstream_never_relaunches(self):
+        relaunch, recover, escalate, reauth, errors = self._run(3000, reading=True)
+        relaunch.assert_not_called()
+        self.assertFalse(any(e.startswith("ALERT_") for e in errors))
+
+
+class TestLogoffBackstop(unittest.TestCase):
+    """Gateway's Lock and Exit timer fired on 1 of 5 observed days. When the
+    same JVM is still up 5 minutes past AUTO_LOGOFF_TIME, log off for it."""
+
+    def setUp(self):
+        self.prev = (gc._JVM_STARTED_WALL, gc._logoff_backstop_done_for,
+                     gc._logoff_backstop_warned)
+        gc._logoff_backstop_done_for = None
+        gc._logoff_backstop_warned = False
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        (gc._JVM_STARTED_WALL, gc._logoff_backstop_done_for,
+         gc._logoff_backstop_warned) = self.prev
+
+    def test_parses_the_formats_operators_use(self):
+        p = gc._parse_wall_clock
+        self.assertEqual(p("05:01 PM"), (17, 1))
+        self.assertEqual(p("5:01 pm"), (17, 1))
+        self.assertEqual(p("12:00 AM"), (0, 0))
+        self.assertEqual(p("12:30 PM"), (12, 30))
+        self.assertEqual(p("11:39 AM"), (11, 39))   # AM: the dialog can't, we can
+        self.assertEqual(p("17:01"), (17, 1))
+        self.assertEqual(p("00:30"), (0, 30))
+
+    def test_refuses_what_it_would_have_to_guess(self):
+        for v in ("05:01", "12:00", "13:01 PM", "25:00", "17:61", "", "noon"):
+            self.assertIsNone(gc._parse_wall_clock(v), v)
+
+    def _boundary(self, now, started, env=None):
+        env = {"AUTO_LOGOFF_TIME": "05:01 PM", "AUTO_RESTART_TIME": "", **(env or {})}
+        gc._JVM_STARTED_WALL = started
+        with patch.dict(os.environ, env):
+            return gc._logoff_backstop_boundary(now)
+
+    def test_acts_five_minutes_after_a_missed_boundary(self):
+        day = datetime(2026, 10, 2)
+        started = day.replace(hour=13, minute=57)
+        self.assertIsNone(self._boundary(day.replace(hour=17, minute=5, second=59), started))
+        b = self._boundary(day.replace(hour=17, minute=6), started)
+        self.assertEqual(b, day.replace(hour=17, minute=1))
+
+    def test_a_jvm_started_after_the_boundary_waits_for_tomorrow(self):
+        day = datetime(2026, 10, 2)
+        self.assertIsNone(self._boundary(day.replace(hour=17, minute=40),
+                                         day.replace(hour=17, minute=30)))
+
+    def test_acts_once_per_boundary(self):
+        day = datetime(2026, 10, 2)
+        gc._logoff_backstop_done_for = day.replace(hour=17, minute=1)
+        self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
+                                         day.replace(hour=9)))
+
+    def test_restart_mode_is_left_to_adoption(self):
+        day = datetime(2026, 10, 2)
+        self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
+                                         day.replace(hour=9),
+                                         {"AUTO_RESTART_TIME": "11:45 PM"}))
+
+    def test_ambiguous_time_is_refused_with_one_warning(self):
+        day = datetime(2026, 10, 2)
+        with self.assertLogs("controller", level="WARNING") as cm:
+            self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
+                                             day.replace(hour=9),
+                                             {"AUTO_LOGOFF_TIME": "05:01"}))
+            self._boundary(day.replace(hour=17, minute=21), day.replace(hour=9),
+                           {"AUTO_LOGOFF_TIME": "05:01"})
+            gc.log.warning("end")
+        self.assertEqual(sum("Logoff backstop off" in m for m in cm.output), 1)
+
+    def test_run_logs_off_cleanly_and_says_so(self):
+        proc = MagicMock(pid=24)
+        proc.poll.return_value = None
+        gc._JVM_STARTED_WALL = datetime(2026, 10, 2, 13, 57)
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_attempt_clean_logout",
+                          return_value=(True, "succeeded", "exited")), \
+             self.assertLogs("controller", level="INFO") as cm:
+            gc._run_logoff_backstop(datetime(2026, 10, 2, 17, 1))
+        self.assertTrue(any("LOGOFF_BACKSTOP mode=" in m and "boundary=17:01" in m
+                            for m in cm.output))
+        proc.terminate.assert_not_called()
+
+    def test_run_falls_back_to_sigterm(self):
+        proc = MagicMock(pid=24)
+        proc.poll.return_value = None
+        gc._JVM_STARTED_WALL = datetime(2026, 10, 2, 13, 57)
+        with patch.object(gc, "GATEWAY_PROC", proc), \
+             patch.object(gc, "_attempt_clean_logout",
+                          return_value=(False, "failed_timeout", "stalled")), \
+             self.assertLogs("controller", level="INFO"):
+            gc._run_logoff_backstop(datetime(2026, 10, 2, 17, 1))
+        proc.terminate.assert_called_once()
+        proc.kill.assert_not_called()
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
