@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.15.0
 
 - **`/health` can now be 503 while the API port is open.** A new state,
   `UPSTREAM_DOWN`, means Gateway has reported no connection to IBKR for
