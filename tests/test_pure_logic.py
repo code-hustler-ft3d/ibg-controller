@@ -4094,9 +4094,16 @@ class TestUpstreamWatchdog(unittest.TestCase):
 
     def test_successful_relaunch_ends_recovery(self):
         gc._upstream_recovery = True
-        self._relaunch(True)
+        gc._upstream_down_since = 0.0
+        with patch.object(gc.time, "monotonic", return_value=1890.0), \
+             self.assertLogs("controller", level="INFO") as cm:
+            self._relaunch(True)
         self.assertFalse(gc._upstream_recovery)
         self.assertEqual(gc._current_state, gc.State.MONITORING)
+        # Both all-clear forms carry the same keys monitors parse.
+        self.assertTrue(any("UPSTREAM_RESTORED mode=" in m
+                            and "down_seconds=1890" in m and "relaunches=1" in m
+                            for m in cm.output), cm.output)
 
     def test_operator_only_2fa_failure_still_halts(self):
         gc._upstream_recovery = True

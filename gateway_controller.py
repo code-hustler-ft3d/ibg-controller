@@ -4674,8 +4674,10 @@ def _upstream_relaunch():
             return
         ok = True
     if ok:
+        down = (0 if _upstream_down_since is None
+                else time.monotonic() - _upstream_down_since)
         log.info(f"UPSTREAM_RESTORED mode={TRADING_MODE} "
-                 f"relaunches={n} (logged in again)")
+                 f"down_seconds={int(down)} relaunches={n}")
         _upstream_reset()
         _upstream_connected = None  # re-read on the next check
         _set_state(State.MONITORING)
