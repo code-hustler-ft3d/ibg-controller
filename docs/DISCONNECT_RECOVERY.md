@@ -439,8 +439,9 @@ nightly cold login back). Diagnostics: the `ALERT_AUTO_RESTART`
 
 ## Scenario: IBKR daily maintenance window (v0.5.10+)
 
-**TL;DR**: IBKR runs a server-side maintenance window at ~23:45-00:15
-ET during which every Gateway/TWS session receives a cooperative
+**TL;DR**: IBKR runs a daily server-side reset — published for North
+America as 00:15-01:45 ET Sunday-Friday and 00:00-02:00 ET on Saturday
+— during which every Gateway/TWS session can receive a cooperative
 shutdown (JVM exit code 0). The controller detects this via wallclock
 and delays the next auth attempt 8 minutes so IBKR's auth server can
 drain the prior session. No operator action needed.
@@ -453,7 +454,7 @@ drain the prior session. No operator action needed.
 - Immediately followed by:
   ```
   ALERT_IBKR_MAINTENANCE_RECOVERY delay_seconds=480 mode=live reason="JVM exited with code 0"
-  Inside IBKR maintenance window (~23:45-00:15 ET); sleeping 480s before re-auth ...
+  Inside IBKR's reset window (23:30-02:00 America/New_York); sleeping 480s before re-auth ...
   ```
 - ~8 min later: controller re-auths cleanly and API port reopens.
 - `/health` flips to `unhealthy` during the delay (`jvm_alive: false`)
@@ -476,8 +477,10 @@ state (2026-04-20/21 incident).
 
 Automatic. The `_is_ibkr_maintenance_window` check in
 `_recover_jvm_or_escalate` adds the delay before any re-auth when the
-wallclock sits inside 23:30-00:30 ET. Cold starts inside the window
-apply the same guard before the first Log In click.
+wallclock sits inside the reset window: 23:30-02:00 ET by default
+(23:30-00:30 before v0.15.0), set with `IBKR_RESET_WINDOWS` and
+`IBKR_RESET_TZ` for accounts hosted in Europe or Asia. Cold starts
+inside the window apply the same guard before the first Log In click.
 
 Tune `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` upward if you see
 `ALERT_CCP_PERSISTENT` firing within a few minutes of
@@ -487,25 +490,59 @@ to outlast the drain in your region.
 ### Prevention
 
 - Don't `docker restart` an `ibg-controller` container during
-  23:30-00:30 ET. The cold-start guard catches this case but you'll
+  the reset window (23:30-02:00 ET by default). The cold-start guard catches this case but you'll
   sit with `jvm_alive: false` for 8 min instead of just riding
   through the maintenance exit cleanly.
 - If your orchestrator's restart policy can force a container recycle
   inside this window (e.g., health-check timeouts that fire because
   `/health` is `unhealthy` during the delay), extend the health-check
   tolerance to > `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` during the
-  23:30-00:30 ET band. Otherwise the orchestrator will recycle the
+  reset window. Otherwise the orchestrator will recycle the
   container, the cold-start guard applies again, and you oscillate.
 
 ### How this differs from a real CCP lockout
 
 | Signal | Maintenance window | CCP lockout |
 |---|---|---|
-| Wallclock | 23:30-00:30 ET | anytime |
+| Wallclock | inside the reset window (23:30-02:00 ET by default) | anytime |
 | JVM exit code preceding it | 0 (cooperative) | any — or no exit at all |
 | First alert emitted | `ALERT_IBKR_MAINTENANCE_RECOVERY` (INFO) | `ALERT_CCP_PERSISTENT` (WARNING) after streak ≥ 3 |
 | Operator action | ❌ not needed | ✅ log into IBKR Mobile |
 | Auto-recovery | ✅ after the configured delay | ❌ |
+
+---
+
+## Scenario: Gateway disconnected from IBKR (v0.15.0+)
+
+**TL;DR**: Gateway's main window says "Interactive Brokers API Server:
+disconnected", often behind a "Connection to server failed" modal, and
+it doesn't reconnect by itself. Its API port stays open, so clients
+connect and every request times out. The controller notices from the
+label, waits 10 minutes outside IBKR's reset window, then relaunches
+that mode, backing off to hourly until Gateway reports connected.
+
+### Symptoms
+
+- `/health`: `upstream_connected: false`, `upstream_down_seconds`
+  climbing; after the grace period `state: "UPSTREAM_DOWN"` and 503.
+- `ALERT_UPSTREAM_DOWN`, followed by the captured window list, modal
+  text, labels and `launcher.log` tail, then a relaunch.
+- `UPSTREAM_RESTORED` once Gateway is connected again.
+
+### Root cause
+
+Seen 2026-10-03: a reconnect failed with `SSLHandshakeException:
+Remote host terminated the handshake`, Gateway showed the modal, and
+stayed disconnected for about 17 hours. Dismissing the modal did not
+start a reconnect; restarting did.
+
+### Operator action
+
+Usually none. Don't restart the container while
+`upstream_recovery_active` is `true`: that also logs out the other
+mode, and the controller is already relaunching on a schedule
+(`next_relaunch_in_seconds`). If it keeps failing for hours, check
+IBKR's system status page.
 
 ---
 
@@ -516,7 +553,9 @@ to outlast the drain in your region.
 | Short API port flap | ✅ next monitor cycle | ❌ not needed | `/health` flips briefly |
 | Gateway JVM crash | ✅ in-place restart | ❌ not needed | `jvm_alive: false` in `/health` |
 | Gateway's own daily auto-restart | ✅ adopts the new JVM | ❌ not needed | `ALERT_AUTO_RESTART status=adopted` at `AUTO_RESTART_TIME` |
-| IBKR daily maintenance window | ✅ 8-min delay + re-auth | ❌ not needed | `ALERT_IBKR_MAINTENANCE_RECOVERY` at ~23:45 ET |
+| IBKR daily maintenance window | ✅ 8-min delay + re-auth | ❌ not needed | `ALERT_IBKR_MAINTENANCE_RECOVERY` inside the reset window |
+| Gateway disconnected from IBKR, port still open | ✅ relaunch after 10 min, backing off to hourly | ❌ not needed | `ALERT_UPSTREAM_DOWN`, `state: "UPSTREAM_DOWN"` |
+| Gateway skips its scheduled logoff | ✅ the controller logs off 5 min later | ❌ not needed | `LOGOFF_BACKSTOP` |
 | CCP rate limiter tripped (genuine) | ✅ silent cool-down | ❌ not needed (wait up to 20 min) | `ccp_backoff_seconds > 0` |
 | **CCP lockout — concurrent/stranded session** | ❌ cannot auto-recover | ✅ log into IBKR Mobile (force-kicks TWS slot; web Portal does NOT) | `ALERT_CCP_PERSISTENT` + `ccp_lockout_streak >= 3` |
 | **2FA automation failed** | ❌ cannot auto-recover | ✅ fix `TWOFACTOR_CODE` or VNC-enter | `ALERT_2FA_FAILED` |

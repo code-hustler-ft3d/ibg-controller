@@ -214,8 +214,9 @@ public class GatewayInputAgent {
                 return doSetTextInWindow(rest);
             }
             case "CLICK_IN_WIN": {
-                // Click a button by text (or accessible name) inside
-                // the first showing window whose title contains <substr>.
+                // Click a button by text (or accessible name) inside a
+                // showing window whose title contains <substr>, trying
+                // modal dialogs first.
                 // Protocol: CLICK_IN_WIN <title_substr>|<button_text>
                 return doClickInWindow(rest);
             }
@@ -458,25 +459,52 @@ public class GatewayInputAgent {
         String titleSubstr = rest.substring(0, pipe);
         String buttonText = rest.substring(pipe + 1);
 
-        Window target = findWindowByTitleSubstring(titleSubstr);
-        if (target == null) {
+        List<Window> targets = findWindowsByTitleSubstringModalFirst(titleSubstr);
+        if (targets.isEmpty()) {
             return "ERR not_found window_title_substring=" + titleSubstr;
         }
 
-        for (AbstractButton b : collect(target, AbstractButton.class)) {
-            if (!b.isShowing() || !b.isEnabled()) continue;
-            String btnText = b.getText();
-            String btnAccName = accessibleName(b);
-            if (buttonText.equals(btnText) || buttonText.equals(btnAccName)) {
-                SwingUtilities.invokeLater(b::doClick);
-                try {
-                    Thread.sleep(50);
-                } catch (InterruptedException ignored) {
+        for (Window target : targets) {
+            for (AbstractButton b : collect(target, AbstractButton.class)) {
+                if (!b.isShowing() || !b.isEnabled()) continue;
+                String btnText = b.getText();
+                String btnAccName = accessibleName(b);
+                if (buttonText.equals(btnText) || buttonText.equals(btnAccName)) {
+                    SwingUtilities.invokeLater(b::doClick);
+                    try {
+                        Thread.sleep(50);
+                    } catch (InterruptedException ignored) {
+                    }
+                    return "OK";
                 }
-                return "OK";
             }
         }
         return "ERR not_found button=" + buttonText + " in_window=" + titleSubstr;
+    }
+
+    /**
+     * Every showing window whose title contains the substring, modal
+     * dialogs first. Gateway titles its error modals "IBKR Gateway", the
+     * same as its main frame, so taking the first match alone searched
+     * the frame and never found the dialog's button (field report
+     * 2026-10-03). Only CLICK_IN_WIN uses this: closing a window must
+     * keep targeting the main frame, which the clean logout relies on.
+     */
+    private static List<Window> findWindowsByTitleSubstringModalFirst(String titleSubstring) {
+        List<Window> modal = new ArrayList<>();
+        List<Window> others = new ArrayList<>();
+        for (Window w : Window.getWindows()) {
+            if (!w.isShowing()) continue;
+            String title = "";
+            if (w instanceof Frame) title = ((Frame) w).getTitle();
+            else if (w instanceof Dialog) title = ((Dialog) w).getTitle();
+            if (title == null) title = "";
+            if (!title.contains(titleSubstring)) continue;
+            if (w instanceof Dialog && ((Dialog) w).isModal()) modal.add(w);
+            else others.add(w);
+        }
+        modal.addAll(others);
+        return modal;
     }
 
     private static String doClick(String name) {

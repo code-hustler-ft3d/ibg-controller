@@ -1,7 +1,11 @@
+import java.awt.BorderLayout;
 import java.awt.Component;
+import java.awt.Dialog;
 import java.awt.Frame;
 import javax.swing.DefaultListCellRenderer;
+import javax.swing.JButton;
 import javax.swing.JDialog;
+import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JList;
 import javax.swing.JScrollPane;
@@ -87,6 +91,26 @@ public class JListSelectFixture {
             // Two entries that differ only in case: must be refused, not guessed.
             show("Ambiguous Case",
                  new JList<>(new String[] {"Mobile Authenticator app", "MOBILE AUTHENTICATOR APP"}), 1);
+
+            // Gateway's shape on 2026-10-03: an error modal with the same
+            // title as the main frame, which has no OK button of its own.
+            // Document-modal so it blocks only its owner, not the lists above.
+            JFrame main = new JFrame("Same Title Gateway");
+            main.add(new JLabel("Interactive Brokers API Server"));
+            main.pack();
+            main.setVisible(true);
+            JDialog modal = new JDialog(main, "Same Title Gateway",
+                                        Dialog.ModalityType.DOCUMENT_MODAL);
+            JButton ok = new JButton("OK");
+            ok.addActionListener(e -> {
+                System.out.println("CLICKED|same-title-modal");
+                System.out.flush();
+                modal.dispose();
+            });
+            modal.add(new JLabel("Connection to server failed"), BorderLayout.CENTER);
+            modal.add(ok, BorderLayout.SOUTH);
+            modal.pack();
+            SwingUtilities.invokeLater(() -> modal.setVisible(true));
         });
         System.out.println("READY");
         System.out.flush();
