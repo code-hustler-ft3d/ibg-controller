@@ -3973,6 +3973,11 @@ class TestUpstreamWatchdog(unittest.TestCase):
         self.prev_state = gc._current_state
         gc._current_state = gc.State.MONITORING
         self.addCleanup(self._restore)
+        for p in (patch.dict(os.environ, {"UPSTREAM_RELAUNCH": "yes"}),
+                  patch.object(gc, "_latest_login_rejected_credentials",
+                               return_value=False)):
+            p.start()
+            self.addCleanup(p.stop)
 
     def _restore(self):
         gc._upstream_reset()
@@ -3997,6 +4002,14 @@ class TestUpstreamWatchdog(unittest.TestCase):
         # "1 connected" belongs to API Client; with the server label
         # missing the state is unknown, not connected.
         self.assertIsNone(self._read(self.CONNECTED[2:]))
+
+    def test_only_known_values_count(self):
+        # A blank, a new wording or a translation is unknown, never a
+        # reason to relaunch (audit 2026-10-04).
+        for value in ("", "connecting", "verbunden", "OFF"):
+            labels = list(self.CONNECTED)
+            labels[1] = ("IBKR Gateway", value)
+            self.assertIsNone(self._read(labels), repr(value))
 
     def test_unreadable_agent_is_unknown(self):
         with patch.object(gc, "agent_labels", side_effect=OSError("gone")):
@@ -4070,6 +4083,51 @@ class TestUpstreamWatchdog(unittest.TestCase):
         self._tick(None, gc._UPSTREAM_GRACE_SECONDS + 30.0)
         self.assertTrue(gc._upstream_recovery)
 
+    def test_blip_is_logged_quietly_without_the_all_clear_token(self):
+        # IBKR's nightly reset drops the link every night; only an outage
+        # that raised ALERT_UPSTREAM_DOWN gets UPSTREAM_RESTORED.
+        self._tick(False, 0.0)
+        with patch.object(gc, "_read_upstream_connected", return_value=True), \
+             self.assertLogs("controller", level="INFO") as cm:
+            gc._upstream_tick(120.0)
+        self.assertFalse(any("UPSTREAM_RESTORED" in m for m in cm.output))
+        self.assertTrue(any("reconnected to IBKR after 120s" in m for m in cm.output))
+
+    def test_without_unattended_login_it_reports_but_does_not_relaunch(self):
+        # IB Key, passkey or VNC logins need a person: a relaunch would mean
+        # a phone prompt at 2 AM or a halt. Report, don't act.
+        with patch.dict(os.environ, {"UPSTREAM_RELAUNCH": ""}), \
+             patch.object(gc, "TOTP_SECRET", ""):
+            self._tick(False, 0.0)
+            due, errors, cap = self._tick(False, float(gc._UPSTREAM_GRACE_SECONDS))
+        self.assertFalse(due)
+        self.assertFalse(gc._upstream_recovery)
+        self.assertEqual(gc._current_state, gc.State.UPSTREAM_DOWN)
+        alert = [e for e in errors if e.startswith("ALERT_UPSTREAM_DOWN ")]
+        self.assertEqual(len(alert), 1)
+        self.assertIn("not relaunching", alert[0])
+        cap.assert_called_once()
+
+    def test_unattended_login_relaunches_by_default(self):
+        with patch.dict(os.environ, {"UPSTREAM_RELAUNCH": ""}), \
+             patch.object(gc, "TOTP_SECRET", "JBSWY3DPEHPK3PXP"):
+            self._tick(False, 0.0)
+            due, _, _ = self._tick(False, float(gc._UPSTREAM_GRACE_SECONDS))
+        self.assertTrue(due)
+
+    def test_explicit_no_turns_relaunching_off(self):
+        with patch.dict(os.environ, {"UPSTREAM_RELAUNCH": "no"}), \
+             patch.object(gc, "TOTP_SECRET", "JBSWY3DPEHPK3PXP"):
+            self.assertFalse(gc._upstream_relaunch_enabled())
+
+    def test_reset_window_pushes_a_due_relaunch_past_its_end(self):
+        gc._upstream_declared = True
+        gc._upstream_recovery = True
+        gc._upstream_next_relaunch_at = 100.0
+        self._tick(False, 200.0, in_window=True)
+        self.assertGreaterEqual(gc._upstream_next_relaunch_at,
+                                200.0 + gc._UPSTREAM_GRACE_SECONDS)
+
     # --- relaunching ---
 
     def _relaunch(self, ok):
@@ -4091,6 +4149,43 @@ class TestUpstreamWatchdog(unittest.TestCase):
         self.assertEqual(delays, [600, 1200, 2400, 3600, 3600])
         self.assertEqual(gc._current_state, gc.State.UPSTREAM_DOWN)
         self.assertEqual(countdown, 3600)
+
+    def test_backoff_survives_a_relaunch_that_logged_in_but_did_not_reconnect(self):
+        # Without this, a label that keeps reading disconnected after a good
+        # login relaunched every ~11 minutes forever.
+        gc._upstream_recovery = True
+        gc._upstream_declared = True
+        with patch.object(gc.time, "monotonic", return_value=0.0):
+            self._relaunch(True)
+        self.assertEqual(gc._upstream_relaunches, 1)
+        self._tick(False, 1000.0)
+        due, _, _ = self._tick(False, 1000.0 + gc._UPSTREAM_GRACE_SECONDS)
+        self.assertFalse(due)   # next one waits, it doesn't fire at once
+        self.assertEqual(gc._upstream_next_relaunch_at,
+                         1000.0 + gc._UPSTREAM_GRACE_SECONDS + 600)
+
+    def test_ccp_lockout_on_a_relaunch_goes_to_the_ccp_handling(self):
+        gc._upstream_recovery = True
+        prev = gc._ccp_lockout_streak
+        self.addCleanup(setattr, gc, "_ccp_lockout_streak", prev)
+        def relaunch_hits_ccp():
+            gc._ccp_lockout_streak += 1
+            return False
+        with patch.object(gc, "do_restart_in_place", side_effect=relaunch_hits_ccp), \
+             patch.object(gc, "_escalate_to_jvm_restart", return_value=False) as esc, \
+             _capture_controller_errors():
+            gc._upstream_relaunch()
+        esc.assert_called_once()
+        self.assertFalse(gc._upstream_recovery)
+
+    def test_two_relaunches_with_the_credential_fingerprint_halt(self):
+        gc._upstream_recovery = True
+        with patch.object(gc, "_latest_login_rejected_credentials", return_value=True), \
+             patch.object(gc, "_is_ibkr_maintenance_window", return_value=False):
+            _r, halt = self._relaunch(False)
+            halt.assert_not_called()
+            _r, halt = self._relaunch(False)
+            halt.assert_called_once()
 
     def test_successful_relaunch_ends_recovery(self):
         gc._upstream_recovery = True
@@ -4181,6 +4276,11 @@ class TestMonitorLoopUpstream(unittest.TestCase):
         self.prev_state = gc._current_state
         gc._current_state = gc.State.MONITORING
         self.addCleanup(self._restore)
+        for p in (patch.dict(os.environ, {"UPSTREAM_RELAUNCH": "yes"}),
+                  patch.object(gc, "_latest_login_rejected_credentials",
+                               return_value=False)):
+            p.start()
+            self.addCleanup(p.stop)
 
     def _restore(self):
         gc._upstream_reset()
@@ -4249,6 +4349,18 @@ class TestMonitorLoopUpstream(unittest.TestCase):
         escalate.assert_not_called()
         relaunch.assert_not_called()
 
+    def test_gateway_self_restart_during_recovery_is_adopted(self):
+        # Issue #23: Gateway's own nightly restart must be adopted, or the
+        # next relaunch starts a second Gateway beside it.
+        gc._upstream_recovery = True
+        gc._upstream_declared = True
+        gc._upstream_next_relaunch_at = 10_000.0
+        self.addCleanup(setattr, gc, "_upstream_dead_jvm", None)
+        with patch.object(gc, "_adopt_self_restarted_gateway",
+                          return_value=False) as adopt:
+            self._run(300, reading=None, jvm_alive=False)
+        adopt.assert_called_once()   # once per exited JVM, not every loop
+
     def test_healthy_upstream_never_relaunches(self):
         relaunch, recover, escalate, reauth, errors = self._run(3000, reading=True)
         relaunch.assert_not_called()
@@ -4261,7 +4373,8 @@ class TestLogoffBackstop(unittest.TestCase):
 
     def setUp(self):
         self.prev = (gc._JVM_STARTED_WALL, gc._logoff_backstop_done_for,
-                     gc._logoff_backstop_warned, gc._logoff_backstop_armed)
+                     gc._logoff_backstop_warned, gc._logoff_backstop_armed,
+                     gc._logoff_backstop_armed_at)
         gc._logoff_backstop_done_for = None
         gc._logoff_backstop_warned = False
         gc._logoff_backstop_armed = True  # as after a verified read-back
@@ -4269,7 +4382,8 @@ class TestLogoffBackstop(unittest.TestCase):
 
     def _restore(self):
         (gc._JVM_STARTED_WALL, gc._logoff_backstop_done_for,
-         gc._logoff_backstop_warned, gc._logoff_backstop_armed) = self.prev
+         gc._logoff_backstop_warned, gc._logoff_backstop_armed,
+         gc._logoff_backstop_armed_at) = self.prev
 
     def test_parses_the_formats_operators_use(self):
         p = gc._parse_wall_clock
@@ -4288,6 +4402,7 @@ class TestLogoffBackstop(unittest.TestCase):
     def _boundary(self, now, started, env=None):
         env = {"AUTO_LOGOFF_TIME": "05:01 PM", "AUTO_RESTART_TIME": "", **(env or {})}
         gc._JVM_STARTED_WALL = started
+        gc._logoff_backstop_armed_at = started
         with patch.dict(os.environ, env):
             return gc._logoff_backstop_boundary(now)
 
@@ -4334,6 +4449,7 @@ class TestLogoffBackstop(unittest.TestCase):
              patch.object(gc, "agent_settext_by_label", return_value=True), \
              patch.object(gc, "_config_close", return_value=True), \
              patch.object(gc, "_verify_lock_exit_time_persisted", return_value=verified), \
+             patch.object(gc, "_gateway_zone_matches_local", return_value=True), \
              patch.object(gc.time, "sleep"), \
              _capture_controller_errors():
             gc.handle_post_login_config()
@@ -4359,11 +4475,82 @@ class TestLogoffBackstop(unittest.TestCase):
                 pass
         self.assertFalse(gc._logoff_backstop_armed)
 
+    def test_a_session_that_logged_in_after_the_boundary_is_left_alone(self):
+        # JVM launched 16:50, login held up until 17:25 by a CCP backoff or
+        # a 2FA wait: Gateway would log it off tomorrow, so must we.
+        day = datetime(2026, 10, 2)
+        gc._JVM_STARTED_WALL = day.replace(hour=16, minute=50)
+        with patch.dict(os.environ, {"AUTO_LOGOFF_TIME": "05:01 PM",
+                                     "AUTO_RESTART_TIME": ""}):
+            gc._logoff_backstop_armed_at = day.replace(hour=17, minute=25)
+            self.assertIsNone(gc._logoff_backstop_boundary(day.replace(hour=17, minute=26)))
+
+    def test_not_more_than_an_hour_late(self):
+        day = datetime(2026, 10, 2)
+        self.assertIsNone(self._boundary(day.replace(hour=18, minute=2),
+                                         day.replace(hour=9)))
+
+    def test_a_boundary_just_before_midnight_still_fires(self):
+        day = datetime(2026, 10, 2)
+        b = self._boundary(datetime(2026, 10, 3, 0, 4), day.replace(hour=9),
+                           {"AUTO_LOGOFF_TIME": "11:58 PM"})
+        self.assertEqual(b, day.replace(hour=23, minute=58))
+
+    def test_zone_mismatch_keeps_it_off(self):
+        import tempfile as _tf
+        with _tf.TemporaryDirectory() as d:
+            with open(os.path.join(d, "jts.ini"), "w") as f:
+                f.write("[IBGateway]\nTimeZone=Pacific/Kiritimati\n")
+            with patch.object(gc, "JTS_CONFIG_DIR", d), \
+                 self.assertLogs("controller", level="WARNING"):
+                self.assertFalse(gc._gateway_zone_matches_local())
+            with open(os.path.join(d, "jts.ini"), "w") as f:
+                f.write("[IBGateway]\n")
+            with patch.object(gc, "JTS_CONFIG_DIR", d):
+                self.assertTrue(gc._gateway_zone_matches_local())
+
+    def test_config_step_does_not_arm_on_a_zone_mismatch(self):
+        base = {"AUTO_LOGOFF_TIME": "05:01 PM", "AUTO_RESTART_TIME": "",
+                "TWS_MASTER_CLIENT_ID": "", "READ_ONLY_API": ""}
+        gc._logoff_backstop_armed = False
+        with patch.dict(os.environ, base), \
+             patch.object(gc, "_config_open", return_value=True), \
+             patch.object(gc, "agent_jtree_select_path", return_value=True), \
+             patch.object(gc, "agent_settext_by_label", return_value=True), \
+             patch.object(gc, "_config_close", return_value=True), \
+             patch.object(gc, "_verify_lock_exit_time_persisted", return_value=True), \
+             patch.object(gc, "_gateway_zone_matches_local", return_value=False), \
+             patch.object(gc.time, "sleep"), \
+             _capture_controller_errors():
+            gc.handle_post_login_config()
+        self.assertFalse(gc._logoff_backstop_armed)
+
+    def _visible(self, expected, summary):
+        dump = f"OK\n  JLabel text=Set Auto Log Off Time (HH:MM)\n  JLabel text=at {summary}\nEND"
+        with patch.object(gc, "agent_window", return_value=dump):
+            return gc._lock_exit_time_visible(expected)
+
+    def test_read_back_compares_am_pm_times_exactly(self):
+        self.assertFalse(self._visible("1:01 PM", "11:01 PM"))   # was a substring hit
+        self.assertTrue(self._visible("5:01 PM", "05:01 PM"))
+        self.assertTrue(self._visible("05:01 PM", "05:01 PM"))
+        self.assertFalse(self._visible("11:39 AM", "11:39 PM"))
+        self.assertTrue(self._visible("05:01", "05:01 PM"))     # bare: substring as before
+
     def test_restart_mode_is_left_to_adoption(self):
         day = datetime(2026, 10, 2)
         self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
                                          day.replace(hour=9),
                                          {"AUTO_RESTART_TIME": "11:45 PM"}))
+
+    def test_a_24_hour_time_does_not_arm_it(self):
+        # The read-back would match only the typed text, not how Gateway
+        # read it, so the backstop stays off for "17:01".
+        day = datetime(2026, 10, 2)
+        with _capture_controller_errors():
+            self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
+                                             day.replace(hour=9),
+                                             {"AUTO_LOGOFF_TIME": "17:01"}))
 
     def test_ambiguous_time_is_refused_with_one_warning(self):
         day = datetime(2026, 10, 2)

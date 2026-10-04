@@ -19,24 +19,36 @@ and the project follows [Semantic Versioning](https://semver.org/).
     accurate, measured on a monotonic clock so host sleep doesn't count.
   - Not connected on every check for 10 minutes
     (`UPSTREAM_DOWN_GRACE_SECONDS`) outside IBKR's reset window: state
-    `UPSTREAM_DOWN` (503), `ALERT_UPSTREAM_DOWN` once, the window list,
-    modal text, labels and `launcher.log` tail logged, then this mode is
-    relaunched. Retries wait 10, 20, 40, then 60 minutes;
-    `UPSTREAM_RESTORED` when it reconnects.
-  - During recovery the watchdog alone decides: a dead JVM or closed
-    port waits for its next relaunch instead of escalating to the CCP
-    halt. A wrong password or 2FA problem still halts.
+    `UPSTREAM_DOWN` (503), `ALERT_UPSTREAM_DOWN` once, and the window
+    list, modal text, labels and `launcher.log` tail logged.
+    `UPSTREAM_RESTORED` when it reconnects; shorter blips log a plain
+    line.
+  - With an unattended login (`TWOFACTOR_CODE` set) this mode is then
+    relaunched, retrying after 10, 20, 40, then 60 minutes until a
+    relaunch logs in or Gateway reads connected. With IB Key, a passkey
+    or a VNC login it only reports, since a relaunch would mean a phone
+    prompt or a halt. `UPSTREAM_RELAUNCH=yes|no` overrides.
+  - While relaunching, a dead JVM or closed port waits for the next
+    relaunch instead of escalating, but Gateway's own nightly restart is
+    still adopted. A relaunch that meets a CCP lockout hands over to the
+    CCP lockout handling (by default a halt); a wrong password, a 2FA
+    problem, or two relaunches with the bad-credentials fingerprint
+    halt.
 - **Logoff backstop.** Gateway's own Lock and Exit timer fired on 1 of 5
   observed days. When the JVM that was running at `AUTO_LOGOFF_TIME` is
   still up 5 minutes later, the controller does the clean logout itself
   (`LOGOFF_BACKSTOP` INFO line) and the normal exit recovery logs in.
-  Only when this login's read-back confirmed Gateway holds exactly that
-  time, so it never adds a logoff Gateway wasn't already scheduled to do:
-  not with no `AUTO_LOGOFF_TIME`, not in auto-restart mode, not for an AM
-  value stored as PM. Once per day, never for a JVM started after the
-  boundary; a bare `05:01` is ambiguous and turns it off with one warning.
+  Only for a time written with AM or PM that this login's read-back found
+  in Gateway's own Lock and Exit summary, so it never adds a logoff
+  Gateway wasn't already scheduled to do: not with no `AUTO_LOGOFF_TIME`,
+  not in auto-restart mode, not for an AM value stored as PM, not for a
+  bare or 24-hour value (turned off with one warning), not when
+  Gateway's time zone differs from the container's. Only for a session
+  that logged in before the boundary, between 5 and 60 minutes after it,
+  once per day.
 - **`IBKR_RESET_WINDOWS` / `IBKR_RESET_TZ`** for accounts hosted in
-  Europe or Asia, which reset at other times.
+  Asia, whose resets fall outside the default window (Europe's is inside
+  it most of the year).
 
 ### Changed
 

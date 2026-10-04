@@ -80,24 +80,28 @@ anything from you.
 
 - **`/health` can now be 503 while the API port is open.** A new state,
   `UPSTREAM_DOWN`, means Gateway has reported no connection to IBKR for
-  10 minutes outside the reset window and the controller is relaunching
-  that mode (10, 20, 40, then 60 minutes apart). **What changes for
-  you:** if a monitor restarts containers on a 503, make it defer while
-  `upstream_recovery_active` is `true` — a container restart also logs
-  out the other mode. `ALERT_UPSTREAM_DOWN` is the page;
+  10 minutes outside the reset window. With an unattended login
+  (`TWOFACTOR_CODE` set) the controller then relaunches that mode (10,
+  20, 40, then 60 minutes apart); with IB Key, a passkey or a VNC login
+  it only reports. `UPSTREAM_RELAUNCH=yes|no` changes that. **What
+  changes for you:** if a monitor restarts containers on a 503, make it
+  defer while `upstream_recovery_active` is `true` — a container restart
+  also logs out the other mode. `ALERT_UPSTREAM_DOWN` is the page;
   `UPSTREAM_RESTORED` is the all-clear.
 - **The controller logs off for Gateway when its own timer misses.**
-  Only for a logoff time you set and Gateway confirmed on that login —
-  no `AUTO_LOGOFF_TIME`, no change. If you have one set, expect an
-  occasional `LOGOFF_BACKSTOP` line about 5 minutes after it, then the
-  usual relogin (a phone approval if you use IB Key). That is the logoff
-  you configured; Gateway was sometimes skipping it. Write the time as
-  `05:01 PM` or `17:01`; a bare `05:01` turns the backstop off.
+  Only for a logoff time you set with AM or PM (`05:01 PM`) that Gateway
+  showed back on that login — no `AUTO_LOGOFF_TIME`, or a bare or
+  24-hour time, no change. If you have one, expect an occasional
+  `LOGOFF_BACKSTOP` line 5 to 60 minutes after it, then the usual relogin
+  (a phone approval if you use IB Key). That is the logoff you
+  configured; Gateway was sometimes skipping it. It stays off when
+  `TIME_ZONE` and `TZ` disagree, since Gateway's 05:01 PM would not be
+  the controller's: set both to the same zone.
 - **The reset window is wider:** 23:30-02:00 ET instead of 23:30-00:30,
   matching IBKR's published North America schedule. A clean exit or a
   cold start between 00:30 and 02:00 ET now waits the 8-minute re-auth
-  delay. Accounts hosted in Europe or Asia: set `IBKR_RESET_WINDOWS`
-  and `IBKR_RESET_TZ`.
+  delay. Accounts hosted in Asia: set `IBKR_RESET_WINDOWS` and
+  `IBKR_RESET_TZ`.
 
 ### v0.14.0
 

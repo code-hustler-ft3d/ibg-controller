@@ -479,7 +479,7 @@ Automatic. The `_is_ibkr_maintenance_window` check in
 `_recover_jvm_or_escalate` adds the delay before any re-auth when the
 wallclock sits inside the reset window: 23:30-02:00 ET by default
 (23:30-00:30 before v0.15.0), set with `IBKR_RESET_WINDOWS` and
-`IBKR_RESET_TZ` for accounts hosted in Europe or Asia. Cold starts
+`IBKR_RESET_TZ` for accounts hosted in Asia. Cold starts
 inside the window apply the same guard before the first Log In click.
 
 Tune `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` upward if you see
@@ -518,8 +518,11 @@ to outlast the drain in your region.
 disconnected", often behind a "Connection to server failed" modal, and
 it doesn't reconnect by itself. Its API port stays open, so clients
 connect and every request times out. The controller notices from the
-label, waits 10 minutes outside IBKR's reset window, then relaunches
-that mode, backing off to hourly until Gateway reports connected.
+label and after 10 minutes outside IBKR's reset window reports
+`UPSTREAM_DOWN`. With an unattended login (`TWOFACTOR_CODE` set) it
+also relaunches that mode, backing off to hourly until a relaunch logs
+in or Gateway reports connected; otherwise it only reports, and you
+restart once IBKR is reachable (`UPSTREAM_RELAUNCH` sets this).
 
 ### Symptoms
 
@@ -527,7 +530,8 @@ that mode, backing off to hourly until Gateway reports connected.
   climbing; after the grace period `state: "UPSTREAM_DOWN"` and 503.
 - `ALERT_UPSTREAM_DOWN`, followed by the captured window list, modal
   text, labels and `launcher.log` tail, then a relaunch.
-- `UPSTREAM_RESTORED` once Gateway is connected again.
+- `UPSTREAM_RESTORED` once Gateway is connected again (only after an
+  `ALERT_UPSTREAM_DOWN`; nightly-reset blips log a plain line).
 
 ### Root cause
 
@@ -538,11 +542,13 @@ start a reconnect; restarting did.
 
 ### Operator action
 
-Usually none. Don't restart the container while
+With relaunching on: usually none. Don't restart the container while
 `upstream_recovery_active` is `true`: that also logs out the other
 mode, and the controller is already relaunching on a schedule
 (`next_relaunch_in_seconds`). If it keeps failing for hours, check
-IBKR's system status page.
+IBKR's system status page. With relaunching off
+(`upstream_recovery_active: false`): restart the container once IBKR is
+reachable.
 
 ---
 
@@ -554,7 +560,7 @@ IBKR's system status page.
 | Gateway JVM crash | ✅ in-place restart | ❌ not needed | `jvm_alive: false` in `/health` |
 | Gateway's own daily auto-restart | ✅ adopts the new JVM | ❌ not needed | `ALERT_AUTO_RESTART status=adopted` at `AUTO_RESTART_TIME` |
 | IBKR daily maintenance window | ✅ 8-min delay + re-auth | ❌ not needed | `ALERT_IBKR_MAINTENANCE_RECOVERY` inside the reset window |
-| Gateway disconnected from IBKR, port still open | ✅ relaunch after 10 min, backing off to hourly | ❌ not needed | `ALERT_UPSTREAM_DOWN`, `state: "UPSTREAM_DOWN"` |
+| Gateway disconnected from IBKR, port still open | ✅ with an unattended login: relaunch after 10 min, backing off to hourly | ✅ otherwise: restart once IBKR is reachable | `ALERT_UPSTREAM_DOWN`, `state: "UPSTREAM_DOWN"` |
 | Gateway skips its scheduled logoff | ✅ the controller logs off 5 min later | ❌ not needed | `LOGOFF_BACKSTOP` |
 | CCP rate limiter tripped (genuine) | ✅ silent cool-down | ❌ not needed (wait up to 20 min) | `ccp_backoff_seconds > 0` |
 | **CCP lockout — concurrent/stranded session** | ❌ cannot auto-recover | ✅ log into IBKR Mobile (force-kicks TWS slot; web Portal does NOT) | `ALERT_CCP_PERSISTENT` + `ccp_lockout_streak >= 3` |
