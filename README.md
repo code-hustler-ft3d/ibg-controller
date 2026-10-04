@@ -250,7 +250,7 @@ real product.
 |---|---|
 | `TWS_MASTER_CLIENT_ID` | Master API client ID |
 | `READ_ONLY_API` | `yes`/`no` |
-| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other depending on account state; set both vars and the controller handles whichever is displayed. **AM times don't work yet**: Gateway keeps AM/PM in a separate control the agent can't reach, so an AM value is stored as PM and `ALERT_CONFIG_NOT_APPLIED` fires every login. Use a PM time or an external scheduler. Gateway's own logoff timer is unreliable, so if the same Gateway is still running 5 minutes after `AUTO_LOGOFF_TIME`, the controller logs it off itself (`LOGOFF_BACKSTOP`); that path uses your env value, so AM works there. Write the time as `05:01 PM` or `17:01` — a bare `05:01` is ambiguous and turns the backstop off. |
+| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other depending on account state; set both vars and the controller handles whichever is displayed. **AM times don't work yet**: Gateway keeps AM/PM in a separate control the agent can't reach, so an AM value is stored as PM and `ALERT_CONFIG_NOT_APPLIED` fires every login. Use a PM time or an external scheduler. Gateway's own logoff timer is unreliable, so if the same Gateway is still running 5 minutes after `AUTO_LOGOFF_TIME`, the controller logs it off itself (`LOGOFF_BACKSTOP`). It only does this for a time written with AM or PM (`05:01 PM`) that Gateway showed back on that login, for a session that logged in before that time, within an hour after it, and only when `AUTO_RESTART_TIME` is unset and Gateway's time zone (`TIME_ZONE`) matches the container's (`TZ`) — so it never adds a logoff Gateway wasn't already scheduled to do. With no `AUTO_LOGOFF_TIME`, nothing changes. |
 | `AUTO_RESTART_ADOPT` | Default `yes`: when Gateway restarts itself at `AUTO_RESTART_TIME`, adopt the new JVM instead of launching a second one. Gateway normally carries the session across, so no login and no 2FA; when it doesn't, the controller re-drives login on the adopted JVM. `no` restores always-relaunch. Wait budget: `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (90). |
 
 ### Command server
@@ -268,8 +268,9 @@ real product.
 | `CONTROLLER_HEALTH_SERVER_PORT` | HTTP `/health` port (default `8080` in the shipped image; empty disables) |
 | `CONTROLLER_HEALTH_SERVER_HOST` | Bind address, default `0.0.0.0` |
 | `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` | Delay before re-auth inside IBKR's nightly reset window (default `480`) |
-| `IBKR_RESET_WINDOWS` / `IBKR_RESET_TZ` | IBKR's daily reset window (default `23:30-02:00` `America/New_York`, covering the published North America resets). Accounts hosted in Europe or Asia: set your region's times |
-| `UPSTREAM_DOWN_GRACE_SECONDS` | How long Gateway may report no connection to IBKR before the controller relaunches it (default `600`) |
+| `IBKR_RESET_WINDOWS` / `IBKR_RESET_TZ` | IBKR's daily reset window (default `23:30-02:00` `America/New_York`, covering the published North America resets and, most of the year, Europe's). Accounts hosted in Asia: set your region's times |
+| `UPSTREAM_DOWN_GRACE_SECONDS` | How long Gateway may report no connection to IBKR before `UPSTREAM_DOWN` (default `600`) |
+| `UPSTREAM_RELAUNCH` | Whether the controller relaunches a mode stuck in `UPSTREAM_DOWN`. Default: only when the login is unattended (`TWOFACTOR_CODE` set); `yes` / `no` to force |
 | `CCP_LOCKOUT_MAX_JVM_RESTARTS` | JVM restarts allowed on persistent CCP lockout (default `0` = halt loudly) |
 
 ### Paths and debugging
@@ -304,10 +305,14 @@ after Gateway is ready.
 loses its upstream link, its API port stays open and clients connect,
 but every request times out. The controller reads Gateway's own status
 label: `upstream_connected` in `/health`. After 10 minutes disconnected
-outside IBKR's reset window it reports `UPSTREAM_DOWN` (503), logs
-`ALERT_UPSTREAM_DOWN`, and relaunches that mode, backing off to hourly.
-While `upstream_recovery_active` is `true`, let it work rather than
-restarting the container.
+outside IBKR's reset window it reports `UPSTREAM_DOWN` (503) and logs
+`ALERT_UPSTREAM_DOWN`. If your login runs unattended (`TWOFACTOR_CODE`
+set), it also relaunches that mode, backing off to hourly until Gateway
+reads connected; while `upstream_recovery_active` is `true`, let it work
+rather than restarting the container. With IB Key, a passkey or a VNC
+login it only reports, since a relaunch would mean a phone prompt or a
+halt. `UPSTREAM_RELAUNCH=yes|no` overrides either way. A relaunch that
+meets a CCP lockout is handled like any CCP lockout (by default a halt).
 
 **If anything in your stack restarts unhealthy containers, read this.**
 When a 2FA failure needs you, the controller halts instead of exiting,
