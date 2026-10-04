@@ -4575,6 +4575,23 @@ def _launcher_log_tail(lines=30):
         return [f"(launcher.log unavailable: {type(e).__name__})"]
 
 
+def _modal_sections(dump):
+    """The lines of a WINDOW dump that belong to modal dialogs.
+
+    WINDOW dumps every window whose title matches, and Gateway titles some
+    error modals "IBKR Gateway", like its main frame, which comes first and
+    is long (field reports 2026-10-03 and 10-04). Keeping only the modal
+    sections stops the frame from crowding out the error text.
+    """
+    out, keep = [], False
+    for ln in (dump or "").split("\n"):
+        if ln.startswith("=== window="):
+            keep = " modal=true" in ln
+        if keep and ln and ln not in ("OK", "END"):
+            out.append(ln)
+    return out
+
+
 def _capture_upstream_diagnostics():
     """Log what the operator would want to see before the relaunch erases
     it: the window list, every modal's text, the main-window labels, and
@@ -4583,12 +4600,8 @@ def _capture_upstream_diagnostics():
     try:
         windows = agent_windows()
         log.warning(_redact_logs(f"  windows: {windows}"))
-        for _wtype, title, modal in windows:
-            if not modal:
-                continue
-            lines = [ln for ln in agent_window(title).split("\n")
-                     if ln and ln not in ("OK", "END")]
-            for ln in lines[:40]:
+        for title in dict.fromkeys(t for _w, t, modal in windows if modal):
+            for ln in _modal_sections(agent_window(title))[:60]:
                 log.warning(_redact_logs(f"  modal [{title}] {ln}"))
     except Exception as e:
         log.warning(f"  windows: unavailable ({type(e).__name__}: {e})")

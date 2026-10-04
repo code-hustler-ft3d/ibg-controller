@@ -4117,6 +4117,42 @@ class TestUpstreamWatchdog(unittest.TestCase):
             gc._upstream_relaunch()
         halt.assert_called_once()
 
+    def _capture(self, windows, dumps):
+        with patch.object(gc, "agent_windows", return_value=windows), \
+             patch.object(gc, "agent_window", side_effect=lambda t: dumps[t]), \
+             patch.object(gc, "agent_labels", return_value=[]), \
+             patch.object(gc, "_launcher_log_tail", return_value=[]), \
+             self.assertLogs("controller", level="WARNING") as cm:
+            gc._capture_upstream_diagnostics()
+        return "\n".join(cm.output)
+
+    def test_capture_keeps_a_same_titled_modal_text(self):
+        # 2026-10-03: the error modal shared the main frame's title, and
+        # WINDOW dumps both, frame first. A long frame must not crowd out
+        # the modal's text.
+        frame = "\n".join(["=== window=IBKR Gateway type=JFrame ==="]
+                          + [f"  JLabel text=row {i}" for i in range(80)])
+        modal = ("=== window=IBKR Gateway type=JDialog modal=true ===\n"
+                 "  JTextArea text=Connection to server failed: Failed send "
+                 "NSMsg - javax.net.ssl.SSLHandshakeException\n"
+                 "  JButton text=OK")
+        out = self._capture([("aw", "IBKR Gateway", False),
+                             ("x", "IBKR Gateway", True)],
+                            {"IBKR Gateway": f"OK\n{frame}\n{modal}\nEND"})
+        self.assertIn("SSLHandshakeException", out)
+        self.assertNotIn("row 79", out)
+
+    def test_capture_reads_the_re_login_modal(self):
+        # 2026-10-04: a differently titled modal after Gateway's own retries.
+        dump = ("OK\n=== window=Re-login is required type=aY modal=true ===\n"
+                "  JTextArea text=Your connection was lost. Would you like to "
+                "re-login?\n  JButton text=Re-login\n  JButton text=Cancel\nEND")
+        out = self._capture([("aw", "IBKR Gateway", False),
+                             ("C", "Attempt 36: Authenticating...", False),
+                             ("aY", "Re-login is required", True)],
+                            {"Re-login is required": dump})
+        self.assertIn("Your connection was lost", out)
+
     def test_health_reports_recovery_and_turns_unhealthy(self):
         gc._upstream_recovery = True
         gc._upstream_connected = False
