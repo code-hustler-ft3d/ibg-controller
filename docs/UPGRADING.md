@@ -87,10 +87,12 @@ anything from you.
   out the other mode. `ALERT_UPSTREAM_DOWN` is the page;
   `UPSTREAM_RESTORED` is the all-clear.
 - **The controller logs off for Gateway when its own timer misses.**
-  With `AUTO_LOGOFF_TIME` set, expect an occasional `LOGOFF_BACKSTOP`
-  line about 5 minutes after the boundary, then the usual relogin.
-  Write the time as `05:01 PM` or `17:01`; a bare `05:01` turns the
-  backstop off.
+  Only for a logoff time you set and Gateway confirmed on that login —
+  no `AUTO_LOGOFF_TIME`, no change. If you have one set, expect an
+  occasional `LOGOFF_BACKSTOP` line about 5 minutes after it, then the
+  usual relogin (a phone approval if you use IB Key). That is the logoff
+  you configured; Gateway was sometimes skipping it. Write the time as
+  `05:01 PM` or `17:01`; a bare `05:01` turns the backstop off.
 - **The reset window is wider:** 23:30-02:00 ET instead of 23:30-00:30,
   matching IBKR's published North America schedule. A clean exit or a
   cold start between 00:30 and 02:00 ET now waits the 8-minute re-auth

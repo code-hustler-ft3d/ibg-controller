@@ -493,16 +493,20 @@ LOGOFF_BACKSTOP mode=live boundary=17:01 jvm_started=2026-10-02 13:57:05 reason=
 ```
 
 **When fired**: `AUTO_LOGOFF_TIME` is set (and `AUTO_RESTART_TIME`
-isn't), the Gateway JVM running now started before today's logoff
-time, and it is still running 5 minutes after it. Gateway's own Lock
+isn't), the read-back on this JVM's login confirmed Gateway holds
+exactly that time, the JVM started before today's logoff time, and it
+is still running 5 minutes after it. So it only ever performs a logoff
+Gateway itself was scheduled to do: never with no `AUTO_LOGOFF_TIME`,
+never when Gateway is in auto-restart mode and shows no logoff field,
+never for an AM value Gateway stored as PM (`ALERT_CONFIG_NOT_APPLIED`
+covers that), and never when the read-back failed or couldn't run. Gateway's own Lock
 and Exit timer fired on only 1 of 5 observed days in the field, with
 the value read back correctly every time. The controller then does the
 same clean logout Gateway would, and the normal exit recovery logs back
 in. It fires at most once per day, and never for a JVM started after
-the boundary. The time comes from the env value, so AM times work here
-even though the dialog stores them as PM. A bare `05:01` is ambiguous
-in Gateway's 12-hour field and turns the backstop off with one warning:
-write `05:01 PM` or `17:01`.
+the boundary. A bare `05:01` is ambiguous in Gateway's 12-hour field
+and turns the backstop off with one warning: write `05:01 PM` or
+`17:01`.
 
 **What the operator should do**: nothing; count it if you want to know
 how often Gateway's own timer misses. Don't page.

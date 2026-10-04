@@ -1200,8 +1200,9 @@ def launch_gateway():
         stderr=subprocess.STDOUT,
     )
     log.info(f"Gateway PID: {proc.pid} (JVM console -> {jvm_console_path})")
-    global _JVM_STARTED_WALL
+    global _JVM_STARTED_WALL, _logoff_backstop_armed
     _JVM_STARTED_WALL = datetime.now()
+    _logoff_backstop_armed = False
     return proc
 
 
@@ -2757,6 +2758,7 @@ def handle_post_login_config():
     per-knob failure — logs a warning and moves on so users still get
     a working API port even if one setting couldn't be applied.
     """
+    global _logoff_backstop_armed
     master_client_id = os.environ.get("TWS_MASTER_CLIENT_ID", "").strip()
     read_only_api_raw = os.environ.get("READ_ONLY_API", "")
     read_only_api = _coerce_yes_no(read_only_api_raw)
@@ -2889,6 +2891,8 @@ def handle_post_login_config():
             verified = _verify_lock_exit_time_persisted(label, value)
             if verified is True:
                 log.info(f"  Verified: {label} reads back as {value!r}")
+                if env_var == "AUTO_LOGOFF_TIME":
+                    _logoff_backstop_armed = True
             elif verified is False:
                 # Stable grep token: an operator who set a schedule needs
                 # to know it will not happen. See docs/OBSERVABILITY.md.
@@ -4710,6 +4714,13 @@ def _upstream_relaunch():
 # logoff, log off on Gateway's behalf; the normal exit recovery logs in.
 _LOGOFF_BACKSTOP_GRACE_SECONDS = 300
 _JVM_STARTED_WALL = None
+# Armed only when this JVM's own config step read back exactly
+# AUTO_LOGOFF_TIME from Gateway, so the backstop only ever performs a
+# logoff Gateway itself is scheduled to do. Not armed: Gateway in
+# auto-restart mode (no logoff field), an AM value stored as PM, or a
+# read-back that failed or couldn't run. Users who never set a logoff
+# time are never logged off.
+_logoff_backstop_armed = False
 _logoff_backstop_done_for = None
 _logoff_backstop_warned = False
 
@@ -4719,8 +4730,8 @@ def _parse_wall_clock(value):
 
     Accepts "05:01 PM" and 24-hour "17:01" / "00:30". A bare hour from 1
     to 12 is ambiguous in Gateway's 12-hour field, so it is refused rather
-    than guessed. The boundary comes from this env value, never from the
-    dialog, so the AM/PM control the agent cannot set does not move it.
+    than guessed. An AM value never arms the backstop anyway: Gateway
+    stores it as PM, so the read-back fails.
     """
     m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*([AaPp][Mm])?\s*", value or "")
     if not m:
@@ -4740,13 +4751,16 @@ def _parse_wall_clock(value):
 def _logoff_backstop_boundary(now=None):
     """Today's logoff boundary when the backstop should act now, else None.
 
-    Only for AUTO_LOGOFF_TIME without AUTO_RESTART_TIME, only once per
+    Only for AUTO_LOGOFF_TIME without AUTO_RESTART_TIME, only after this
+    JVM's read-back confirmed Gateway holds that exact time, only once per
     boundary, and only for a JVM started before it: one launched at 17:30
     is not logged out at once, its boundary is tomorrow's.
     """
     global _logoff_backstop_warned
     value = os.environ.get("AUTO_LOGOFF_TIME", "").strip()
     if not value or os.environ.get("AUTO_RESTART_TIME", "").strip():
+        return None
+    if not _logoff_backstop_armed:
         return None
     hm = _parse_wall_clock(value)
     if hm is None:

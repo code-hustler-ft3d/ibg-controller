@@ -4261,14 +4261,15 @@ class TestLogoffBackstop(unittest.TestCase):
 
     def setUp(self):
         self.prev = (gc._JVM_STARTED_WALL, gc._logoff_backstop_done_for,
-                     gc._logoff_backstop_warned)
+                     gc._logoff_backstop_warned, gc._logoff_backstop_armed)
         gc._logoff_backstop_done_for = None
         gc._logoff_backstop_warned = False
+        gc._logoff_backstop_armed = True  # as after a verified read-back
         self.addCleanup(self._restore)
 
     def _restore(self):
         (gc._JVM_STARTED_WALL, gc._logoff_backstop_done_for,
-         gc._logoff_backstop_warned) = self.prev
+         gc._logoff_backstop_warned, gc._logoff_backstop_armed) = self.prev
 
     def test_parses_the_formats_operators_use(self):
         p = gc._parse_wall_clock
@@ -4276,7 +4277,7 @@ class TestLogoffBackstop(unittest.TestCase):
         self.assertEqual(p("5:01 pm"), (17, 1))
         self.assertEqual(p("12:00 AM"), (0, 0))
         self.assertEqual(p("12:30 PM"), (12, 30))
-        self.assertEqual(p("11:39 AM"), (11, 39))   # AM: the dialog can't, we can
+        self.assertEqual(p("11:39 AM"), (11, 39))
         self.assertEqual(p("17:01"), (17, 1))
         self.assertEqual(p("00:30"), (0, 30))
 
@@ -4307,6 +4308,56 @@ class TestLogoffBackstop(unittest.TestCase):
         gc._logoff_backstop_done_for = day.replace(hour=17, minute=1)
         self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
                                          day.replace(hour=9)))
+
+    def test_never_acts_unless_gateway_confirmed_the_users_time(self):
+        # The operator's rule: nobody gets a logoff they didn't set. Not
+        # armed covers Gateway in auto-restart mode (no logoff field), an
+        # AM value stored as PM, and a read-back that failed or couldn't run.
+        gc._logoff_backstop_armed = False
+        day = datetime(2026, 10, 2)
+        self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
+                                         day.replace(hour=9)))
+
+    def test_no_logoff_time_set_means_no_backstop(self):
+        day = datetime(2026, 10, 2)
+        self.assertIsNone(self._boundary(day.replace(hour=17, minute=20),
+                                         day.replace(hour=9),
+                                         {"AUTO_LOGOFF_TIME": ""}))
+
+    def _config(self, verified, env):
+        base = {"AUTO_LOGOFF_TIME": "", "AUTO_RESTART_TIME": "",
+                "TWS_MASTER_CLIENT_ID": "", "READ_ONLY_API": ""}
+        gc._logoff_backstop_armed = False
+        with patch.dict(os.environ, {**base, **env}), \
+             patch.object(gc, "_config_open", return_value=True), \
+             patch.object(gc, "agent_jtree_select_path", return_value=True), \
+             patch.object(gc, "agent_settext_by_label", return_value=True), \
+             patch.object(gc, "_config_close", return_value=True), \
+             patch.object(gc, "_verify_lock_exit_time_persisted", return_value=verified), \
+             patch.object(gc.time, "sleep"), \
+             _capture_controller_errors():
+            gc.handle_post_login_config()
+        return gc._logoff_backstop_armed
+
+    def test_config_step_arms_only_on_a_verified_logoff_time(self):
+        self.assertTrue(self._config(True, {"AUTO_LOGOFF_TIME": "05:01 PM"}))
+        self.assertFalse(self._config(False, {"AUTO_LOGOFF_TIME": "11:39 AM"}))
+        self.assertFalse(self._config(None, {"AUTO_LOGOFF_TIME": "05:01 PM"}))
+        # A verified restart time is Gateway's own restart, not a logoff.
+        self.assertFalse(self._config(True, {"AUTO_RESTART_TIME": "11:45 PM"}))
+
+    def test_a_new_jvm_starts_disarmed(self):
+        gc._logoff_backstop_armed = True
+        with patch.object(gc, "find_gateway_launcher", return_value="/x/ibgateway"), \
+             patch.object(gc.subprocess, "Popen", return_value=MagicMock(pid=5)), \
+             patch("builtins.open", MagicMock()), \
+             patch.object(gc.os, "makedirs"), \
+             _capture_controller_errors():
+            try:
+                gc.launch_gateway()
+            except Exception:
+                pass
+        self.assertFalse(gc._logoff_backstop_armed)
 
     def test_restart_mode_is_left_to_adoption(self):
         day = datetime(2026, 10, 2)

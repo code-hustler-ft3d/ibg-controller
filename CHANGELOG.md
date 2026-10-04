@@ -30,9 +30,11 @@ and the project follows [Semantic Versioning](https://semver.org/).
   observed days. When the JVM that was running at `AUTO_LOGOFF_TIME` is
   still up 5 minutes later, the controller does the clean logout itself
   (`LOGOFF_BACKSTOP` INFO line) and the normal exit recovery logs in.
-  Once per day, never for a JVM started after the boundary, only without
-  `AUTO_RESTART_TIME`. The time comes from the env value, so AM works
-  here; a bare `05:01` is ambiguous and turns it off with one warning.
+  Only when this login's read-back confirmed Gateway holds exactly that
+  time, so it never adds a logoff Gateway wasn't already scheduled to do:
+  not with no `AUTO_LOGOFF_TIME`, not in auto-restart mode, not for an AM
+  value stored as PM. Once per day, never for a JVM started after the
+  boundary; a bare `05:01` is ambiguous and turns it off with one warning.
 - **`IBKR_RESET_WINDOWS` / `IBKR_RESET_TZ`** for accounts hosted in
   Europe or Asia, which reset at other times.
 
