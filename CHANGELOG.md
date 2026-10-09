@@ -4,6 +4,20 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- **Configured usernames are masked in logs.** `_redact_logs` masked
+  account numbers only, though its docstring also promised usernames.
+  The upstream watchdog logs dialog text and `launcher.log` lines
+  verbatim before a relaunch, so `TWS_USERID` and `TWS_USERID_PAPER` are
+  now replaced with `[USER]` wherever they appear.
+- **`TWS_ACCEPT_INCOMING` refuses an ambiguous click.** It clicks by
+  window title, modal dialogs first; with two dialogs matching the
+  incoming-connection dialog's title, "Yes" could land on the other one,
+  such as a confirmation. It now leaves both to the operator and says so.
+
 ## [0.15.1] - 2026-10-09
 
 ### Added

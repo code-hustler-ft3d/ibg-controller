@@ -172,16 +172,20 @@ def _redact_logs(s):
     logs users may share to ask for help. Redact them so the default
     debug-log experience doesn't leak identifiers.
 
-    Also masks obvious username-looking tokens in titles. Applied
-    conservatively — we don't redact log bodies of components we
-    care about (e.g. "Existing session detected"), only the
-    account-number pattern.
+    Also masks the configured IBKR usernames (TWS_USERID and
+    TWS_USERID_PAPER) wherever they appear: the upstream watchdog logs
+    dialog text and launcher.log lines verbatim before a relaunch.
     """
     if not isinstance(s, str):
         return s
     import re as _re
     # Paper accounts start with DU, live with U + digits (IBKR convention)
     s = _re.sub(r"\b(DU|U)\d{5,10}\b", r"\1[REDACTED]", s)
+    for name in {os.environ.get("TWS_USERID", ""),
+                 os.environ.get("TWS_USERID_PAPER", "")}:
+        name = name.strip()
+        if len(name) >= 3:
+            s = s.replace(name, "[USER]")
     return s
 
 
@@ -2558,6 +2562,16 @@ def _handle_incoming_connection_dialog():
         _incoming_last_windows = key
         return False
     title, text = hits[0]
+    # CLICK_IN_WIN clicks the first matching button in any window whose
+    # title contains this one, modal dialogs first. With two dialogs
+    # matching, "Yes" could land on the other one (a confirmation, say),
+    # so refuse rather than guess.
+    if sum(1 for _w, t, modal in windows if modal and title in t) > 1:
+        log.warning(f"Incoming-connection dialog found, but another dialog "
+                    f"matches its title {_redact_logs(title)!r}; leaving "
+                    "both for you rather than risk clicking the wrong one")
+        _incoming_last_windows = key
+        return False
     buttons = ("OK", "Yes") if action == "accept" else ("No",)
     for button in buttons:
         if agent_click_in_window(title, button):

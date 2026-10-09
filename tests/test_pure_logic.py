@@ -4678,6 +4678,24 @@ class TestIncomingConnectionDialog(unittest.TestCase):
             "accept", windows=self.WINDOWS + [("y", "Other", True)])
         lab.assert_called_once()
 
+    def test_two_dialogs_with_the_title_are_left_alone(self):
+        # "Yes" could otherwise land on the other dialog (a confirmation).
+        windows = [("aw", "IBKR Gateway", False),
+                   ("x", "IBKR Gateway", True),
+                   ("y", "IBKR Gateway", True)]
+        done, _w, _l, clk = self._handle(
+            "accept", labels=[("IBKR Gateway", self.LABEL[1])], windows=windows)
+        self.assertFalse(done)
+        clk.assert_not_called()
+
+    def test_main_frame_sharing_the_title_is_fine(self):
+        # One modal plus the non-modal main frame: the modal is searched
+        # first, so the click is unambiguous.
+        windows = [("aw", "IBKR Gateway", False), ("x", "IBKR Gateway", True)]
+        done, _w, _l, clk = self._handle(
+            "accept", labels=[("IBKR Gateway", self.LABEL[1])], windows=windows)
+        self.assertTrue(done)
+
     def test_invalid_value_is_left_to_the_operator(self):
         with self.assertLogs("controller", level="WARNING") as cm:
             done, wins, _l, clk = self._handle("yes")
@@ -4700,6 +4718,24 @@ class TestIncomingConnectionDialog(unittest.TestCase):
             gc._sleep_watching_incoming(5)
         self.assertEqual(sl.call_count, 5)
         self.assertEqual(h.call_count, 5)
+
+class TestRedactLogsUsernames(unittest.TestCase):
+    """The upstream watchdog logs dialog text and launcher.log lines
+    verbatim; configured usernames must not reach docker logs."""
+
+    def test_usernames_are_masked(self):
+        with patch.dict(os.environ, {"TWS_USERID": "liveuser9",
+                                     "TWS_USERID_PAPER": "paperuser7"}):
+            out = gc._redact_logs("login liveuser9 / paperuser7 for U1234567")
+        self.assertNotIn("liveuser9", out)
+        self.assertNotIn("paperuser7", out)
+        self.assertNotIn("1234567", out)
+        self.assertEqual(out.count("[USER]"), 2)
+
+    def test_short_or_empty_names_are_not_used(self):
+        # A one- or two-character value would mangle ordinary text.
+        with patch.dict(os.environ, {"TWS_USERID": "ab", "TWS_USERID_PAPER": ""}):
+            self.assertEqual(gc._redact_logs("about cabs"), "about cabs")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
