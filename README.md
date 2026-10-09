@@ -259,7 +259,7 @@ real product.
 | Var | Notes |
 |---|---|
 | `CONTROLLER_COMMAND_SERVER_PORT` | TCP port for `STOP`, `RESTART`, `RECONNECTACCOUNT` and `ENABLEAPI`, using IBC's command names. Unset = disabled. IBC's default port was `7462`. |
-| `CONTROLLER_COMMAND_SERVER_HOST` | Bind address, default `0.0.0.0` (control exposure with Docker's `-p 127.0.0.1:...`) |
+| `CONTROLLER_COMMAND_SERVER_HOST` | Bind address, default `0.0.0.0` so a published port reaches it. Set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN` too: Docker's `-p 127.0.0.1:...` keeps the host's network out, but not other containers on the same Docker network |
 | `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN` | Optional shared secret; clients send `AUTH <token>` first. Strongly recommended if the port is reachable beyond localhost. |
 
 ### Health and recovery
@@ -437,9 +437,12 @@ release images. Verification recipes and reporting:
 
 Deployment hygiene:
 
-- Command server: keep it loopback-only (`-p 127.0.0.1:7462:7462`)
-  or set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN`. Without a token,
-  anyone who can reach the port can send `STOP`/`RESTART`.
+- Command server: set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN`. Without
+  a token, anyone who can reach the port can send `STOP`/`RESTART`, and
+  publishing it as `-p 127.0.0.1:7462:7462` still leaves it open to
+  other containers on the same Docker network. `RESTART` and
+  `RECONNECTACCOUNT` are refused while the controller is halted or
+  already relaunching.
 - Credentials: use `--env-file` (mode `600`) or the `_FILE` secrets
   variants, never `-e` on the command line.
 - Logs: the controller redacts account numbers and (v0.6.3+) password

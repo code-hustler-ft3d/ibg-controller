@@ -334,5 +334,8 @@ Please include:
 - Container architecture (amd64 / arm64)
 
 **Never include your credentials, TOTP secret, or account numbers.**
-The controller logs redact these, but Gateway's launcher.log may include
-fragments. Sanitize before sharing.
+The controller never logs your password or TOTP secret, and masks
+account numbers and your configured usernames in its own logs. Gateway's
+launcher.log, which the controller also copies into its logs when
+Gateway loses its connection, may include other fragments. Sanitize
+before sharing.

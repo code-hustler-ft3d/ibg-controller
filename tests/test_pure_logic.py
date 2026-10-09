@@ -30,6 +30,7 @@ What's NOT covered by this file (tracked separately):
 """
 
 import os
+import threading
 import socket
 import subprocess
 import sys
@@ -4361,6 +4362,17 @@ class TestMonitorLoopUpstream(unittest.TestCase):
             self._run(300, reading=None, jvm_alive=False)
         adopt.assert_called_once()   # once per exited JVM, not every loop
 
+    def test_a_halt_on_another_thread_stops_the_loop(self):
+        # A login the command server started can halt on its own thread;
+        # the monitor loop must not go on recovering with the same login.
+        gc._current_state = gc.State.HALTED
+        relaunch, recover, escalate, reauth, _ = self._run(
+            1200, reading=False, jvm_alive=False, port_open=False)
+        relaunch.assert_not_called()
+        recover.assert_not_called()
+        escalate.assert_not_called()
+        reauth.assert_not_called()
+
     def test_healthy_upstream_never_relaunches(self):
         relaunch, recover, escalate, reauth, errors = self._run(3000, reading=True)
         relaunch.assert_not_called()
@@ -4688,13 +4700,22 @@ class TestIncomingConnectionDialog(unittest.TestCase):
         self.assertFalse(done)
         clk.assert_not_called()
 
-    def test_main_frame_sharing_the_title_is_fine(self):
-        # One modal plus the non-modal main frame: the modal is searched
-        # first, so the click is unambiguous.
+    def test_main_frame_sharing_the_title_is_refused(self):
+        # If the dialog only has Yes/No, the "OK" pass would fall through
+        # to the main frame with the same title (security audit 2026-10-09).
         windows = [("aw", "IBKR Gateway", False), ("x", "IBKR Gateway", True)]
         done, _w, _l, clk = self._handle(
             "accept", labels=[("IBKR Gateway", self.LABEL[1])], windows=windows)
-        self.assertTrue(done)
+        self.assertFalse(done)
+        clk.assert_not_called()
+
+    def test_empty_title_is_refused(self):
+        # "" is contained in every title, so the click could land anywhere.
+        done, _w, _l, clk = self._handle(
+            "accept", labels=[("", self.LABEL[1])],
+            windows=[("aw", "Trader Workstation", False), ("x", "", True)])
+        self.assertFalse(done)
+        clk.assert_not_called()
 
     def test_invalid_value_is_left_to_the_operator(self):
         with self.assertLogs("controller", level="WARNING") as cm:
@@ -4732,10 +4753,122 @@ class TestRedactLogsUsernames(unittest.TestCase):
         self.assertNotIn("1234567", out)
         self.assertEqual(out.count("[USER]"), 2)
 
+    def test_usernames_are_masked_in_any_case(self):
+        with patch.dict(os.environ, {"TWS_USERID": "LiveUser9", "TWS_USERID_PAPER": ""}):
+            self.assertNotIn("liveuser9", gc._redact_logs("user liveuser9 / LIVEUSER9").lower())
+
+    def test_advisor_and_broker_accounts_are_masked(self):
+        for acct in ("F1234567", "DF1234567", "I1234567", "DI1234567", "DU1234567"):
+            self.assertNotIn("1234567", gc._redact_logs(f"account {acct}"), acct)
+
     def test_short_or_empty_names_are_not_used(self):
         # A one- or two-character value would mangle ordinary text.
         with patch.dict(os.environ, {"TWS_USERID": "ab", "TWS_USERID_PAPER": ""}):
             self.assertEqual(gc._redact_logs("about cabs"), "about cabs")
+
+class TestSecurityHardening(unittest.TestCase):
+    """Security audit 2026-10-09."""
+
+    def setUp(self):
+        self.prev_state = gc._current_state
+        self.addCleanup(setattr, gc, "_current_state", self.prev_state)
+
+    # --- the command server can't undo a halt or overlap a relaunch ---
+
+    def test_commands_refuse_to_log_in_while_halted(self):
+        gc._current_state = gc.State.HALTED
+        with patch.object(gc, "do_restart_in_place") as restart, \
+             patch.object(gc, "attempt_reauth") as reauth:
+            self.assertTrue(gc._handle_command("RESTART").startswith("ERR RESTART: halted"))
+            self.assertTrue(gc._handle_command("RECONNECTACCOUNT").startswith(
+                "ERR RECONNECTACCOUNT: halted"))
+        restart.assert_not_called()
+        reauth.assert_not_called()
+
+    def test_restart_refused_while_another_relaunch_runs(self):
+        gc._current_state = gc.State.MONITORING
+        held, release = threading.Event(), threading.Event()
+        def hold():
+            with gc._restart_lock:
+                held.set()
+                release.wait(5)
+        t = threading.Thread(target=hold, daemon=True)
+        t.start()
+        held.wait(5)
+        try:
+            with patch.object(gc, "do_restart_in_place") as restart:
+                reply = gc._handle_command("RESTART")
+            self.assertIn("already in progress", reply)
+            restart.assert_not_called()
+        finally:
+            release.set()
+            t.join(5)
+
+    def test_relaunch_lock_is_reentrant(self):
+        # TWOFA_TIMEOUT_ACTION=restart relaunches from inside a relaunch.
+        calls = []
+        def relaunch():
+            calls.append(1)
+            return gc.do_restart_in_place() if len(calls) == 1 else True
+        result = {}
+        def run():
+            with patch.object(gc, "_teardown_jvm_for_restart"), \
+                 patch.object(gc, "_relaunch_and_login_in_place", side_effect=relaunch):
+                result["ok"] = gc.do_restart_in_place()
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        t.join(5)
+        self.assertFalse(t.is_alive(), "nested relaunch deadlocked")
+        self.assertTrue(result.get("ok"))
+
+    # --- /health can't be stalled by an idle connection ---
+
+    def test_idle_connection_does_not_stall_ready(self):
+        import socket as _socket
+        import urllib.request as _url
+        prev = (gc._health_server_thread, gc._health_server_httpd)
+        gc._health_server_thread = gc._health_server_httpd = None
+        with patch.dict(os.environ, {"CONTROLLER_HEALTH_SERVER_PORT": "0",
+                                     "CONTROLLER_HEALTH_SERVER_HOST": "127.0.0.1"}):
+            gc.start_health_server()
+        httpd = gc._health_server_httpd
+        try:
+            self.assertIsNotNone(httpd)
+            port = httpd.server_address[1]
+            idle = _socket.create_connection(("127.0.0.1", port))   # sends nothing
+            try:
+                with _url.urlopen(f"http://127.0.0.1:{port}/ready", timeout=3) as r:
+                    self.assertEqual(r.status, 200)
+            finally:
+                idle.close()
+        finally:
+            if httpd is not None:
+                httpd.shutdown()
+                httpd.server_close()
+            gc._health_server_thread, gc._health_server_httpd = prev
+
+    # --- Gateway's JVM doesn't get the controller's secrets ---
+
+    def test_secrets_stay_out_of_gateways_environment(self):
+        secrets = {"TWS_PASSWORD": "pw1", "TWS_PASSWORD_PAPER": "pw2",
+                   "TWOFACTOR_CODE": "JBSWY3DPEHPK3PXP",
+                   "CONTROLLER_COMMAND_SERVER_AUTH_TOKEN": "tok",
+                   "VNC_SERVER_PASSWORD": "vnc"}
+        with patch.dict(os.environ, secrets), \
+             patch.object(gc, "find_gateway_launcher", return_value="/x/ibgateway"), \
+             patch.object(gc, "apply_warm_state"), \
+             patch.object(gc, "ensure_jts_ini"), \
+             patch.object(gc.subprocess, "Popen", return_value=MagicMock(pid=5)) as popen, \
+             patch("builtins.open", MagicMock()), \
+             _capture_controller_errors():
+            try:
+                gc.launch_gateway()
+            except Exception:
+                pass
+        self.assertTrue(popen.called, "launch_gateway never reached Popen")
+        env = popen.call_args.kwargs.get("env", {})
+        for k in secrets:
+            self.assertNotIn(k, env, k)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
