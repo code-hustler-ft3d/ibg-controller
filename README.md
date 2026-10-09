@@ -231,7 +231,7 @@ real product.
 | Var | Notes |
 |---|---|
 | `TWS_SERVER` / `TWS_SERVER_PAPER` | IBKR regional server hostname — see [`docs/BOOTSTRAP.md`](docs/BOOTSTRAP.md) |
-| `GATEWAY_OR_TWS` | `gateway` (default) or `tws` |
+| `GATEWAY_OR_TWS` | `gateway` (default) or `tws`. **TWS is experimental**: this image ships IB Gateway only, so TWS means your own install. The controller then checks TWS's API port: `API_PORT` when set (the image's scripts export it), otherwise 7496 live / 7497 paper |
 
 ### Dialog handling
 
@@ -243,6 +243,7 @@ real product.
 | `RELOGIN_AFTER_TWOFA_TIMEOUT` | `yes`/`no`: re-drive the login form once before the timeout action |
 | `BYPASS_WARNING` | Extra disclaimer button labels to auto-dismiss (comma/semicolon-separated). Bare `OK` is refused — it cancels in-progress logins. |
 | `TWS_COLD_RESTART` | `yes` skips the warm-state copy and cold-starts Gateway |
+| `TWS_ACCEPT_INCOMING` | What to do with the "Accept incoming connection" dialog Gateway or TWS shows when an API client connects from an address outside Trusted IPs: `manual` (default) leaves it to you, `accept` / `reject` answers it, as IBC's `AcceptIncomingConnectionAction` did. Adding your clients to Trusted IPs is safer than `accept`, which lets any client that can reach the port connect |
 
 ### Post-login API config
 

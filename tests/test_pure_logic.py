@@ -4588,5 +4588,118 @@ class TestLogoffBackstop(unittest.TestCase):
         proc.terminate.assert_called_once()
         proc.kill.assert_not_called()
 
+class TestApiPortFromEnvAndProduct(unittest.TestCase):
+    """Issue #58: the API port assumed Gateway's 4001/4002, so with TWS
+    every readiness and health check probed a port TWS doesn't listen on."""
+
+    def _port(self, env, product="gateway", mode="live"):
+        with patch.dict(os.environ, env), \
+             patch.object(gc, "GATEWAY_OR_TWS", product), \
+             patch.object(gc, "TRADING_MODE", mode):
+            return gc.api_port_for_mode()
+
+    def test_run_sh_export_wins(self):
+        # run.sh exports API_PORT per mode; on Gateway it is 4001 / 4002,
+        # so nothing changes there.
+        self.assertEqual(self._port({"API_PORT": "4001"}), 4001)
+        self.assertEqual(self._port({"API_PORT": "7497"}, "tws", "paper"), 7497)
+        # A port that differs from every default, so the export is what's read.
+        self.assertEqual(self._port({"API_PORT": "4011"}), 4011)
+
+    def test_product_defaults_without_the_export(self):
+        self.assertEqual(self._port({"API_PORT": ""}), 4001)
+        self.assertEqual(self._port({"API_PORT": ""}, mode="paper"), 4002)
+        self.assertEqual(self._port({"API_PORT": ""}, "tws"), 7496)
+        self.assertEqual(self._port({"API_PORT": ""}, "tws", "paper"), 7497)
+
+    def test_garbage_falls_back_to_the_default(self):
+        self.assertEqual(self._port({"API_PORT": "abc"}), 4001)
+        self.assertEqual(self._port({"API_PORT": "99999"}, "tws"), 7496)
+
+
+class TestIncomingConnectionDialog(unittest.TestCase):
+    """Issue #58: TWS_ACCEPT_INCOMING, as IBC's AcceptIncomingConnectionAction:
+    a label containing "Accept incoming connection"; accept clicks OK or Yes,
+    reject clicks No, manual (the default) leaves it alone."""
+
+    LABEL = ("Accept Incoming Connection",
+             "Accept incoming connection attempt from 172.17.0.5?")
+    WINDOWS = [("aw", "Trader Workstation", False),
+               ("x", "Accept Incoming Connection", True)]
+
+    def setUp(self):
+        gc._incoming_last_windows = None
+        gc._incoming_warned.clear()
+
+    def _handle(self, action, labels=None, click=True, windows=None):
+        with patch.dict(os.environ, {"TWS_ACCEPT_INCOMING": action}), \
+             patch.object(gc, "agent_windows", return_value=windows or self.WINDOWS) as wins, \
+             patch.object(gc, "agent_labels",
+                          return_value=[self.LABEL] if labels is None else labels) as lab, \
+             patch.object(gc, "agent_click_in_window",
+                          side_effect=(lambda t, b: click(b)) if callable(click)
+                          else (lambda t, b: click)) as clk, \
+             _capture_controller_errors():
+            done = gc._handle_incoming_connection_dialog()
+        return done, wins, lab, clk
+
+    def test_manual_and_unset_do_nothing(self):
+        for action in ("", "manual", "MANUAL"):
+            done, wins, _lab, clk = self._handle(action)
+            self.assertFalse(done)
+            wins.assert_not_called()
+            clk.assert_not_called()
+
+    def test_accept_clicks_ok(self):
+        done, _w, _l, clk = self._handle("accept")
+        self.assertTrue(done)
+        clk.assert_called_once_with("Accept Incoming Connection", "OK")
+
+    def test_accept_falls_back_to_yes(self):
+        done, _w, _l, clk = self._handle("Accept", click=lambda b: b == "Yes")
+        self.assertTrue(done)
+        self.assertEqual([c.args[1] for c in clk.call_args_list], ["OK", "Yes"])
+
+    def test_reject_clicks_no(self):
+        done, _w, _l, clk = self._handle("reject")
+        self.assertTrue(done)
+        clk.assert_called_once_with("Accept Incoming Connection", "No")
+
+    def test_no_dialog_no_click(self):
+        done, _w, _l, clk = self._handle("accept", labels=[])
+        self.assertFalse(done)
+        clk.assert_not_called()
+
+    def test_labels_read_only_when_the_window_list_changes(self):
+        self._handle("accept", labels=[])                 # nothing there
+        _d, _w, lab, _c = self._handle("accept", labels=[])
+        lab.assert_not_called()                            # same windows: skip
+        _d, _w, lab, _c = self._handle(
+            "accept", windows=self.WINDOWS + [("y", "Other", True)])
+        lab.assert_called_once()
+
+    def test_invalid_value_is_left_to_the_operator(self):
+        with self.assertLogs("controller", level="WARNING") as cm:
+            done, wins, _l, clk = self._handle("yes")
+            self._handle("yes")
+        self.assertFalse(done)
+        clk.assert_not_called()
+        self.assertEqual(sum("not understood" in m for m in cm.output), 1)
+
+    def test_monitor_pause_checks_every_second_only_when_set(self):
+        with patch.dict(os.environ, {"TWS_ACCEPT_INCOMING": ""}), \
+             patch.object(gc.time, "sleep") as sl, \
+             patch.object(gc, "_handle_incoming_connection_dialog") as h:
+            gc._sleep_watching_incoming(5)
+        sl.assert_called_once_with(5)
+        h.assert_not_called()
+        with patch.dict(os.environ, {"TWS_ACCEPT_INCOMING": "accept"}), \
+             patch.object(gc.time, "sleep") as sl, \
+             patch.object(gc, "_handle_incoming_connection_dialog") as h, \
+             _capture_controller_errors():
+            gc._sleep_watching_incoming(5)
+        self.assertEqual(sl.call_count, 5)
+        self.assertEqual(h.call_count, 5)
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

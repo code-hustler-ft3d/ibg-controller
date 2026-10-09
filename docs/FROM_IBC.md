@@ -69,6 +69,7 @@ review). The tool's `--help` output lists every key it knows about.
 | `BypassWarning` | `BYPASS_WARNING` | **Different shape**. IBC's yes/no maps to a comma-separated allowlist of exact button labels. Review what dialogs your Gateway actually shows and list them: `BYPASS_WARNING="Yes,Continue,Acknowledge"`. |
 | `SaveTwsSettingsAt` | `SAVE_TWS_SETTINGS` | Same. |
 | `TimeZone` | `TIME_ZONE` | Same. |
+| `AcceptIncomingConnectionAction` | `TWS_ACCEPT_INCOMING` | `accept` / `reject` / `manual` (default). Same dialog and buttons as IBC; adding your clients to Trusted IPs is safer than `accept`. |
 | `TwsSettingsPath` | `TWS_SETTINGS_PATH` | Same. |
 
 ### Command server
