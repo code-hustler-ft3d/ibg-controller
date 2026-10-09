@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.15.1
 
 - **`TWS_ACCEPT_INCOMING` is honored.** If you carried
   `TWS_ACCEPT_INCOMING=accept` or `reject` over from IBC, the controller
