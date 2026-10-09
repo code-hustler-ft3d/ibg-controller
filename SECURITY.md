@@ -63,7 +63,7 @@ Verify the image signature:
 IMAGE=ghcr.io/code-hustler-ft3d/ibg-controller:v0.5.9   # replace with your tag
 
 cosign verify \
-  --certificate-identity-regexp '^https://github.com/code-hustler-ft3d/ibg-controller/\.github/workflows/release-image\.yml@' \
+  --certificate-identity-regexp '^https://github.com/code-hustler-ft3d/ibg-controller/\.github/workflows/release-image\.yml@refs/tags/v[0-9]' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "$IMAGE"
 ```
@@ -72,12 +72,14 @@ Expected output includes `Verified OK` and a JSON block showing the
 OIDC identity (GitHub repo + workflow file + git ref) that signed it.
 If `certificate-identity-regexp` *doesn't* match
 `code-hustler-ft3d/ibg-controller`, the image wasn't signed by this
-project's workflow — treat it as untrusted.
+project's workflow — treat it as untrusted. The `@refs/tags/v` suffix
+accepts only signatures made by a release-tag build; every published
+release is signed that way.
 
 Verify + extract the SBOM:
 ```bash
 cosign verify-attestation --type spdxjson \
-  --certificate-identity-regexp '^https://github.com/code-hustler-ft3d/ibg-controller/\.github/workflows/release-image\.yml@' \
+  --certificate-identity-regexp '^https://github.com/code-hustler-ft3d/ibg-controller/\.github/workflows/release-image\.yml@refs/tags/v[0-9]' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   "$IMAGE" \
   | jq -r '.payload' | base64 -d | jq '.predicate' > sbom.spdx.json

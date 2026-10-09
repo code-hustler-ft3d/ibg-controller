@@ -78,7 +78,7 @@ review). The tool's `--help` output lists every key it knows about.
 |---|---|---|
 | `CommandServerPort` | `CONTROLLER_COMMAND_SERVER_PORT` | Same. In dual-mode, paper auto-offsets to `port+1`. |
 | `IbControllerPort` | `CONTROLLER_COMMAND_SERVER_PORT` | Legacy IBC alias — same target. |
-| `BindAddress` | `CONTROLLER_COMMAND_SERVER_HOST` | Same. Defaults to `0.0.0.0` so Docker port forwarding works; restrict external exposure with `-p 127.0.0.1:7462:7462` on the host. |
+| `BindAddress` | `CONTROLLER_COMMAND_SERVER_HOST` | Same. Defaults to `0.0.0.0` so Docker port forwarding works. Set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN`: `-p 127.0.0.1:7462:7462` keeps the host's network out, but not other containers on the same Docker network. |
 | `ControlFrom` | — | IBC uses an IP allowlist. ibg-controller uses an auth token instead: set `CONTROLLER_COMMAND_SERVER_AUTH_TOKEN=<random-secret>` and clients send `AUTH <token>\n` before each command. See [README.md §Security](../README.md#security). |
 
 ### Unsupported IBC keys

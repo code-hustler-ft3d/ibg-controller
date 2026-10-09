@@ -4,6 +4,45 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Security
+
+- **Configured usernames are masked in logs.** `_redact_logs` masked
+  account numbers only, though its docstring also promised usernames.
+  The upstream watchdog logs dialog text and `launcher.log` lines
+  verbatim before a relaunch, so `TWS_USERID` and `TWS_USERID_PAPER` are
+  now replaced with `[USER]` wherever they appear.
+- **`TWS_ACCEPT_INCOMING` refuses an ambiguous click.** It clicks by
+  window title, modal dialogs first, so with another window sharing the
+  incoming-connection dialog's title, or an empty title, the click could
+  land on the wrong window. It now acts only when the title names exactly
+  one window, and otherwise leaves the dialog to the operator and says so.
+- **The command server can't undo a halt.** Halts no longer exit, so the
+  command server stays up; `RESTART` and `RECONNECTACCOUNT` would log in
+  again after a rejected password or a CCP lockout. They are now refused
+  while halted, and while another relaunch is running. A halt raised by a
+  command-started login now stops the monitor loop too, and one lock
+  keeps the command server, the monitor loop and the upstream watchdog
+  from relaunching at once.
+- **One idle connection can't stall `/health`.** The health server was
+  single-threaded with no timeout, so a client that connected and sent
+  nothing blocked `/health` and `/ready` for everyone, failing the
+  healthcheck and liveness probes. It is now threaded, with a 5 s timeout
+  per connection.
+- **Gateway's JVM no longer receives the controller's secrets.** It got a
+  copy of the whole environment, including `TWS_PASSWORD*`,
+  `TWOFACTOR_CODE*`, `VNC_SERVER_PASSWORD` and the command-server token;
+  Gateway reads none of them (the password reaches it through the agent
+  socket).
+- **More identifiers are masked in logs:** usernames in any letter case,
+  advisor and broker accounts (`F`, `I`, `DF`, `DI` prefixes), and the
+  passkey-failure dump, which skipped masking.
+- **Docs:** the command server's `-p 127.0.0.1:` advice doesn't keep out
+  other containers on the same Docker network, so the docs now say to
+  set the auth token. SECURITY.md's signature check now requires a
+  release-tag identity (`@refs/tags/v`).
+
 ## [0.15.1] - 2026-10-09
 
 ### Added

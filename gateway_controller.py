@@ -46,7 +46,7 @@ import sys
 import threading
 import time
 from datetime import datetime, time as dtime, timedelta
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
 
@@ -172,16 +172,21 @@ def _redact_logs(s):
     logs users may share to ask for help. Redact them so the default
     debug-log experience doesn't leak identifiers.
 
-    Also masks obvious username-looking tokens in titles. Applied
-    conservatively — we don't redact log bodies of components we
-    care about (e.g. "Existing session detected"), only the
-    account-number pattern.
+    Also masks the configured IBKR usernames (TWS_USERID and
+    TWS_USERID_PAPER) wherever they appear: the upstream watchdog logs
+    dialog text and launcher.log lines verbatim before a relaunch.
     """
     if not isinstance(s, str):
         return s
     import re as _re
     # Paper accounts start with DU, live with U + digits (IBKR convention)
-    s = _re.sub(r"\b(DU|U)\d{5,10}\b", r"\1[REDACTED]", s)
+    # (advisor and broker accounts use F/I, and DF/DI on paper).
+    s = _re.sub(r"\b(DU|DF|DI|U|F|I)\d{5,10}\b", r"\1[REDACTED]", s)
+    for name in {os.environ.get("TWS_USERID", ""),
+                 os.environ.get("TWS_USERID_PAPER", "")}:
+        name = name.strip()
+        if len(name) >= 3:
+            s = _re.sub(_re.escape(name), "[USER]", s, flags=_re.IGNORECASE)
     return s
 
 
@@ -1093,6 +1098,12 @@ def launch_gateway():
     ensure_jts_ini()
 
     env = os.environ.copy()
+    # Gateway never reads these; the password reaches it through the agent
+    # socket. Keep them out of the JVM's environment.
+    for secret in ("TWS_PASSWORD", "TWS_PASSWORD_PAPER", "TWOFACTOR_CODE",
+                   "TWOFACTOR_CODE_PAPER", "VNC_SERVER_PASSWORD",
+                   "CONTROLLER_COMMAND_SERVER_AUTH_TOKEN"):
+        env.pop(secret, None)
     # Java module-access flags required by Gateway's auth and UI code.
     # Without these, reflective access to internal JDK classes fails
     # silently and AuthDispatcher.connect never fires — the auth request
@@ -1795,7 +1806,8 @@ def _handle_passkey_prompt(title):
         'ALERT_2FA_FAILED mode=%s reason="passkey Authenticate lookup failed"',
         TRADING_MODE)
     log.error("Passkey matching accessible names (escaped): %r", sorted(names))
-    log.error("Passkey dialog state after failed lookup:\n%s", agent_window(title))
+    log.error("Passkey dialog state after failed lookup:\n%s",
+              _redact_logs(agent_window(title)))
     return False
 
 
@@ -2558,6 +2570,21 @@ def _handle_incoming_connection_dialog():
         _incoming_last_windows = key
         return False
     title, text = hits[0]
+    # CLICK_IN_WIN clicks the first matching button in any window whose
+    # title contains this one, modal dialogs first. With two dialogs
+    # matching, "Yes" could land on the other one (a confirmation, say),
+    # so refuse rather than guess.
+    # Exactly one window, of any kind, may match: otherwise the "OK" pass
+    # can fall through to another window with that title (the main frame,
+    # or another dialog) before "Yes" is tried. An empty title matches
+    # every window.
+    if not title or sum(1 for _w, t, _m in windows if title in t) != 1:
+        log.warning(f"Incoming-connection dialog found, but its title "
+                    f"{_redact_logs(title)!r} doesn't name exactly one "
+                    "window; leaving it for you rather than risk clicking "
+                    "the wrong one")
+        _incoming_last_windows = key
+        return False
     buttons = ("OK", "Yes") if action == "accept" else ("No",)
     for button in buttons:
         if agent_click_in_window(title, button):
@@ -4102,6 +4129,12 @@ def _escalate_to_jvm_restart(reason):
         return False
 
     cap = _CCP_LOCKOUT_MAX_JVM_RESTARTS
+    with _restart_lock:
+        return _escalate_restart_loop(reason, cap)
+
+
+def _escalate_restart_loop(reason, cap):
+    """The opt-in CCP restart loop, under the relaunch lock."""
     for attempt in range(1, cap + 1):
         log.warning(f"JVM restart attempt {attempt}/{cap}: "
                     "tearing down JVM before long cool-down (v0.4.6 silent cool-down)")
@@ -5674,8 +5707,10 @@ def main():
 #
 # The listener runs in a daemon thread so it dies with the process.
 # Single-connection at a time (no concurrency). Bind address is
-# configurable via CONTROLLER_COMMAND_SERVER_HOST (default 127.0.0.1
-# — localhost only, matching IBC's default).
+# configurable via CONTROLLER_COMMAND_SERVER_HOST (default 0.0.0.0, so a
+# published port reaches it). Set CONTROLLER_COMMAND_SERVER_AUTH_TOKEN:
+# -p 127.0.0.1:... keeps the host's network out, but not other
+# containers on the same Docker network.
 
 _command_server_thread = None
 _command_server_app = None
@@ -5929,6 +5964,8 @@ class _HealthHandler(BaseHTTPRequestHandler):
     Kubernetes-style readiness where "process up" is the signal).
     """
 
+    timeout = 5  # seconds an idle connection may hold its thread
+
     def log_message(self, format, *args):
         # Silence the default stderr access log. The controller's own
         # logger stays the single source of truth, and Docker
@@ -5981,7 +6018,11 @@ def start_health_server():
     host = os.environ.get("CONTROLLER_HEALTH_SERVER_HOST", "0.0.0.0").strip()
 
     try:
-        httpd = HTTPServer((host, port), _HealthHandler)
+        # Threaded, with a per-connection timeout: on a single-threaded
+        # server one idle connection blocked /health and /ready for
+        # everyone, failing the healthcheck and any liveness probe.
+        httpd = ThreadingHTTPServer((host, port), _HealthHandler)
+        httpd.daemon_threads = True
     except Exception as e:
         log.error(f"Health server: bind/listen failed: {type(e).__name__}: {e}")
         return
@@ -6262,13 +6303,36 @@ def do_restart_in_place():
     relaunch (JVM dead during the cool-down = genuinely silent from
     IBKR's perspective = CCP limiter actually clears).
     """
-    _teardown_jvm_for_restart()
-    return _relaunch_and_login_in_place()
+    with _restart_lock:
+        _teardown_jvm_for_restart()
+        return _relaunch_and_login_in_place()
+
+
+# One relaunch at a time: the command server's RESTART, the monitor loop's
+# recovery and the upstream watchdog could otherwise overlap. Reentrant,
+# because TWOFA_TIMEOUT_ACTION=restart relaunches from inside a relaunch.
+_restart_lock = threading.RLock()
+
+
+def _relaunch_in_progress():
+    """True when another thread holds the relaunch lock."""
+    if _restart_lock.acquire(blocking=False):
+        _restart_lock.release()
+        return False
+    return True
 
 
 def _handle_command(cmd):
     """Dispatch a single command string to the appropriate controller
     action. Returns the response string to send back to the client."""
+    if cmd in ("RESTART", "RECONNECTACCOUNT"):
+        if _current_state == State.HALTED:
+            # A halt means a login must not be retried until a person
+            # fixes the cause; a login now would repeat what it stopped.
+            return (f"ERR {cmd}: halted; fix the cause and restart the "
+                    "container")
+        if _relaunch_in_progress():
+            return f"ERR {cmd}: a relaunch is already in progress"
     if cmd == "STOP":
         log.info("Command server: STOP received — initiating shutdown")
         # Send SIGTERM to ourselves so the existing shutdown path runs
@@ -6365,6 +6429,13 @@ def monitor_loop(app):
     log.info(f"Monitor: JVM pid={GATEWAY_PROC.pid}, heartbeat API port {api_port} every {HEARTBEAT_INTERVAL}s")
 
     while True:
+        # A halt raised on another thread (a login the command server
+        # started) stops this loop acting too; that thread keeps
+        # repeating the reason.
+        if _current_state == State.HALTED:
+            time.sleep(5)
+            continue
+
         # Always consult the live globals — a RESTART command may have
         # replaced them since the last iteration.
         gw = GATEWAY_PROC
