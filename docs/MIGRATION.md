@@ -170,8 +170,19 @@ Reconnect Data menu item) and dispatches against TWS.
 ### Honored by v0.2 — product selector
 
 - **`GATEWAY_OR_TWS`** — `gateway` (default) or `tws`. Switches
-  launcher discovery and the agent's window-title match. TWS live
-  validation is pending a TWS-with-controller Dockerfile variant.
+  launcher discovery, the agent's window-title match, and the API port
+  the controller checks (`API_PORT` when set, otherwise 7496 live /
+  7497 paper for TWS). TWS is experimental: the image ships IB Gateway
+  only, and TWS hasn't been validated live with the controller.
+
+### Incoming API connection dialog
+
+- **`TWS_ACCEPT_INCOMING`** — `manual` (default), `accept` or `reject`,
+  as IBC's `AcceptIncomingConnectionAction`. Gateway and TWS ask
+  "Accept incoming connection attempt from …?" when a client connects
+  from an address outside Trusted IPs; `accept` clicks OK or Yes,
+  `reject` clicks No, `manual` leaves it to you. Adding the client to
+  Trusted IPs is safer and avoids the dialog.
 
 ### Env vars NOT honored (still not implemented)
 

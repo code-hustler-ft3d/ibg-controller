@@ -68,6 +68,13 @@ class TestDirectMappings(unittest.TestCase):
         self.assertEqual(d["TRADING_MODE"], "live")
         self.assertEqual(warnings, [])
 
+    def test_accept_incoming_connection_action(self):
+        # Issue #58: IBC's setting carries over to TWS_ACCEPT_INCOMING.
+        pairs = ibc.parse_ibc_config("AcceptIncomingConnectionAction=Accept\n")
+        env, warnings = ibc.convert(pairs)
+        self.assertEqual(dict(env)["TWS_ACCEPT_INCOMING"], "accept")
+        self.assertEqual(warnings, [])
+
     def test_yes_no_transform(self):
         pairs = ibc.parse_ibc_config(
             "ReadOnlyApi=Yes\nAllowBlindTrading=FALSE\n")

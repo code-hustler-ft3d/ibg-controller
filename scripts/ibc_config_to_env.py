@@ -77,6 +77,8 @@ DIRECT_MAPPINGS: Dict[str, Tuple[str, Callable[[str], Optional[str]]]] = {
         "RELOGIN_AFTER_TWOFA_TIMEOUT", _yes_no),
     "SaveTwsSettingsAt": ("SAVE_TWS_SETTINGS", _identity),
     "TimeZone": ("TIME_ZONE", _identity),
+    "AcceptIncomingConnectionAction": (
+        "TWS_ACCEPT_INCOMING", lambda v: v.strip().lower()),
     # v0.7.0+: TWOFA_DEVICE is honored on multi-method accounts (the
     # controller checks Gateway's 2FA prompt / device selector against
     # it). Previously listed as handled-implicitly; that was true only

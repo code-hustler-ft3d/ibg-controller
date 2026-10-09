@@ -4,6 +4,33 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`TWS_ACCEPT_INCOMING` (issue #58).** Gateway and TWS ask "Accept
+  incoming connection attempt from …?" when an API client connects from
+  an address outside Trusted IPs. IBC answered it through
+  `AcceptIncomingConnectionAction`, which gnzsnz images expose as
+  `TWS_ACCEPT_INCOMING`; the controller ignored it, so the dialog waited
+  for a click while the client hung. Now, as IBC did: a label containing
+  "Accept incoming connection"; `accept` clicks OK or Yes, `reject`
+  clicks No, `manual` (the default) leaves it alone. While set, the
+  monitor loop checks every second, reading labels only when the window
+  list changes. `ibc_config_to_env.py` maps the IBC key.
+
+### Fixed
+
+- **The API port follows the product (issue #58).** The controller
+  assumed Gateway's ports (4001 / 4002), so with TWS every readiness,
+  heartbeat and `/health` check probed a port TWS doesn't listen on. It
+  now uses `API_PORT` when set (the image's scripts export it per mode
+  and product), otherwise 7496 / 7497 for TWS and 4001 / 4002 for
+  Gateway. Gateway containers already receive 4001 / 4002, so nothing
+  changes for them.
+- **README: TWS support is marked experimental.** The image ships IB
+  Gateway only, and TWS hasn't been validated live with the controller.
+
 ## [0.15.0] - 2026-10-04
 
 ### Added

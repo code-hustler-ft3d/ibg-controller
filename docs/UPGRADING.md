@@ -76,6 +76,13 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **`TWS_ACCEPT_INCOMING` is honored.** If you carried
+  `TWS_ACCEPT_INCOMING=accept` or `reject` over from IBC, the controller
+  now answers the "Accept incoming connection" dialog accordingly; it
+  used to leave it waiting. Unset or `manual`: no change.
+
 ### v0.15.0
 
 - **`/health` can now be 503 while the API port is open.** A new state,

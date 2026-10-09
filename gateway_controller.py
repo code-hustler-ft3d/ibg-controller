@@ -2488,8 +2488,101 @@ SAFE_DISMISS_BUTTONS = _resolve_safe_dismiss_buttons()
 
 
 def api_port_for_mode():
-    """Return Gateway's API listen port for the current trading mode."""
+    """Return the API listen port for the current trading mode.
+
+    run.sh exports API_PORT per mode and product (Gateway 4001 live /
+    4002 paper, TWS 7496 / 7497); without it, the product's defaults.
+    This used to assume Gateway's ports, so with TWS every readiness and
+    health check probed a port TWS doesn't listen on (issue #58).
+    """
+    raw = os.environ.get("API_PORT", "").strip()
+    if raw.isdigit() and 0 < int(raw) < 65536:
+        return int(raw)
+    if GATEWAY_OR_TWS == "tws":
+        return 7497 if TRADING_MODE == "paper" else 7496
     return 4002 if TRADING_MODE == "paper" else 4001
+
+
+# --- Incoming API connections (issue #58) ---------------------------------
+# TWS and Gateway ask "Accept incoming connection attempt from <ip>?" when
+# an API client connects from an address not in Trusted IPs. IBC answered
+# it through AcceptIncomingConnectionAction, which gnzsnz images expose as
+# TWS_ACCEPT_INCOMING; the controller ignored it, so the dialog waited for
+# a click while the client hung. Same recognition and buttons as IBC: a
+# label containing "Accept incoming connection"; accept clicks OK or Yes,
+# reject clicks No; manual (the default) leaves it alone. Adding the
+# client to Trusted IPs is safer and avoids the dialog entirely.
+_INCOMING_LABEL = "Accept incoming connection"
+_incoming_warned = set()
+_incoming_last_windows = None
+
+
+def _incoming_connection_action():
+    """'accept', 'reject', or None (manual, unset, or not understood)."""
+    v = os.environ.get("TWS_ACCEPT_INCOMING", "").strip().lower()
+    if v == "accept" and "accept" not in _incoming_warned:
+        _incoming_warned.add("accept")
+        log.warning("TWS_ACCEPT_INCOMING=accept: API connections from "
+                    "addresses outside Trusted IPs will be accepted. Adding "
+                    "your clients to Trusted IPs instead is safer.")
+    if v in ("accept", "reject"):
+        return v
+    if v not in ("", "manual") and "invalid" not in _incoming_warned:
+        _incoming_warned.add("invalid")
+        log.warning(f"TWS_ACCEPT_INCOMING={v!r} not understood; use accept, "
+                    "reject or manual. Leaving incoming-connection dialogs "
+                    "to you.")
+    return None
+
+
+def _handle_incoming_connection_dialog():
+    """Answer one incoming-connection dialog per TWS_ACCEPT_INCOMING.
+    True when it clicked. Reads labels only when the window list changed,
+    so the per-second check costs one cheap agent call."""
+    global _incoming_last_windows
+    action = _incoming_connection_action()
+    if action is None:
+        return False
+    try:
+        windows = agent_windows()
+    except Exception:
+        return False
+    key = tuple(sorted((title, modal) for _w, title, modal in windows))
+    if key == _incoming_last_windows:
+        return False
+    try:
+        hits = agent_labels(_INCOMING_LABEL)
+    except Exception:
+        return False
+    if not hits:
+        _incoming_last_windows = key
+        return False
+    title, text = hits[0]
+    buttons = ("OK", "Yes") if action == "accept" else ("No",)
+    for button in buttons:
+        if agent_click_in_window(title, button):
+            log.info(f"Incoming API connection "
+                     f"{'accepted' if action == 'accept' else 'rejected'} "
+                     f"(TWS_ACCEPT_INCOMING={action}): {_redact_logs(text)!r}")
+            _incoming_last_windows = None  # another may follow at once
+            return True
+    log.warning(f"Incoming-connection dialog found but no "
+                f"{' or '.join(buttons)} button to click in "
+                f"{_redact_logs(title)!r}; leaving it for you")
+    _incoming_last_windows = key
+    return False
+
+
+def _sleep_watching_incoming(seconds):
+    """The monitor loop's pause. With TWS_ACCEPT_INCOMING set it checks for
+    the incoming-connection dialog every second, because the client waits
+    on it; otherwise a plain sleep."""
+    if _incoming_connection_action() is None:
+        time.sleep(seconds)
+        return
+    for _ in range(int(seconds)):
+        _handle_incoming_connection_dialog()
+        time.sleep(1)
 
 
 def is_api_port_open(port=None):
@@ -6435,7 +6528,7 @@ def monitor_loop(app):
                         consecutive_failures = 0
                         wedged_failures = 0
 
-        time.sleep(5)
+        _sleep_watching_incoming(5)
 
 
 def attempt_reauth(app):
