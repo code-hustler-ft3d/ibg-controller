@@ -76,7 +76,7 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
-### Unreleased
+### v0.16.0
 
 - **IB Gateway 10.50.1f.** Release images move from 10.45.1j to the
   current stable line. Your first login runs on the new Gateway version;
