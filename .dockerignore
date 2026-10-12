@@ -1,0 +1,8 @@
+# Only what the Dockerfile copies. Everything else, .git above all (which
+# may hold a CI token), stays out of the build context a base image's
+# ONBUILD steps could read.
+*
+!dist/gateway-input-agent.jar
+!dist/gateway_controller.py
+!docker/run.sh
+!scripts/healthcheck.sh

@@ -264,7 +264,10 @@ Why each was added:
    tree via `JTREE_SELECT_PATH`, apply values via `SETTEXT_BY_LABEL`
    and `JCHECK`, commit via `CLICK_IN_WIN Configuration|OK`. Gateway
    shows *either* Auto Log Off Time *or* Auto Restart Time in Lock
-   and Exit depending on account state; the handler tries both labels.
+   and Exit, depending on which of its Auto logoff / Auto restart radio
+   buttons is selected. With only `AUTO_RESTART_TIME` set the handler
+   selects Auto restart first (`JCHECK`), then sets the AM/PM radio to
+   match the time.
 10. **Command server** (v0.2): `start_command_server()` — if
     `CONTROLLER_COMMAND_SERVER_PORT` is set, start a daemon thread
     listening on that TCP port for IBC-compat commands (`STOP`,

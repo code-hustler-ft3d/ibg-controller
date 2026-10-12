@@ -173,6 +173,19 @@ def main():
         check("same-title modal: the dialog's own OK was clicked",
               "CLICKED|same-title-modal" in lines, reply)
 
+        print("\n--- JCHECK needs exactly one showing, enabled match ---")
+        r = request("JCHECK Toggle Case|AM|true")
+        check("two toggles named AM: refused as ambiguous",
+              r.startswith("ERR jcheck_ambiguous"), r)
+        before = len(lines)
+        r = request("JCHECK Toggle Case|Solo|true")
+        check("a unique toggle is set", r.startswith("OK changed"), r)
+        time.sleep(0.5)
+        check("the toggle really changed",
+              "TOGGLED|Solo|true" in lines[before:], str(lines[before:]))
+        r = request("JCHECK Toggle Case|Disabled|true")
+        check("a disabled toggle is not touched", r.startswith("ERR not_found"), r)
+
         print("\n--- errors that must not change ---")
         r = request("JLIST_SELECT No Such Window|x")
         check("missing window: ERR not_found", r.startswith("ERR not_found"), r)

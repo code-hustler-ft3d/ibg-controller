@@ -4,10 +4,13 @@ import java.awt.Dialog;
 import java.awt.Frame;
 import javax.swing.DefaultListCellRenderer;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JList;
+import javax.swing.JPanel;
+import javax.swing.JRadioButton;
 import javax.swing.JScrollPane;
 import javax.swing.SwingUtilities;
 
@@ -111,6 +114,25 @@ public class JListSelectFixture {
             modal.add(ok, BorderLayout.SOUTH);
             modal.pack();
             SwingUtilities.invokeLater(() -> modal.setVisible(true));
+
+            // JCHECK must refuse two showing toggles with the same name,
+            // and skip a disabled one.
+            JDialog toggles = new JDialog((Frame) null, "Toggle Case", false);
+            JPanel tp = new JPanel();
+            tp.add(new JRadioButton("AM"));
+            tp.add(new JRadioButton("AM"));
+            JCheckBox solo = new JCheckBox("Solo");
+            solo.addItemListener(e -> {
+                System.out.println("TOGGLED|Solo|" + solo.isSelected());
+                System.out.flush();
+            });
+            tp.add(solo);
+            JCheckBox off = new JCheckBox("Disabled");
+            off.setEnabled(false);
+            tp.add(off);
+            toggles.add(tp);
+            toggles.pack();
+            toggles.setVisible(true);
         });
         System.out.println("READY");
         System.out.flush();

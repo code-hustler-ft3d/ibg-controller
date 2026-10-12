@@ -162,6 +162,27 @@ def _validate_hostname(value, varname):
     return value
 
 
+_IPV4_RE = re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?!\w|\.\d)")
+_IPV6_RE = re.compile(r"(?<![\w:])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![\w:])")
+
+
+def _mask_public_ips(s):
+    """Replace public IP addresses with [IP]. Gateway's dialogs and logs name
+    the address of a competing session or a connecting client; private,
+    loopback and link-local addresses (Docker's own) stay, as they're what
+    an operator needs for Trusted IPs and identify no one."""
+    import ipaddress as _ip
+
+    def repl(m):
+        try:
+            a = _ip.ip_address(m.group(0))
+        except ValueError:
+            return m.group(0)
+        keep = a.is_private or a.is_loopback or a.is_link_local or a.is_unspecified
+        return m.group(0) if keep else "[IP]"
+    return _IPV6_RE.sub(repl, _IPV4_RE.sub(repl, s))
+
+
 def _redact_logs(s):
     """Strip sensitive patterns from a log line before we emit it.
 
@@ -173,8 +194,10 @@ def _redact_logs(s):
     debug-log experience doesn't leak identifiers.
 
     Also masks the configured IBKR usernames (TWS_USERID and
-    TWS_USERID_PAPER) wherever they appear: the upstream watchdog logs
-    dialog text and launcher.log lines verbatim before a relaunch.
+    TWS_USERID_PAPER) wherever they appear, and public IP addresses: the
+    upstream watchdog logs dialog text and launcher.log lines verbatim
+    before a relaunch, and the existing-session dialog names the other
+    session's address.
     """
     if not isinstance(s, str):
         return s
@@ -182,6 +205,7 @@ def _redact_logs(s):
     # Paper accounts start with DU, live with U + digits (IBKR convention)
     # (advisor and broker accounts use F/I, and DF/DI on paper).
     s = _re.sub(r"\b(DU|DF|DI|U|F|I)\d{5,10}\b", r"\1[REDACTED]", s)
+    s = _mask_public_ips(s)
     for name in {os.environ.get("TWS_USERID", ""),
                  os.environ.get("TWS_USERID_PAPER", "")}:
         name = name.strip()
@@ -805,7 +829,10 @@ def agent_windows():
     text fields and only an OK button — we can't distinguish them from
     LIST output alone.
     """
-    raw = _agent_multiline("WINDOWS")
+    return _parse_windows(_agent_multiline("WINDOWS"))
+
+
+def _parse_windows(raw):
     out = []
     for line in raw.splitlines():
         if line in ("OK", "END") or not line:
@@ -1212,8 +1239,11 @@ def launch_gateway():
     )
     log.info(f"Gateway PID: {proc.pid} (JVM console -> {jvm_console_path})")
     global _JVM_STARTED_WALL, _logoff_backstop_armed
+    global _existing_session_continued_this_jvm, _existing_session_closed_after_continue
     _JVM_STARTED_WALL = datetime.now()
     _logoff_backstop_armed = False
+    _existing_session_continued_this_jvm = False
+    _existing_session_closed_after_continue = False
     return proc
 
 
@@ -1574,6 +1604,73 @@ _existing_session_click_times = []
 _EXISTING_SESSION_BACKOFF_WINDOW = 300.0  # 5-minute window
 _EXISTING_SESSION_BACKOFF_THRESHOLD = 5   # clicks in the window that trigger backoff
 _EXISTING_SESSION_BACKOFF_SLEEP = 60.0    # seconds to wait once tripped
+# Takeovers ("Continue Login") this process has made, kept across
+# relaunches. Two deployments on one username with TOTP and the primary
+# action would otherwise take the session from each other every few
+# minutes with nobody involved, feeding IBKR's CCP limiter (security
+# review 2026-10-12): the backoff above counts clicks in 5 minutes, and a
+# relogin cycle takes longer than that.
+_existing_session_takeovers = []
+_EXISTING_SESSION_TAKEOVER_LIMIT = 3
+_EXISTING_SESSION_TAKEOVER_WINDOW = 7200.0
+# IBC's rule, which IBKR's prompt is built around: IBKR asks the new login
+# whether to continue, which logs the other session out. The new login
+# continues once; if IBKR asks again while the same Gateway is running,
+# the other session logged back in, so someone is using it: give way
+# rather than take it again. Reset whenever a new Gateway JVM starts, as
+# IBC's flag reset with each TWS/Gateway start. The takeover limit above
+# is the backstop for takeovers spread across separate launches.
+_existing_session_continued_this_jvm = False
+# Set once the prompt we continued past has been seen to close. CLICK_IN_WIN
+# returns before Swing processes the click, so a poll right after it can
+# still list the same dialog; only a prompt that comes back after closing
+# means the other session logged in again.
+_existing_session_closed_after_continue = False
+
+
+def _existing_session_shown():
+    """True / False, or None when the agent didn't answer: an error must
+    never read as "closed", or a re-poll of the open dialog would look like
+    IBKR asking again."""
+    try:
+        raw = _agent_multiline("WINDOWS")
+    except Exception:
+        return None
+    if not raw.startswith("OK"):
+        return None
+    return any(modal and ("existing session" in t.lower() or "another session" in t.lower())
+               for _w, t, modal in _parse_windows(raw))
+
+
+def _wait_existing_session_closed(timeout=10.0):
+    """True once the existing-session dialog is seen not showing."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _existing_session_shown() is False:
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def _note_existing_session_absent():
+    """Called by the polling loops when their window list has no
+    existing-session dialog: the prompt we continued past has closed, so a
+    later one is IBKR asking again."""
+    global _existing_session_closed_after_continue
+    if _existing_session_continued_this_jvm:
+        _existing_session_closed_after_continue = True
+
+
+def _log_existing_session_prompt():
+    """Log what IBKR's dialog says (which session, connected when), so an
+    operator sees exactly what was asked. Public addresses are masked."""
+    try:
+        lines = [text for title, text in agent_labels()
+                 if "existing session" in title.lower()]
+    except Exception:
+        return
+    for text in lines[:6]:
+        log.info(_redact_logs(f"  IBKR: {text}"))
 
 
 def handle_existing_session_dialog():
@@ -1607,6 +1704,14 @@ def handle_existing_session_dialog():
     flapping forever.
     """
     action = os.environ.get("EXISTING_SESSION_DETECTED_ACTION", "primary").lower()
+    takes_over = action in ("primary", "primaryoverride")
+    global _existing_session_continued_this_jvm, _existing_session_closed_after_continue
+    if (takes_over and _existing_session_continued_this_jvm
+            and not _existing_session_closed_after_continue):
+        # Still the prompt we already answered (CLICK_IN_WIN is async): wait
+        # for it to close. Clicks nothing, so it doesn't count below.
+        _existing_session_closed_after_continue = _wait_existing_session_closed()
+        return True
     log.info(f"existing-session dialog: action={action}")
 
     # Ping-pong detection
@@ -1635,6 +1740,42 @@ def handle_existing_session_dialog():
         "manual":          [],  # do nothing
     }
     candidates = button_candidates_by_action.get(action, ["OK"])
+    _log_existing_session_prompt()
+    if takes_over and _existing_session_continued_this_jvm:
+        log.warning("existing-session: IBKR asked again after this Gateway "
+                    "already continued once, so the other session logged "
+                    "back in and is in use; giving way")
+        for cand in ("Cancel", "Exit Application"):
+            if agent_click_in_window("Existing session", cand):
+                break
+        log.error(
+            f"ALERT_EXISTING_SESSION_CONFLICT mode={TRADING_MODE} "
+            f"reason=\"the other session logged back in after this one took "
+            f"over; gave way\" "
+            f"remediation=\"stop the other session (another container, TWS, "
+            f"Client Portal, IBKR Mobile), then restart this container\"")
+        _halt_for_operator(
+            "another session of this username is in use; see "
+            "ALERT_EXISTING_SESSION_CONFLICT above")
+        return False
+    if takes_over:
+        now = time.monotonic()
+        _existing_session_takeovers[:] = [
+            t for t in _existing_session_takeovers
+            if now - t < _EXISTING_SESSION_TAKEOVER_WINDOW]
+        if len(_existing_session_takeovers) >= _EXISTING_SESSION_TAKEOVER_LIMIT:
+            log.error(
+                f"ALERT_EXISTING_SESSION_CONFLICT mode={TRADING_MODE} "
+                f"takeovers={len(_existing_session_takeovers)} "
+                f"window_seconds={int(_EXISTING_SESSION_TAKEOVER_WINDOW)} "
+                f"reason=\"another session keeps logging in as this username\" "
+                f"remediation=\"stop the other session (another container, "
+                f"TWS, Client Portal, IBKR Mobile), then restart this "
+                f"container\"")
+            _halt_for_operator(
+                "another session keeps logging in as this username; see "
+                "ALERT_EXISTING_SESSION_CONFLICT above")
+            return False
     if not candidates:
         log.info("action=manual — leaving dialog for user")
         return True
@@ -1647,6 +1788,10 @@ def handle_existing_session_dialog():
     for cand in candidates:
         log.info(f"Clicking existing-session button {cand!r} in {title_substr!r} window")
         if agent_click_in_window(title_substr, cand):
+            if takes_over:
+                _existing_session_takeovers.append(time.monotonic())
+                _existing_session_continued_this_jvm = True
+                _existing_session_closed_after_continue = _wait_existing_session_closed()
             return True
     log.error(f"existing-session: none of {candidates!r} worked as a "
               f"button label in the dialog")
@@ -1998,6 +2143,8 @@ def handle_2fa(app):
                           or "another session" in title.lower()):
                 existing_session_window = (type_, title, modal)
                 break
+        if existing_session_window is None and windows:
+            _note_existing_session_absent()
         if existing_session_window is not None:
             log.info(f"Late existing-session dialog detected in 2FA wait: "
                      f"{existing_session_window}")
@@ -2793,32 +2940,55 @@ def _lock_exit_time_visible(expected):
     return False
 
 
-def _warn_if_meridiem_unsettable(label, value):
-    """Warn before writing a Lock and Exit time the agent cannot fully set.
+_LOGOFF_RADIO = ("Auto logoff", "Auto Logoff", "Auto log off", "Auto Log Off")
+_RESTART_RADIO = ("Auto restart", "Auto Restart")
 
-    Gateway renders that field as a composite editor: the digits live in
-    one text component and AM/PM in a separate control beside it.
-    ``SETTEXT_BY_LABEL`` writes the first JTextComponent after the label
-    and never touches the second, so the meridiem keeps whatever it had.
-    Observed live 2026-09-27: writing "11:39 AM" committed successfully
-    and Gateway stored 11:39 PM; the read-back correctly refused it.
 
-    A PM value on a field already showing PM round-trips fine, which is
-    why this went unnoticed. An AM value is currently unsatisfiable: it
-    lands as PM and ALERT_CONFIG_NOT_APPLIED fires on every login with no
-    env-level remedy. Say so before the write rather than leaving the
-    operator to infer it from a recurring alert.
-    """
-    if "am" not in value.strip().lower():
+def _lock_exit_label_shown(label):
+    """True when the Lock and Exit panel currently shows ``label``."""
+    try:
+        return any(label in text for _t, text in agent_labels(label))
+    except Exception:
         return False
-    log.warning(
-        f"  {label} is set to {value!r}, and AM values cannot currently be "
-        "written: Gateway keeps AM/PM in a separate control the agent "
-        "does not reach, so this will be stored as PM and "
-        "ALERT_CONFIG_NOT_APPLIED will fire below. Use a PM time, or "
-        "schedule the restart outside the container. See "
-        "docs/OBSERVABILITY.md (ALERT_CONFIG_NOT_APPLIED).")
-    return True
+
+
+def _select_lock_exit_radio(*names):
+    """Select the first of ``names`` that the Lock and Exit panel has as a
+    radio button. IBC matches these without regard to case, the agent's
+    JCHECK exactly, so callers pass the casings Gateway may use.
+    Returns "changed", "unchanged" (it was already selected) or None."""
+    for name in names:
+        try:
+            resp = _agent_request(f"JCHECK {CONFIG_WINDOW_TITLE_SUBSTR}|{name}|true")
+        except Exception as e:
+            log.error(f"agent JCHECK {name!r}: {type(e).__name__}: {e}")
+            continue
+        if resp.startswith("OK changed"):
+            return "changed"
+        if resp.startswith("OK"):
+            return "unchanged"
+    return None
+
+
+def _set_meridiem(value):
+    """Select Gateway's AM or PM radio button to match ``value``.
+
+    The time field holds only the digits; AM and PM are radio buttons
+    beside it, which IBC's ConfigureAutoLogoffOrRestartTimeTask sets the
+    same way. Without this an AM time kept the panel's previous PM: on
+    2026-09-27 writing "11:39 AM" stored 11:39 PM. Values without AM/PM
+    are left alone. If the radio can't be selected, the read-back after
+    OK reports the mismatch (ALERT_CONFIG_NOT_APPLIED), as before.
+    """
+    m = re.search(r"([AaPp][Mm])\s*$", value.strip())
+    if not m:
+        return False
+    which = m.group(1).upper()
+    if _select_lock_exit_radio(which):
+        return True
+    log.warning(f"  Could not select {which}; Gateway may keep its previous "
+                "AM/PM, and the read-back below will say so")
+    return False
 
 
 def _verify_lock_exit_time_persisted(label, expected):
@@ -2946,6 +3116,8 @@ def handle_post_login_config():
     # (label, value, env var) of the Lock and Exit time we wrote, if any.
     # Verified after OK — see _verify_lock_exit_time_persisted.
     lock_exit_written = None
+    # Set when a mode switch couldn't be undone: then nothing is saved.
+    abort_config = False
 
     if wanted_api_tab:
         log.info("  Navigating to API → Settings")
@@ -2974,44 +3146,94 @@ def handle_post_login_config():
         if not agent_jtree_select_path(CONFIG_WINDOW_TITLE_SUBSTR, "Lock and Exit"):
             log.warning("  Could not select Lock and Exit tree node")
         else:
-            # Gateway shows ONE of these two labels depending on whether
-            # the account has the autorestart daily-token cycle enabled:
-            #   "Set Auto Log Off Time (HH:MM)"   (logoff mode)
-            #   "Set Auto Restart Time (HH:MM)"   (autorestart mode)
-            # Whichever one is displayed is the one we can set on this
-            # run. Try the user's requested setting against both labels
-            # and warn if the other mode is active.
+            # Gateway shows ONE of these two labels, depending on which of
+            # the panel's radio buttons is selected, "Auto logoff" (the
+            # default, at 11:45 PM) or "Auto restart":
+            #   "Set Auto Log Off Time (HH:MM)"
+            #   "Set Auto Restart Time (HH:MM)"
+            # With exactly one of the two times set, select its mode first
+            # (issue #65; IBC's ConfigureAutoLogoffOrRestartTimeTask does
+            # the same). With both set, whichever field is displayed is
+            # the one set, as before.
             time.sleep(1.0)  # panel render
             logoff_label = "Set Auto Log Off Time (HH:MM)"
             restart_label = "Set Auto Restart Time (HH:MM)"
-            if auto_logoff_time:
-                log.info(f"  Setting Auto Log Off Time = {auto_logoff_time}")
-                _warn_if_meridiem_unsettable(logoff_label, auto_logoff_time)
-                if agent_settext_by_label(CONFIG_WINDOW_TITLE_SUBSTR,
-                                          logoff_label, auto_logoff_time):
-                    changed = True
-                    lock_exit_written = (logoff_label, auto_logoff_time,
-                                         "AUTO_LOGOFF_TIME")
+            # With exactly one of the two times set, the env decides the
+            # mode. Touch the radios only when the field we need isn't
+            # showing, so a panel already in the right mode is left alone.
+            want = None
+            if auto_restart_time and not auto_logoff_time:
+                want = (restart_label, _RESTART_RADIO, _LOGOFF_RADIO)
+            elif auto_logoff_time and not auto_restart_time:
+                want = (logoff_label, _LOGOFF_RADIO, _RESTART_RADIO)
+            switched_back_to = None
+            if want and not _lock_exit_label_shown(want[0]):
+                selected = _select_lock_exit_radio(*want[1])
+                if selected:
+                    # Only a real change needs undoing; "unchanged" means the
+                    # label check missed a mode that was already right.
+                    switched_back_to = want[2] if selected == "changed" else None
+                    log.info(f"  Selected {want[1][0]} (only "
+                             f"{'AUTO_RESTART_TIME' if want[0] == restart_label else 'AUTO_LOGOFF_TIME'}"
+                             f" is set)")
+                    # The panel swaps its time label; give it a moment.
+                    for _ in range(5):
+                        time.sleep(1.0)
+                        if _lock_exit_label_shown(want[0]):
+                            break
                 else:
-                    # Gateway may be in autorestart-mode for this account —
-                    # the field is labeled "Set Auto Restart Time" instead.
-                    log.warning("  Failed to set Auto Log Off Time — "
-                                "Gateway is showing 'Set Auto Restart Time' "
-                                "in this session instead. Set AUTO_RESTART_TIME "
-                                "to drive that field.")
-            if auto_restart_time:
-                log.info(f"  Setting Auto Restart Time = {auto_restart_time}")
-                _warn_if_meridiem_unsettable(restart_label, auto_restart_time)
-                if agent_settext_by_label(CONFIG_WINDOW_TITLE_SUBSTR,
-                                          restart_label, auto_restart_time):
+                    log.warning(f"  Could not select {want[1][0]}; its time "
+                                "can only be set while it is selected")
+            for env_var, value, label, other in (
+                    ("AUTO_LOGOFF_TIME", auto_logoff_time, logoff_label, "Set Auto Restart Time"),
+                    ("AUTO_RESTART_TIME", auto_restart_time, restart_label, "Set Auto Log Off Time")):
+                if not value:
+                    continue
+                log.info(f"  Setting {label.split(' (')[0][4:]} = {value}")
+                if agent_settext_by_label(CONFIG_WINDOW_TITLE_SUBSTR, label, value):
                     changed = True
-                    lock_exit_written = (restart_label, auto_restart_time,
-                                         "AUTO_RESTART_TIME")
+                    _set_meridiem(value)
+                    lock_exit_written = (label, value, env_var)
+                    continue
+                if switched_back_to:
+                    # Never save a mode with a time we didn't set: switch
+                    # back and say so. If even that fails, discard the whole
+                    # dialog below.
+                    if _select_lock_exit_radio(*switched_back_to) != "changed":
+                        abort_config = True
+                    log.error(
+                        f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
+                        f"setting=\"{label}\" env_var={env_var} "
+                        f"requested=\"{value}\" "
+                        f"reason=\"selected the matching mode but its time "
+                        f"field never appeared; "
+                        f"{'could not switch back, discarding the dialog' if abort_config else 'switched back'}\"")
                 else:
-                    log.warning("  Failed to set Auto Restart Time — "
-                                "Gateway is showing 'Set Auto Log Off Time' "
-                                "in this session instead. Set AUTO_LOGOFF_TIME "
-                                "to drive that field.")
+                    log.warning(f"  Failed to set {label.split(' (')[0][4:]} — "
+                                f"Gateway is showing '{other}' in this session "
+                                "instead; set only the variable for the mode "
+                                "you want and the controller selects it.")
+
+    # A mode we switched and couldn't switch back must not be saved with a
+    # time we didn't set: discard every change in the dialog instead.
+    if abort_config:
+        if not _config_close("Cancel"):
+            log.warning("Could not click Cancel on the config dialog")
+        for setting, env_var, value, applied in (
+                ("Read-Only API", "READ_ONLY_API", read_only_api_raw,
+                 read_only_api is not None),
+                ("Master API client ID", "TWS_MASTER_CLIENT_ID", master_client_id,
+                 bool(str(master_client_id or "").strip()))):
+            if applied:
+                log.error(
+                    f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
+                    f"setting=\"{setting}\" env_var={env_var} "
+                    f"requested=\"{str(value).strip()}\" "
+                    f"reason=\"discarded with a Lock and Exit change that "
+                    f"could not be undone\"")
+        log.error("Post-login config discarded: the Lock and Exit mode was "
+                  "switched and could not be switched back")
+        return False
 
     # Apply + close the dialog (OK commits and closes).
     if changed:
@@ -3870,8 +4092,11 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
         # opens, the fallback's _teardown_jvm_for_restart then cleanly kills
         # the adopted instance before relaunching.
         GATEWAY_PROC = _AdoptedProcess(new_pid)
-        global _JVM_STARTED_WALL
+        global _JVM_STARTED_WALL, _existing_session_continued_this_jvm
+        global _existing_session_closed_after_continue
         _JVM_STARTED_WALL = datetime.now()
+        _existing_session_continued_this_jvm = False
+        _existing_session_closed_after_continue = False
         JVM_PID = new_pid
         new_app = find_app(APP_NAME_CANDIDATES, timeout=120, match_pid=new_pid)
         CURRENT_APP = new_app
@@ -4485,9 +4710,27 @@ def _diagnose_login_failure():
         return
 
     has_authenticating = "Authenticating" in content
-    has_ns_auth_start = "NS_AUTH_START" in content
-    has_timeout = "AuthTimeoutMonitor-CCP: Timeout!" in content
-    has_ssl_fail = "SSLHandshakeException" in content or "Remote host terminated" in content
+    # Judge the latest attempt only: the text from the last
+    # "Authenticating" on. An earlier attempt's lines, or SSL errors from
+    # other requests before it, mustn't decide (issue #63). A failure that
+    # never reached "Authenticating" still lands after the previous one.
+    latest = content[content.rfind("Authenticating"):] if has_authenticating else content
+    has_ns_auth_start = "NS_AUTH_START" in latest
+    has_timeout = "AuthTimeoutMonitor-CCP: Timeout!" in latest
+    has_ssl_fail = "SSLHandshakeException" in latest or "Remote host terminated" in latest
+    has_compete = ("Competition detected" in latest
+                   or "competing session" in latest)
+
+    if has_compete:
+        # Issue #63: this used to fall through to the SSL diagnosis below,
+        # because SSL errors from other requests are common in the log.
+        log.error("Diagnosis: IBKR reported a COMPETING SESSION: the same "
+                  "username is logged in elsewhere (another Gateway or TWS, "
+                  "Client Portal on the web, or IBKR Mobile).")
+        log.error("  EXISTING_SESSION_DETECTED_ACTION=primary takes the "
+                  "session over; manual leaves Gateway's dialog for you. Or "
+                  "log out of the other session.")
+        return
 
     if has_ssl_fail:
         log.error("Diagnosis: SSL HANDSHAKE FAILED. This usually means "
@@ -4580,7 +4823,7 @@ def _diagnose_login_failure():
     log.error(f"  docker exec <container> cat {launcher_log}")
 
 
-def wait_for_api_port(timeout=180):
+def wait_for_api_port(timeout=180, answer_existing_session=True):
     """Probe Gateway's API port until it's actually accepting connections.
 
     This is the DEFINITIVE readiness signal — the API port only opens
@@ -4596,11 +4839,36 @@ def wait_for_api_port(timeout=180):
     log.info(f"Probing API port {api_port} for readiness (up to {timeout}s)")
     start = time.monotonic()
     last_status = 0.0
+    existing_session_handled = False
     while time.monotonic() - start < timeout:
         if is_api_port_open(api_port):
             elapsed = int(time.monotonic() - start)
             log.info(f"API port {api_port} accepting connections after {elapsed}s")
             return True
+        # Issue #63: with TOTP, IBKR reports a competing session only after
+        # the code is accepted, so "Existing session detected" can appear
+        # here, after handle_2fa has returned. Answer it per
+        # EXISTING_SESSION_DETECTED_ACTION, once per appearance (manual
+        # leaves it up, and must not be re-handled every half second).
+        try:
+            windows = agent_windows() if answer_existing_session else []
+        except Exception:
+            windows = []
+        if any(modal and ("existing session" in t.lower()
+                          or "another session" in t.lower())
+               for _w, t, modal in windows):
+            if not existing_session_handled:
+                existing_session_handled = True
+                log.info("Existing-session dialog appeared while waiting for "
+                         "the API port")
+                if not handle_existing_session_dialog():
+                    log.error("Existing-session dialog handling failed")
+                time.sleep(0.5)
+                continue
+        else:
+            existing_session_handled = False
+            if windows:
+                _note_existing_session_absent()
 
         # Opportunistically dismiss disclaimer dialogs each iteration.
         # Iterate SAFE_DISMISS_BUTTONS in order so BYPASS_WARNING-added
@@ -5107,7 +5375,9 @@ def _await_manual_login(timeout=_OPERATOR_RESCUE_SECONDS):
     log.error(f"Waiting up to {timeout}s for a manual login before halting. "
               "Connect to the container's VNC (port 5900) and finish it by "
               "hand if you want this session. Nothing is retried meanwhile.")
-    return wait_for_api_port(timeout=timeout)
+    # The operator is at the keyboard: leave any existing-session dialog
+    # for them rather than clicking it under their cursor.
+    return wait_for_api_port(timeout=timeout, answer_existing_session=False)
 
 
 def _halt_for_operator(reason, cycles=None):

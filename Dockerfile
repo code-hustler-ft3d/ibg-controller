@@ -22,22 +22,23 @@
 #
 #   docker build -t ibg-controller:edge \
 #     --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:latest \
-#     --build-arg IB_GATEWAY_VERSION=10.50.1e .
+#     --build-arg IB_GATEWAY_VERSION=10.51.1b .
 #
 # CI builds against that line too, but only as a build-and-boot check —
-# the login, 2FA and dialog paths are verified against 10.45.x.
+# the login, 2FA and dialog paths are verified against the pinned stable
+# line (README, Requirements).
 #
 # Build prerequisites: run `make` in the repo root first to populate
 # dist/ with the agent jar and the controller .py, then `docker build .`
 # from the same directory.
 
-ARG UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.45.1j@sha256:91165c0752ca534c0dad3c40683ae7c2745974d4d277651a90e90411ca609d8d
+ARG UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:10.50.1f@sha256:1e2236804ac949b789197c225a048c0c891c9958f948c87166226e5b647ff581
 FROM ${UPSTREAM_IMAGE}
 
 # Re-declare post-FROM so they're in scope for the LABEL below (a build ARG
 # declared before FROM is only visible to the FROM instruction itself).
 ARG UPSTREAM_IMAGE
-ARG IB_GATEWAY_VERSION=10.45.1j
+ARG IB_GATEWAY_VERSION=10.50.1f
 
 # Self-describing image: record the bundled IB Gateway version and the exact
 # upstream base so `docker inspect` (and the GHCR page) report them without

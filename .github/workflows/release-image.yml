@@ -66,6 +66,8 @@ jobs:
           # On workflow_dispatch, ref is the input tag; on push, it's
           # the pushed tag already (github.ref).
           ref: ${{ github.event.inputs.tag || github.ref }}
+          # Nothing here pushes with git; keep the token out of .git/config.
+          persist-credentials: false
 
       - name: Compute version inputs
         id: version

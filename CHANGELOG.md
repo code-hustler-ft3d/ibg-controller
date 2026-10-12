@@ -4,6 +4,81 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Release images are built on IB Gateway 10.50.1f (issue #64).** The
+  pin was 10.45.1j, which is on neither IBKR's channels (stable 10.50.1f,
+  latest 10.51.1b) nor gnzsnz's `stable` (10.50.1f since 2026-10-06). The
+  base is pinned by digest, built by gnzsnz's CI from
+  gnzsnz/ib-gateway-docker cc09ddb. CI adds 10.50.1f and the `latest`
+  head, 10.51.1b.
+- **With one of `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` set, the env
+  picks the mode (issue #65).** Gateway starts in Auto logoff mode (11:45
+  PM by default), and the restart time field only appears once its "Auto
+  restart" radio button is selected, so `AUTO_RESTART_TIME` failed on a
+  fresh install until someone switched it over VNC. With only
+  `AUTO_RESTART_TIME` set the controller now selects Auto restart, and
+  with only `AUTO_LOGOFF_TIME` it selects Auto logoff, as IBC did; a panel
+  already in that mode is left alone. If the time can't be written after
+  the switch, it switches back and raises `ALERT_CONFIG_NOT_APPLIED`
+  rather than save a mode with a time it didn't set. With both set,
+  whichever field Gateway displays is set, as before.
+- **AM and PM are set.** The time field holds only the digits; AM and PM
+  are radio buttons beside it, and the controller never selected them, so
+  an AM time kept the panel's previous PM. It now selects the matching
+  one; the read-back still reports a time Gateway didn't keep.
+
+### Fixed
+
+- **"Existing session detected" after TOTP is answered (issue #63).** With
+  TOTP, IBKR reports a competing session only after the code is accepted,
+  so the dialog appeared while the controller waited for the API port,
+  where nothing looked for it: Gateway dropped the connection 30 s later.
+  The API-port wait now answers it per `EXISTING_SESSION_DETECTED_ACTION`,
+  once per appearance.
+- **A competing session is diagnosed as one.** It was reported as an SSL
+  handshake failure, because SSL errors from other requests are common in
+  `launcher.log`. The diagnosis now judges only the latest attempt (the
+  text from the last "Authenticating" on) and checks it for IBKR's
+  competing-session line first.
+
+### Security
+
+- **IBKR's existing-session prompt is answered the way IBC did.** With
+  `primary`, the controller continued at every prompt, so two deployments
+  with TOTP would take the session from each other every few minutes,
+  indefinitely. Now it continues once per Gateway launch (clearing a
+  stale, web or mobile session); if IBKR asks again during that launch,
+  the other session logged back in and is in use, so it gives way and
+  halts with `ALERT_EXISTING_SESSION_CONFLICT`. Three takeovers across
+  launches within two hours halt too. What IBKR's prompt said is logged
+  each time, with public addresses masked.
+- **CI can't leak a write token to an upstream image.** CI ran every job
+  with `contents: write`, and `actions/checkout` left the token in
+  `.git/config`, which went into the Docker build context; a base image
+  with `ONBUILD` steps could have read it. CI is now read-only except the
+  job that creates releases (which builds no upstream image), checkouts
+  in CI and the release workflow keep no credentials, and a
+  `.dockerignore` admits only the four files the Dockerfile copies.
+- **A daily check proposes base-image bumps.** `base-image-bump.yml`
+  compares gnzsnz's `stable` with the pin; when it moves and checks out
+  (OCI source label, its commit on gnzsnz/ib-gateway-docker's default
+  branch, amd64 and arm64, no `ONBUILD`), it pushes a bump branch for the
+  Dockerfile and README, starts CI (whose `pinned` entry builds that exact
+  digest) and opens an issue. Nothing is merged or released
+  automatically; closing the issue rejects that digest.
+- **Public IP addresses are masked in logs.** The existing-session dialog
+  names the other session's address; public addresses now log as `[IP]`.
+  Private, loopback and link-local addresses stay.
+- **`JCHECK` needs exactly one match.** The agent's toggle command clicked
+  the first showing button with the name, even when two matched or it was
+  disabled; it now refuses both. The Swing drill covers it (39/39; the
+  previous agent fails the two new checks).
+- **No auto-answer while you log in by hand.** During the VNC rescue
+  window an existing-session dialog is left for the operator.
+
 ## [0.15.2] - 2026-10-09
 
 ### Security

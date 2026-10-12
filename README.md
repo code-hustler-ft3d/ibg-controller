@@ -30,7 +30,9 @@ your `config.ini`: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
 
 Release images build on gnzsnz's `ib-gateway` image, pinned by digest,
 which supplies Gateway itself, Xvfb and VNC. `UPSTREAM_IMAGE` is a
-build arg if you need a different base.
+build arg if you need a different base. A daily workflow checks gnzsnz's
+`stable` line and, when it moves, proposes the new pin with CI run on it;
+a release still waits for a real login check on the new version.
 
 ## Quick start
 
@@ -108,7 +110,7 @@ Deeper guides:
 | Requirement | Notes |
 |---|---|
 | Linux `amd64`/`arm64` | Ubuntu 24.04 base tested |
-| IB Gateway 10.x | Release images pin **10.45.1j** (gnzsnz `:stable` line) |
+| IB Gateway 10.x | Release images pin **10.50.1f** (gnzsnz `:stable` line) |
 | Python 3.10+ | Runtime; stdlib only, no pip installs |
 | JDK 17+ | Build time only — runtime uses the JRE bundled with Gateway |
 | `python3`, `matchbox-window-manager`, `curl` | The only packages added on top of the upstream image |
@@ -122,8 +124,8 @@ Deeper guides:
 | IB Key push 2FA | ✅ wait mode | ✅ wait mode | waits for you to approve on the phone |
 | Multi-method 2FA | ⚠️ needs one method | ⚠️ needs one method | both dialog shapes are detected and driven, but IBKR kicks the session on most accounts we've seen when the method is switched mid-login; run a single method, see [2FA](#2fa) |
 | Passkey prompt (`PASSKEY_AUTHENTICATE=yes`) | ⚠️ contributor-validated | ⚠️ untested | presses Authenticate; your authenticator completes WebAuthn; amd64 plus extra libraries; see [2FA](#2fa) |
-| Existing-session dialog | ✅ verified | ⚠️ code in place | |
-| Post-login config (`READ_ONLY_API`, `TWS_MASTER_CLIENT_ID`, auto logoff/restart times) | ✅ verified | ⚠️ untested | |
+| Existing-session dialog | ✅ verified | ⚠️ code in place | also answered when it appears after the TOTP code (v0.16.0, unit-tested) |
+| Post-login config (`READ_ONLY_API`, `TWS_MASTER_CLIENT_ID`, auto logoff/restart times) | ✅ verified | ⚠️ untested | selecting Auto restart and the AM/PM buttons: v0.16.0, unit-tested |
 | Command server (`STOP`, `RESTART`, `RECONNECTACCOUNT`, `ENABLEAPI`) | ✅ verified | ⚠️ untested | `RECONNECTDATA` is TWS-only |
 
 ✅ verified = run end-to-end against a real IB account.
@@ -237,7 +239,7 @@ real product.
 
 | Var | Notes |
 |---|---|
-| `EXISTING_SESSION_DETECTED_ACTION` | `primary` (default) / `primaryoverride` / `secondary` / `manual` |
+| `EXISTING_SESSION_DETECTED_ACTION` | How to answer IBKR's "Existing session detected" prompt: `primary` (default) / `primaryoverride` / `secondary` / `manual`. `primary` continues once per Gateway launch, which logs the other session out (a stale session, or a web or mobile login). If IBKR asks again during the same launch, the other session logged back in and is in use: the controller gives way, as IBC did, and halts (`ALERT_EXISTING_SESSION_CONFLICT`). Three takeovers within two hours halt too. `secondary` always gives way; `manual` leaves the prompt to you |
 | `TWOFA_EXIT_INTERVAL` | Seconds to wait for the 2FA dialog (default `120`) |
 | `TWOFA_TIMEOUT_ACTION` | On timeout: `exit`, `restart`, or `none` (default) |
 | `RELOGIN_AFTER_TWOFA_TIMEOUT` | `yes`/`no`: re-drive the login form once before the timeout action |
@@ -251,7 +253,7 @@ real product.
 |---|---|
 | `TWS_MASTER_CLIENT_ID` | Master API client ID |
 | `READ_ONLY_API` | `yes`/`no` |
-| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other depending on account state; set both vars and the controller handles whichever is displayed. **AM times don't work yet**: Gateway keeps AM/PM in a separate control the agent can't reach, so an AM value is stored as PM and `ALERT_CONFIG_NOT_APPLIED` fires every login. Use a PM time or an external scheduler. Gateway's own logoff timer is unreliable, so if the same Gateway is still running 5 minutes after `AUTO_LOGOFF_TIME`, the controller logs it off itself (`LOGOFF_BACKSTOP`). It only does this for a time written with AM or PM (`05:01 PM`) that Gateway showed back on that login, for a session that logged in before that time, within an hour after it, and only when `AUTO_RESTART_TIME` is unset and Gateway's time zone (`TIME_ZONE`) matches the container's (`TZ`) — so it never adds a logoff Gateway wasn't already scheduled to do. With no `AUTO_LOGOFF_TIME`, nothing changes. |
+| `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other, depending on whether its Auto logoff (the default) or Auto restart button is selected; set both vars and the controller handles whichever is displayed. With only `AUTO_RESTART_TIME` set, the controller selects **Auto restart** first, since Gateway starts in Auto logoff mode (11:45 PM). It also selects the AM or PM radio button beside the time, and the read-back after login confirms what Gateway kept (`ALERT_CONFIG_NOT_APPLIED` if not). Gateway's own logoff timer is unreliable, so if the same Gateway is still running 5 minutes after `AUTO_LOGOFF_TIME`, the controller logs it off itself (`LOGOFF_BACKSTOP`). It only does this for a time written with AM or PM (`05:01 PM`) that Gateway showed back on that login, for a session that logged in before that time, within an hour after it, and only when `AUTO_RESTART_TIME` is unset and Gateway's time zone (`TIME_ZONE`) matches the container's (`TZ`) — so it never adds a logoff Gateway wasn't already scheduled to do. With no `AUTO_LOGOFF_TIME`, nothing changes. |
 | `AUTO_RESTART_ADOPT` | Default `yes`: when Gateway restarts itself at `AUTO_RESTART_TIME`, adopt the new JVM instead of launching a second one. Gateway normally carries the session across, so no login and no 2FA; when it doesn't, the controller re-drives login on the adopted JVM. `no` restores always-relaunch. Wait budget: `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (90). |
 
 ### Command server
@@ -421,12 +423,15 @@ session up and carries on.
 
 **"Existing session detected" loops forever.** Something else keeps
 logging in as the same account (another container, TWS on your
-desktop, the mobile app). Shut the other session down.
+desktop, Client Portal on the web, the mobile app). Shut the other
+session down.
 
-**"Auto Log Off Time" label not found.** Gateway shows either the
-logoff or the restart field depending on account state — set both
-`AUTO_LOGOFF_TIME` and `AUTO_RESTART_TIME` and the controller handles
-whichever is displayed.
+**"Auto Log Off Time" / "Auto Restart Time" label not found.** Gateway
+shows the logoff field while its Auto logoff button is selected (the
+default) and the restart field while Auto restart is. Set only
+`AUTO_RESTART_TIME` and the controller selects Auto restart itself. If
+you set only `AUTO_LOGOFF_TIME` but switched Gateway to Auto restart
+over VNC, switch it back, or use `AUTO_RESTART_TIME` instead.
 
 ## Security
 

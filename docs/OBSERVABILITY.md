@@ -271,6 +271,18 @@ ALERT_CONFIG_NOT_APPLIED mode=live setting="Set Auto Log Off Time (HH:MM)" env_v
 the dialog and found the value gone. The write was accepted and the
 schedule still will not happen.
 
+Two more `reason` values come from the mode switch (v0.16.0), when only
+one of the two times is set and the controller selects its mode:
+
+- `selected the matching mode but its time field never appeared;
+  switched back`: the controller restored the previous mode, so nothing
+  it didn't set is saved. The time is not applied.
+- `...; could not switch back, discarding the dialog`: the controller
+  clicked Cancel instead of OK, so every change in the dialog is dropped.
+  `READ_ONLY_API` and `TWS_MASTER_CLIENT_ID`, if set to valid values, each get their own
+  line with `reason="discarded with a Lock and Exit change that could not
+  be undone"`. Check Read-Only API over VNC before trading.
+
 **What it means**: any automation you have built on that daily boundary
 — a restart, a reconnect, a downstream job — will not be triggered by
 Gateway. This is not a controller crash; the session is logged in and
@@ -293,19 +305,13 @@ which is what this token catches. If you ever see a verified value *and*
 a boundary that passes without a logoff, no token will fire and an
 external scheduled restart is the remedy.
 
-**Known limitation — AM times cannot be written (2026-09-27).** Gateway
-renders this field as a composite editor: the digits are one text
-component and AM/PM is a separate control beside it. The agent's
-`SETTEXT_BY_LABEL` writes the first text component after the label and
-never touches the second, so the meridiem keeps its previous value.
-Writing `11:39 AM` committed successfully and Gateway stored **11:39
-PM**; the read-back correctly refused it. A PM value on a field already
-showing PM round-trips fine, which is why this went unnoticed. Until the
-agent can reach the meridiem control, an AM `AUTO_LOGOFF_TIME` or
-`AUTO_RESTART_TIME` is unsatisfiable: it lands as PM and this token
-fires on every login. The controller warns about an AM value before
-writing it. Use a PM time, or schedule the restart outside the
-container.
+**AM and PM (v0.16.0).** Gateway's time field holds only the digits;
+AM and PM are radio buttons beside it. Before v0.16.0 the controller
+wrote the digits and never touched the radios, so an AM time kept the
+panel's previous PM: writing `11:39 AM` stored **11:39 PM** (2026-09-27)
+and this token fired on every login. The controller now also selects
+the matching AM or PM radio, as IBC did. If it can't, this token still
+fires, so a time Gateway didn't keep is always reported.
 
 **Known limitation — the read-back matches a summary label.** The real
 time widgets sit deeper than the component dump's depth limit (30), so
@@ -317,7 +323,9 @@ write, but it verifies Gateway's rendering rather than the widget.
 **What the operator should do**: check the value in Gateway's UI over
 VNC. If Gateway is showing the *other* Lock and Exit field (it offers
 either Auto Log Off Time or Auto Restart Time, never both, depending on
-account state) then set the matching env var instead. If Gateway shows
+whether Auto logoff or Auto restart is selected) then set the matching
+env var instead; with only `AUTO_RESTART_TIME` set, the controller
+selects Auto restart itself. If Gateway shows
 your value but still does not act on it, the schedule is not usable on
 that account and an external scheduled restart is the reliable
 substitute.
@@ -510,7 +518,7 @@ the container's (`TZ`), the session logged in before today's logoff
 time, and it is still running between 5 and 60 minutes after it. So it only ever performs a logoff
 Gateway itself was scheduled to do: never with no `AUTO_LOGOFF_TIME`,
 never when Gateway is in auto-restart mode and shows no logoff field,
-never for an AM value Gateway stored as PM (`ALERT_CONFIG_NOT_APPLIED`
+never for a time Gateway didn't keep (`ALERT_CONFIG_NOT_APPLIED`
 covers that), and never when the read-back failed or couldn't run. Gateway's own Lock
 and Exit timer fired on only 1 of 5 observed days in the field, with
 the value read back correctly every time. The controller then does the
@@ -523,6 +531,35 @@ typed into the field, not how Gateway read it. Write `05:01 PM`.
 
 **What the operator should do**: nothing; count it if you want to know
 how often Gateway's own timer misses. Don't page.
+
+### `ALERT_EXISTING_SESSION_CONFLICT` (added v0.16.0)
+
+```
+ALERT_EXISTING_SESSION_CONFLICT mode=live takeovers=3 window_seconds=7200 reason="another session keeps logging in as this username" remediation="stop the other session (another container, TWS, Client Portal, IBKR Mobile), then restart this container"
+```
+
+**When fired**: `EXISTING_SESSION_DETECTED_ACTION` is `primary` or
+`primaryoverride`, and either:
+
+- IBKR's "Existing session detected" prompt appears again while the same
+  Gateway is running, after the controller already continued once. The
+  other session logged back in, so someone is using it; the controller
+  clicks Cancel (`reason="the other session logged back in after this
+  one took over; gave way"`). This is IBC's rule, except that IBC then
+  simply gave way and the controller also halts; or
+- a fourth prompt arrives within two hours of three takeovers spread over
+  separate Gateway launches.
+
+Instead of taking the session again, the controller halts: `/health`
+reports `"state": "HALTED"` and `ALERT_HALTED` follows. Two deployments
+on one username, both with TOTP, would otherwise take the session from
+each other every few minutes with nobody involved, which also feeds
+IBKR's CCP limiter. Each time it answers the prompt, the controller logs
+what IBKR said first (`IBKR: IP [IP] connected at ...`, public addresses
+masked).
+
+**What the operator should do**: find and stop the other session, then
+restart the container. **Recommended debounce**: page once.
 
 ### `ALERT_JVM_RESTART_EXHAUSTED`
 
@@ -1097,7 +1134,8 @@ four additional `ALERT_CLEAN_LOGOUT` `status=` values
 `ALERT_CONFIG_NOT_APPLIED` (ERROR) in v0.10.0, and
 `ALERT_UPSTREAM_DOWN` (ERROR), the `upstream_*` and
 `next_relaunch_in_seconds` fields and the `UPSTREAM_DOWN` state in
-v0.15.0 — all under the same
+v0.15.0, and `ALERT_EXISTING_SESSION_CONFLICT` (ERROR) in v0.16.0 — all
+under the same
 stability contract. Breaking changes will be called out in
 the CHANGELOG and accompany a minor version bump. Adding new fields
 to `/health`, new `ALERT_*` tokens, or new `status=` values to

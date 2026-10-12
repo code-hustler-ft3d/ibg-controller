@@ -739,18 +739,26 @@ public class GatewayInputAgent {
         // JRadioButton, JToggleButton, and install4j-obfuscated
         // subclasses of any of those). Match by accessible name first,
         // then by button text.
+        // Exactly one showing, enabled match: with two (an AM/PM pair in
+        // two panels, say) clicking the first could set the wrong one,
+        // so refuse instead of guessing.
         JToggleButton box = null;
+        int matches = 0;
         for (JToggleButton c : collect(target, JToggleButton.class)) {
-            if (!c.isShowing()) continue;
+            if (!c.isShowing() || !c.isEnabled()) continue;
             String accName = accessibleName(c);
             String text = c.getText();
             if (name.equals(accName) || name.equals(text)) {
-                box = c;
-                break;
+                if (box == null) box = c;
+                matches++;
             }
         }
         if (box == null) {
             return "ERR not_found jtoggle=" + name + " in_window=" + titleSubstr;
+        }
+        if (matches > 1) {
+            return "ERR jcheck_ambiguous jtoggle=" + name + " matches=" + matches
+                    + " in_window=" + titleSubstr;
         }
         final JToggleButton target2 = box;
         final boolean before = box.isSelected();

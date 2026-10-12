@@ -1,0 +1,93 @@
+name: Base image bump
+
+# Daily: if gnzsnz's `stable` image has moved past the Dockerfile's pin and
+# its provenance checks out, push a bump branch, start CI on it and open an
+# issue with the details. Nothing is merged or released automatically: a
+# new Gateway version needs a real login check first.
+#
+# It opens an issue rather than a pull request because pull requests from
+# GITHUB_TOKEN need "Allow GitHub Actions to create and approve pull
+# requests", which also lets workflows approve them. CI is started with
+# `gh workflow run`, since pushes made with GITHUB_TOKEN don't trigger
+# workflows by themselves; its `pinned` matrix entry builds the new digest.
+# The bump touches only the Dockerfile and README: GITHUB_TOKEN can't push
+# changes to workflow files. Each proposal is keyed by digest; closing its
+# issue rejects that digest for good.
+
+on:
+  schedule:
+    - cron: '23 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: base-image-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the bump branch
+      actions: write    # start CI on it
+      issues: write     # report it
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Compare gnzsnz stable with the pinned base
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/base_image_bump.py check --body "$RUNNER_TEMP/body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Push the bump branch, start CI, open an issue
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+          DIGEST: ${{ steps.check.outputs.digest }}
+          SHORT: ${{ steps.check.outputs.short }}
+        run: |
+          set -euo pipefail
+          branch="base-image/gnzsnz-${VERSION}-${SHORT}"
+          # The issue decides a digest: open or closed, it was proposed. Only
+          # this workflow's own issues count, so nobody else can block a
+          # proposal. The plain issue list, not search, which can lag behind
+          # an issue opened moments ago; if the request fails, stop rather
+          # than propose twice. SHORT is 12 hex characters (checked above).
+          proposed=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues?state=all&creator=github-actions%5Bbot%5D&per_page=100" \
+            --jq ".[] | select(.pull_request == null and (.title | contains(\"(${SHORT})\"))) | .number")
+          if [ -n "$proposed" ]; then
+            echo "${VERSION} (${SHORT}) was already proposed; its issue decides. Nothing to do."
+            exit 0
+          fi
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            # An earlier run pushed the branch but stopped before its issue,
+            # possibly before CI started; running CI again is harmless.
+            echo "The bump branch for ${VERSION} (${SHORT}) exists without its issue; opening it."
+            gh workflow run ci.yml --ref "$branch" \
+              || echo "::warning::Could not start CI on $branch"
+          else
+            python3 .github/scripts/base_image_bump.py apply --version "$VERSION" --digest "$DIGEST"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            git commit -am "chore: base image to gnzsnz ${VERSION}"
+            git push origin "$branch"
+            gh workflow run ci.yml --ref "$branch"
+          fi
+          {
+            cat "$RUNNER_TEMP/body.md"
+            echo
+            echo "Branch: \`${branch}\` ([changes](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${branch}))."
+          } > "$RUNNER_TEMP/issue.md"
+          url=$(gh issue create --title "Base image: gnzsnz stable is ${VERSION} (${SHORT})" \
+            --body-file "$RUNNER_TEMP/issue.md")
+          # Assigned to the repo owner, so GitHub emails them about it. A
+          # failed assignment leaves the issue in place.
+          gh issue edit "$url" --add-assignee "$GITHUB_REPOSITORY_OWNER" \
+            || echo "::warning::Opened $url but could not assign it to $GITHUB_REPOSITORY_OWNER"

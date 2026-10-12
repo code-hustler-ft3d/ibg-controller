@@ -76,6 +76,30 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### Unreleased
+
+- **IB Gateway 10.50.1f.** Release images move from 10.45.1j to the
+  current stable line. Your first login runs on the new Gateway version;
+  settings in an existing `Jts` volume carry over.
+- **With only one of `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` set, the
+  controller selects that mode.** Only `AUTO_RESTART_TIME`: Gateway now
+  restarts at that time and keeps the session, instead of logging off at
+  its default 11:45 PM; with IB Key that means a re-approval about weekly
+  instead of nightly. Only `AUTO_LOGOFF_TIME`: if you had switched Gateway
+  to Auto restart over VNC, it goes back to Auto logoff, the mode your env
+  asks for.
+- **With TOTP, another session of the same username is now taken over.**
+  IBKR shows "Existing session detected" after the TOTP code is accepted,
+  which the controller didn't answer, so the login failed and the other
+  session (Client Portal on the web, desktop TWS) stayed. With the
+  default `primary` it now continues once per Gateway launch, which logs
+  the other session out. If that session logs back in, the controller
+  gives way and halts with `ALERT_EXISTING_SESSION_CONFLICT` instead of
+  taking it again. Set `EXISTING_SESSION_DETECTED_ACTION` to `secondary`
+  or `manual` to always keep the other session.
+- **AM times work.** If you'd set a PM time to work around the AM
+  limitation, you can now use the time you meant.
+
 ### v0.15.1
 
 - **`TWS_ACCEPT_INCOMING` is honored.** If you carried
