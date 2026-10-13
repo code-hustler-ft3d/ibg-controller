@@ -13,9 +13,14 @@ dropdown, which isn't viable for headless Docker.
 |---|---|
 | North America (New York)   | `ndc1.ibllc.com` |
 | North America (Chicago)    | `cdc1.ibllc.com` |
-| Europe                     | `gdc1.ibllc.com` |
+| Europe (Zurich)            | `zdc1.ibllc.com` |
 | Asia (Hong Kong)           | `hdc1.ibllc.com` |
-| Asia (Singapore)           | `hdc1.ibllc.com` |
+| Asia (Singapore)           | `sdc1.ibllc.com` |
+| Asia (China Mainland)      | `mcgw1.ibllc.com.cn` |
+
+Please refer to
+[the official guide](https://www.interactivebrokers.com/docs/excel/activex/best-practice-configure-tws-ib-gateway-for-active-x/connected-ib-server-location-in-tws)
+for more details.
 
 Your server hostname **does not depend on where you live** — it depends on
 where IBKR provisioned your account. Users in New York can have accounts
