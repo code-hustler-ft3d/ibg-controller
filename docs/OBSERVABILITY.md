@@ -283,7 +283,9 @@ one of the two times is set and the controller selects its mode:
   line with `reason="discarded with a Lock and Exit change that could not
   be undone"`. Check Read-Only API over VNC before trading.
 
-`READ_ONLY_API` is read back the same way (#69):
+`READ_ONLY_API` is read back the same way (#69), and so is
+`BYPASS_ORDER_PRECAUTIONS` (#68), whose `setting` is the box's label as
+Gateway shows it:
 
 ```
 ALERT_CONFIG_NOT_APPLIED mode=live setting="Read-Only API" env_var=READ_ONLY_API requested="no" reason="Gateway did not retain the value after OK; API clients cannot place or change orders"
@@ -293,6 +295,18 @@ With `requested="no"`, Gateway kept the API read-only: clients connect
 and read, but trading requests get error 321 ("The API interface is
 currently in Read-Only mode"). With `requested="yes"` the reason ends
 `API clients can place orders`.
+
+For `BYPASS_ORDER_PRECAUTIONS` the read-back reason ends `API orders
+still go through order precautions` (requested `yes`) or `API orders
+still bypass order precautions` (requested `no`). Other reasons come
+before OK, when the box couldn't be set at all: `could not select API →
+Precautions`, `the bypass box is not showing, or is disabled, on API →
+Precautions` (Gateway can show it greyed out), `more than one box on API
+→ Precautions has that label`, and `the bypass box could not be set`.
+Either way the precautions apply as Gateway had them. Both settings take
+`yes`/`true`/`on`/`1` or `no`/`false`/`off`/`0`, in any case; anything
+else (a typo such as `BYPASS_ORDER_PRECAUTIONS=y`) gets a WARNING and
+leaves the box alone, as it does for `READ_ONLY_API`.
 
 `reason="the settings dialog did not close after OK; see the dialog
 Gateway is showing"` (v0.16.1): Gateway held the dialog open behind a

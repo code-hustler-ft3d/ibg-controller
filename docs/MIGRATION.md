@@ -140,6 +140,8 @@ after login completes. These IBC env vars now take effect:
 
 - **`TWS_MASTER_CLIENT_ID`** — integer, sets the Master API client ID
 - **`READ_ONLY_API`** — `yes`/`no`, toggles the Read-Only API checkbox
+- **`BYPASS_ORDER_PRECAUTIONS`** — `yes`/`no`, toggles API →
+  Precautions → Bypass Order Precautions for API Orders
 - **`AUTO_LOGOFF_TIME`** — `HH:MM`, sets Lock and Exit → Set Auto
   Log Off Time
 - **`AUTO_RESTART_TIME`** — `HH:MM AM/PM`, sets Lock and Exit → Set

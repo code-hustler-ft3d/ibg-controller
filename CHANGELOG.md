@@ -4,6 +4,20 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **`BYPASS_ORDER_PRECAUTIONS` (issue #68).** `yes` ticks Gateway's
+  "Bypass Order Precautions for API Orders" box under Configure →
+  Settings → API → Precautions, `no` unticks it, and unset leaves it as
+  it is. Some accounts show the box as "Bypass Order and Ticket
+  Precautions for API Orders and Tickets"; the controller sets whichever
+  label Gateway shows. It's read back after OK: `Verified: … reads back
+  as True`, or `ALERT_CONFIG_NOT_APPLIED ... env_var=BYPASS_ORDER_PRECAUTIONS`
+  if Gateway didn't keep it or the box isn't there to set.
+  `scripts/ibc_config_to_env.py` maps IBC's `BypassOrderPrecautions` to it.
+
 ## [0.16.1] - 2026-10-12
 
 ### Fixed

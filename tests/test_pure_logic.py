@@ -5219,6 +5219,119 @@ class TestReadOnlyApiReadBack(unittest.TestCase):
         close.assert_called_once_with("Cancel")
 
 
+class TestBypassOrderPrecautions(unittest.TestCase):
+    """Issue #68: BYPASS_ORDER_PRECAUTIONS ticks or unticks Gateway's
+    bypass box on API → Precautions, under whichever of its two labels
+    Gateway shows, and reads it back after OK. Unset leaves it alone."""
+
+    SHORT, LONG = gc._BYPASS_PRECAUTIONS_LABELS
+
+    def _config(self, env, shown=SHORT, tree_ok=True, jcheck_ok=True,
+                verified=True, committed=True):
+        base = {"AUTO_LOGOFF_TIME": "", "AUTO_RESTART_TIME": "",
+                "TWS_MASTER_CLIENT_ID": "", "READ_ONLY_API": "",
+                "BYPASS_ORDER_PRECAUTIONS": ""}
+
+        def agent(cmd):   # JSTATE, asked to find which label is showing
+            label = cmd.split("|", 1)[1]
+            if shown == "ambiguous":
+                return f"ERR jcheck_ambiguous jtoggle={label} matches=2"
+            return "OK value=false" if label == shown else f"ERR not_found jtoggle={label}"
+
+        with patch.dict(os.environ, {**base, **env}), \
+             patch.object(gc, "_config_open", return_value=True), \
+             patch.object(gc, "agent_jtree_select_path", return_value=tree_ok) as tree, \
+             patch.object(gc, "_agent_request", side_effect=agent) as req, \
+             patch.object(gc, "agent_jcheck", return_value=jcheck_ok) as jcheck, \
+             patch.object(gc, "_config_close", return_value=True) as close, \
+             patch.object(gc, "_wait_config_committed", return_value=committed), \
+             patch.object(gc, "_verify_checkbox_persisted", return_value=verified) as verify, \
+             patch.object(gc.time, "sleep"), \
+             self.assertLogs("controller", level="INFO") as cm, \
+             _capture_controller_errors() as errors:
+            gc.handle_post_login_config()
+        return {"tree": [c.args[1] for c in tree.call_args_list], "req": req,
+                "jcheck": jcheck, "verify": verify,
+                "closes": [c.args[0] for c in close.call_args_list],
+                "out": cm.output, "errors": errors}
+
+    def test_yes_ticks_the_box_and_reads_it_back(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"})
+        self.assertEqual(r["tree"], ["API/Precautions"])
+        r["jcheck"].assert_called_once_with(gc.CONFIG_WINDOW_TITLE_SUBSTR, self.SHORT, True)
+        r["verify"].assert_called_once_with("API/Precautions", self.SHORT, True)
+        self.assertEqual(r["closes"], ["OK"])
+        self.assertTrue(any(f"Verified: {self.SHORT} reads back as True" in m for m in r["out"]))
+        self.assertEqual(r["errors"], [])
+
+    def test_the_longer_label_is_used_when_gateway_shows_it(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "no"}, shown=self.LONG)
+        r["jcheck"].assert_called_once_with(gc.CONFIG_WINDOW_TITLE_SUBSTR, self.LONG, False)
+        r["verify"].assert_called_once_with("API/Precautions", self.LONG, False)
+        self.assertTrue(any(f"Verified: {self.LONG} reads back as False" in m for m in r["out"]))
+        self.assertFalse(any("not_found" in m for m in r["out"]))   # the other label, asked quietly
+        self.assertEqual(r["errors"], [])
+
+    def test_a_missing_or_disabled_box_alerts_and_saves_nothing(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"}, shown=None)
+        r["jcheck"].assert_not_called()
+        r["verify"].assert_not_called()
+        self.assertEqual(r["closes"], ["Cancel"])
+        self.assertEqual(len(r["errors"]), 1, r["errors"])
+        self.assertIn('env_var=BYPASS_ORDER_PRECAUTIONS requested="yes"', r["errors"][0])
+        self.assertIn("not showing, or is disabled", r["errors"][0])
+
+    def test_a_page_it_cannot_reach_alerts(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"}, tree_ok=False)
+        r["req"].assert_not_called()
+        self.assertIn("could not select API → Precautions", r["errors"][0])
+
+    def test_a_click_that_fails_alerts_under_the_label_shown(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"}, shown=self.LONG, jcheck_ok=False)
+        r["verify"].assert_not_called()
+        self.assertIn("could not be set", r["errors"][0])
+        self.assertIn(f'setting="{self.LONG}"', r["errors"][0])
+
+    def test_two_matching_boxes_are_named_as_such(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"}, shown="ambiguous")
+        r["jcheck"].assert_not_called()
+        self.assertIn("more than one box", r["errors"][0])
+
+    def test_a_value_gateway_did_not_keep_alerts_both_ways(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"}, verified=False)
+        self.assertEqual(len(r["errors"]), 1, r["errors"])
+        self.assertIn(f'setting="{self.SHORT}" env_var=BYPASS_ORDER_PRECAUTIONS', r["errors"][0])
+        self.assertIn("still go through order precautions", r["errors"][0])
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "no"}, verified=False)
+        self.assertIn("still bypass order precautions", r["errors"][0])
+
+    def test_an_unreadable_value_is_unverified_not_wrong(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"}, verified=None)
+        self.assertEqual(r["errors"], [])
+        self.assertTrue(any(f"Could not verify {self.SHORT}" in m for m in r["out"]))
+
+    def test_an_unclosed_dialog_reports_it_unsaved(self):
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "yes"}, committed=False)
+        r["verify"].assert_not_called()
+        self.assertEqual(len(r["errors"]), 1, r["errors"])
+        self.assertIn("env_var=BYPASS_ORDER_PRECAUTIONS", r["errors"][0])
+        self.assertIn("did not close after OK", r["errors"][0])
+
+    def test_unset_or_unrecognised_leaves_the_box_alone(self):
+        for value in ("", "maybe"):
+            r = self._config({"BYPASS_ORDER_PRECAUTIONS": value, "READ_ONLY_API": "no"})
+            self.assertNotIn("API/Precautions", r["tree"])
+            r["req"].assert_not_called()
+            self.assertFalse(any(c.args[1] in gc._BYPASS_PRECAUTIONS_LABELS
+                                 for c in r["jcheck"].call_args_list))
+        self.assertTrue(any("BYPASS_ORDER_PRECAUTIONS='maybe' (coerced=None)" in m
+                            for m in r["out"]))
+        self.assertTrue(any("BYPASS_ORDER_PRECAUTIONS='maybe' isn't one of yes/no" in m
+                            for m in r["out"]))
+        r = self._config({"BYPASS_ORDER_PRECAUTIONS": "", "READ_ONLY_API": "no"})
+        self.assertFalse(any("isn't one of" in m for m in r["out"]))
+
+
 class TestConfigCommitWait(unittest.TestCase):
     """Issue #69: Gateway 10.50.1f answers OK with a notice when the commit
     newly selects Auto restart, and saves the rest of the dialog only once

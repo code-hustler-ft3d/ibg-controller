@@ -125,7 +125,7 @@ Deeper guides:
 | Multi-method 2FA | ⚠️ needs one method | ⚠️ needs one method | both dialog shapes are detected and driven, but IBKR kicks the session on most accounts we've seen when the method is switched mid-login; run a single method, see [2FA](#2fa) |
 | Passkey prompt (`PASSKEY_AUTHENTICATE=yes`) | ⚠️ contributor-validated | ⚠️ untested | presses Authenticate; your authenticator completes WebAuthn; amd64 plus extra libraries; see [2FA](#2fa) |
 | Existing-session dialog | ✅ verified | ⚠️ code in place | also answered when it appears after the TOTP code (v0.16.0, unit-tested) |
-| Post-login config (`READ_ONLY_API`, `TWS_MASTER_CLIENT_ID`, auto logoff/restart times) | ✅ verified | ⚠️ untested | selecting Auto restart and the AM/PM buttons: v0.16.0, unit-tested |
+| Post-login config (`READ_ONLY_API`, `BYPASS_ORDER_PRECAUTIONS`, `TWS_MASTER_CLIENT_ID`, auto logoff/restart times) | ✅ verified | ⚠️ untested | `BYPASS_ORDER_PRECAUTIONS` (v0.16.2) and selecting Auto restart with Gateway's notice (v0.16.1): run on a paper 10.50.1f Gateway; the AM button: unit-tested |
 | Command server (`STOP`, `RESTART`, `RECONNECTACCOUNT`, `ENABLEAPI`) | ✅ verified | ⚠️ untested | `RECONNECTDATA` is TWS-only |
 
 ✅ verified = run end-to-end against a real IB account.
@@ -253,6 +253,7 @@ real product.
 |---|---|
 | `TWS_MASTER_CLIENT_ID` | Master API client ID |
 | `READ_ONLY_API` | `yes`/`no`. Read back after login; `ALERT_CONFIG_NOT_APPLIED` if Gateway didn't keep it. |
+| `BYPASS_ORDER_PRECAUTIONS` | `yes`/`no` (also `true`/`false`, `on`/`off`, `1`/`0`): ticks or unticks Configure → Settings → API → Precautions → Bypass Order Precautions for API Orders. Unset leaves it as it is. Read back after login like `READ_ONLY_API`. |
 | `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other, depending on whether its Auto logoff (the default) or Auto restart button is selected; set both vars and the controller handles whichever is displayed. With only `AUTO_RESTART_TIME` set, the controller selects **Auto restart** first, since Gateway starts in Auto logoff mode (11:45 PM). It also selects the AM or PM radio button beside the time, and the read-back after login confirms what Gateway kept (`ALERT_CONFIG_NOT_APPLIED` if not). Gateway's own logoff timer is unreliable, so if the same Gateway is still running 5 minutes after `AUTO_LOGOFF_TIME`, the controller logs it off itself (`LOGOFF_BACKSTOP`). It only does this for a time written with AM or PM (`05:01 PM`) that Gateway showed back on that login, for a session that logged in before that time, within an hour after it, and only when `AUTO_RESTART_TIME` is unset and Gateway's time zone (`TIME_ZONE`) matches the container's (`TZ`) — so it never adds a logoff Gateway wasn't already scheduled to do. With no `AUTO_LOGOFF_TIME`, nothing changes. |
 | `AUTO_RESTART_ADOPT` | Default `yes`: when Gateway restarts itself at `AUTO_RESTART_TIME`, adopt the new JVM instead of launching a second one. Gateway normally carries the session across, so no login and no 2FA; when it doesn't, the controller re-drives login on the adopted JVM. `no` restores always-relaunch. Wait budget: `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (90). |
 

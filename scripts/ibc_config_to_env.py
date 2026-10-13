@@ -63,6 +63,7 @@ DIRECT_MAPPINGS: Dict[str, Tuple[str, Callable[[str], Optional[str]]]] = {
     "IbPassword": ("TWS_PASSWORD", _identity),
     "TradingMode": ("TRADING_MODE", lambda v: v.strip().lower()),
     "ReadOnlyApi": ("READ_ONLY_API", _yes_no),
+    "BypassOrderPrecautions": ("BYPASS_ORDER_PRECAUTIONS", _yes_no),
     "ExistingSessionDetectedAction": (
         "EXISTING_SESSION_DETECTED_ACTION", _existing_session_action),
     "AutoRestartTime": ("AUTO_RESTART_TIME", _identity),

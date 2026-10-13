@@ -63,6 +63,7 @@ review). The tool's `--help` output lists every key it knows about.
 |---|---|---|
 | `ExistingSessionDetectedAction` | `EXISTING_SESSION_DETECTED_ACTION` | `primary` / `primaryoverride` / `secondary` / `manual`. |
 | `ReadOnlyApi` | `READ_ONLY_API` | yes/no. |
+| `BypassOrderPrecautions` | `BYPASS_ORDER_PRECAUTIONS` | yes/no: Configure → Settings → API → Precautions → Bypass Order Precautions for API Orders. Separate from `BypassWarning`, which is about dialog buttons. |
 | `AutoRestartTime` | `AUTO_RESTART_TIME` | `HH:MM AM/PM`. |
 | `IbAutoClosedown` | — | Set `AUTO_LOGOFF_TIME=HH:MM` directly; the controller drives the Gateway field with that value. |
 | `AllowBlindTrading` | `ALLOW_BLIND_TRADING` | yes/no. |

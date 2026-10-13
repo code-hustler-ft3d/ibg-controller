@@ -267,8 +267,9 @@ Why each was added:
    (live) / 4002 (paper) until it accepts a connection. **This is the
    definitive readiness signal.**
 9. **Post-login config** (v0.2): `handle_post_login_config()` — if any
-   of `TWS_MASTER_CLIENT_ID` / `READ_ONLY_API` / `AUTO_LOGOFF_TIME` /
-   `AUTO_RESTART_TIME` is set, open Configure → Settings, navigate
+   of `TWS_MASTER_CLIENT_ID` / `READ_ONLY_API` /
+   `BYPASS_ORDER_PRECAUTIONS` / `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME`
+   is set, open Configure → Settings, navigate
    tree via `JTREE_SELECT_PATH`, apply values via `SETTEXT_BY_LABEL`
    and `JCHECK`, commit via `CLICK_IN_WIN Configuration|OK`. Gateway
    shows *either* Auto Log Off Time *or* Auto Restart Time in Lock
@@ -287,7 +288,10 @@ Why each was added:
    15 s means `ALERT_CONFIG_NOT_APPLIED`, the open dialogs' text in the
    log, and no read-back. If the agent never returns a window list, nothing
    is read back either (a WARNING says so). Once the dialog has closed, it re-opens it and reads
-   back what it wrote: the Lock and Exit time, and Read-Only API (`JSTATE`).
+   back what it wrote: the Lock and Exit time, and Read-Only API and the
+   API → Precautions bypass box (`JSTATE`). Gateway labels that box one
+   of two ways depending on the account; the handler asks `JSTATE` for
+   each and sets the one that answers.
 10. **Command server** (v0.2): `start_command_server()` — if
     `CONTROLLER_COMMAND_SERVER_PORT` is set, start a daemon thread
     listening on that TCP port for IBC-compat commands (`STOP`,

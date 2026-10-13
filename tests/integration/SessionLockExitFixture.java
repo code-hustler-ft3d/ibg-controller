@@ -30,8 +30,10 @@ import javax.swing.tree.TreePath;
  * Gateway-shaped windows the controller drives through the real agent:
  *
  * - "IBKR Gateway" main frame with Configure → Settings.
- * - "Trader Workstation Configuration": a tree (API/Settings, Lock and
- *   Exit) and the Lock and Exit page laid out as in Gateway 10.50.1f
+ * - "Trader Workstation Configuration": a tree (API/Settings,
+ *   API/Precautions, Lock and Exit). API → Precautions holds Gateway's
+ *   bypass box, labelled "Bypass Order Precautions for API Orders", or
+ *   the longer "...and Ticket..." label after TICKET_LABEL (#68). And the Lock and Exit page laid out as in Gateway 10.50.1f
  *   (monitored_panels.p, data_holders.br): an "Auto restart" / "Auto
  *   logoff" radio group, ONE time label whose text Gateway switches with
  *   the mode (the restart text only when daily restart is allowed), the
@@ -60,7 +62,7 @@ public class SessionLockExitFixture {
     static final int LAG = 1500;
 
     static String mode, time, ampm, clientId;
-    static boolean readOnly, dailyAllowed = true, roStuck;
+    static boolean readOnly, dailyAllowed = true, roStuck, bypass, ticketLabel;
     static JFrame main;
 
     static void reset() {
@@ -69,6 +71,7 @@ public class SessionLockExitFixture {
         ampm = "PM";
         readOnly = true;
         clientId = "0";
+        bypass = false;
     }
 
     /** Gateway 10.50.1f (jutils.d2.a): a strict "hh:mm" DateFormat
@@ -95,6 +98,7 @@ public class SessionLockExitFixture {
         DefaultMutableTreeNode root = new DefaultMutableTreeNode("Configuration");
         DefaultMutableTreeNode api = new DefaultMutableTreeNode("API");
         api.add(new DefaultMutableTreeNode("Settings"));
+        api.add(new DefaultMutableTreeNode("Precautions"));
         root.add(api);
         root.add(new DefaultMutableTreeNode("Lock and Exit"));
         JTree tree = new JTree(root);
@@ -114,6 +118,15 @@ public class SessionLockExitFixture {
         JCheckBox ro = new JCheckBox("Read-Only API", readOnly);
         apiPage.add(ro);
         right.add(apiPage, "api");
+
+        // API → Precautions (feature.configure.plugins.custom.panel.R)
+        JPanel precPage = new JPanel(new GridLayout(0, 1));
+        JCheckBox bp = new JCheckBox(ticketLabel
+                ? "Bypass Order and Ticket Precautions for API Orders and Tickets"
+                : "Bypass Order Precautions for API Orders", bypass);
+        precPage.add(bp);
+        precPage.add(new JCheckBox("Bypass Bond warning for API Orders"));
+        right.add(precPage, "prec");
 
         // Lock and Exit, shaped like 10.50.1f
         JPanel lockPage = new JPanel();
@@ -161,6 +174,7 @@ public class SessionLockExitFixture {
             TreePath p = ev.getNewLeadSelectionPath();
             String last = p == null ? "" : p.getLastPathComponent().toString();
             cards.show(right, "Settings".equals(last) ? "api"
+                              : "Precautions".equals(last) ? "prec"
                               : "Lock and Exit".equals(last) ? "lock" : "none");
         });
 
@@ -178,8 +192,9 @@ public class SessionLockExitFixture {
             ampm = am.isSelected() ? "AM" : "PM";
             if (!roStuck) readOnly = ro.isSelected();
             clientId = cid.getText().trim();
+            bypass = bp.isSelected();
             say("SAVED|mode=" + mode + "|time=" + time + "|ampm=" + ampm
-                + "|ro=" + readOnly + "|cid=" + clientId);
+                + "|ro=" + readOnly + "|cid=" + clientId + "|bypass=" + bypass);
             d.dispose();
         });
         JButton cancel = new JButton("Cancel");
@@ -269,6 +284,8 @@ public class SessionLockExitFixture {
                 case "DAILY": dailyAllowed = true; break;
                 case "RO_STUCK": roStuck = true; break;
                 case "RO_KEPT": roStuck = false; break;
+                case "TICKET_LABEL": ticketLabel = true; break;
+                case "ORDER_LABEL": ticketLabel = false; break;
                 default: break;
             }
             say("ACK|" + line.trim());

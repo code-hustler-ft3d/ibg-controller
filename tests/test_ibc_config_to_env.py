@@ -83,6 +83,11 @@ class TestDirectMappings(unittest.TestCase):
         self.assertEqual(d["READ_ONLY_API"], "yes")
         self.assertEqual(d["ALLOW_BLIND_TRADING"], "no")
 
+    def test_bypass_order_precautions_maps(self):
+        env, warnings = ibc.convert(ibc.parse_ibc_config("BypassOrderPrecautions=yes\n"))
+        self.assertEqual(dict(env)["BYPASS_ORDER_PRECAUTIONS"], "yes")
+        self.assertEqual(warnings, [])
+
     def test_yes_no_unrecognized_warns(self):
         pairs = ibc.parse_ibc_config("ReadOnlyApi=maybe\n")
         env, warnings = ibc.convert(pairs)

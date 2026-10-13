@@ -10,6 +10,9 @@ the API port, and the halt (recorded instead of blocking).
   a panel already in restart mode is left alone, an AM logoff time
   sticks, and a mode Gateway won't show (no daily restart) is switched
   back rather than saved without its time.
+- #68: BYPASS_ORDER_PRECAUTIONS ticks or unticks the bypass box on
+  API → Precautions under either of Gateway's labels and reads it back;
+  unset leaves it alone.
 - #69: newly selecting Auto restart makes Gateway answer OK with its
   Automatic Restart notice (a modal titled "IBKR Gateway", like the main
   frame) and save the rest only once that's answered; the controller
@@ -70,7 +73,8 @@ def since(mark, prefix):
 
 def config_pass(env):
     """One real post-login config pass with only ``env`` set."""
-    keys = ("AUTO_RESTART_TIME", "AUTO_LOGOFF_TIME", "READ_ONLY_API", "TWS_MASTER_CLIENT_ID")
+    keys = ("AUTO_RESTART_TIME", "AUTO_LOGOFF_TIME", "READ_ONLY_API", "TWS_MASTER_CLIENT_ID",
+            "BYPASS_ORDER_PRECAUTIONS")
     clean = {k: "" for k in keys}
     clean.update(env)
     mark, log_mark = len(LINES), len(LOGS)
@@ -195,6 +199,38 @@ def main():
                   and "cannot place or change orders" in m for m in logs),
               [m for m in logs if "ALERT" in m or "Read-Only" in m])
         send("RO_KEPT")
+        send("RESET")
+
+        print("\n--- #68: BYPASS_ORDER_PRECAUTIONS=yes, with the Automatic Restart notice ---")
+        saved, _c, logs = config_pass({"BYPASS_ORDER_PRECAUTIONS": "yes", "READ_ONLY_API": "no",
+                                       "AUTO_RESTART_TIME": "08:00 PM"})
+        check("one save, the bypass box ticked",
+              len(saved) == 1 and saved[0].endswith("|bypass=true"), str(saved))
+        check("read back as on",
+              any("Verified: Bypass Order Precautions for API Orders reads back as True" in m
+                  for m in logs), [m for m in logs if "Bypass" in m])
+        check("no ALERT_CONFIG_NOT_APPLIED",
+              not any("ALERT_CONFIG_NOT_APPLIED" in m for m in logs),
+              [m for m in logs if "ALERT" in m])
+
+        print("\n--- #68: the longer label some accounts show; unticking ---")
+        send("TICKET_LABEL")
+        saved, _c, logs = config_pass({"BYPASS_ORDER_PRECAUTIONS": "no"})
+        check("saved with the box unticked",
+              saved and saved[-1].endswith("|bypass=false"), str(saved))
+        check("read back under the longer label",
+              any("Verified: Bypass Order and Ticket Precautions for API Orders and Tickets "
+                  "reads back as False" in m for m in logs), [m for m in logs if "Bypass" in m])
+        check("no agent errors from the label that isn't there",
+              not any("not_found" in m for m in logs), [m for m in logs if "not_found" in m])
+        send("ORDER_LABEL")
+
+        print("\n--- #68: BYPASS_ORDER_PRECAUTIONS unset leaves the box as it is ---")
+        saved, _c, logs = config_pass({"READ_ONLY_API": "no"})
+        check("box still unticked, nothing about it in the log",
+              saved and saved[-1].endswith("|bypass=false")
+              and not any("Precautions" in m for m in logs if "env:" not in m),
+              str(saved))
         send("RESET")
 
         print("\n--- #63: prompt during the API-port wait (click lands 1.5 s late) ---")

@@ -3049,28 +3049,26 @@ def _verify_lock_exit_time_persisted(label, expected):
         return None
 
 
-def _verify_read_only_api_persisted(expected):
-    """Re-open Configure → Settings after OK and confirm Read-Only API
-    holds ``expected``. Returns True/False, or None if it couldn't be
-    checked.
+def _verify_checkbox_persisted(page, label, expected):
+    """Re-open Configure → Settings after OK and confirm the checkbox
+    ``label`` on ``page`` holds ``expected``. Returns True/False, or None
+    if it couldn't be checked.
 
-    While the box is ticked the API answers trading requests with error
-    321 (#69). A click that succeeded in the dialog doesn't show that
-    Gateway kept the change; a read-back after the commit does.
+    A click that succeeded in the dialog doesn't show that Gateway kept
+    the change; a read-back after the commit does.
     """
     try:
         if not _config_open():
             log.warning("  Could not re-open config dialog to verify "
-                        "Read-Only API; treating as unverified")
+                        f"{label}; treating as unverified")
             return None
         try:
-            if not agent_jtree_select_path(CONFIG_WINDOW_TITLE_SUBSTR,
-                                           "API/Settings"):
-                log.warning("  Could not re-select API/Settings to verify "
-                            "Read-Only API; treating as unverified")
+            if not agent_jtree_select_path(CONFIG_WINDOW_TITLE_SUBSTR, page):
+                log.warning(f"  Could not re-select {page} to verify "
+                            f"{label}; treating as unverified")
                 return None
             time.sleep(0.5)  # same panel-render settle as the write path
-            state = agent_jstate(CONFIG_WINDOW_TITLE_SUBSTR, "Read-Only API")
+            state = agent_jstate(CONFIG_WINDOW_TITLE_SUBSTR, label)
             return None if state is None else state == expected
         finally:
             # Cancel, never OK: verification must not itself commit anything.
@@ -3078,9 +3076,43 @@ def _verify_read_only_api_persisted(expected):
                 log.warning("  Could not close the verification dialog with "
                             "Cancel — check for a stray config window")
     except Exception as e:
-        log.warning(f"  Verification of Read-Only API raised "
+        log.warning(f"  Verification of {label} raised "
                     f"{type(e).__name__}: {e}; treating as unverified")
         return None
+
+
+def _verify_read_only_api_persisted(expected):
+    """Read Read-Only API back after OK. While the box is ticked the API
+    answers trading requests with error 321 (#69)."""
+    return _verify_checkbox_persisted("API/Settings", "Read-Only API", expected)
+
+
+# Gateway labels the API → Precautions box one of two ways, depending on
+# the account (10.50.1f, feature.configure.plugins.custom.panel.R).
+_BYPASS_PRECAUTIONS_LABELS = (
+    "Bypass Order Precautions for API Orders",
+    "Bypass Order and Ticket Precautions for API Orders and Tickets",
+)
+
+
+def _bypass_precautions_label():
+    """(label, None) for the bypass box on the open API → Precautions page,
+    or (None, reason) if neither label is showing and enabled. JSTATE only
+    reads, and asking directly keeps the label that isn't there out of the
+    log."""
+    ambiguous = False
+    for label in _BYPASS_PRECAUTIONS_LABELS:
+        try:
+            resp = _agent_request(f"JSTATE {CONFIG_WINDOW_TITLE_SUBSTR}|{label}") or ""
+        except Exception as e:
+            log.warning(f"agent JSTATE {label!r}: {type(e).__name__}: {e}")
+            return None, "the agent did not answer"
+        if resp.startswith("OK value="):
+            return label, None
+        ambiguous = ambiguous or "jcheck_ambiguous" in resp
+    if ambiguous:
+        return None, "more than one box on API → Precautions has that label"
+    return None, "the bypass box is not showing, or is disabled, on API → Precautions"
 
 
 # Gateway 10.50.1f answers OK with this notice when the commit newly
@@ -3165,6 +3197,11 @@ def handle_post_login_config():
         TWS_MASTER_CLIENT_ID — integer, API → Settings → Master client ID
         READ_ONLY_API        — yes/no, API → Settings → Read-Only API
 
+      Present in Gateway's API → Precautions panel:
+        BYPASS_ORDER_PRECAUTIONS — yes/no, "Bypass Order Precautions for
+                               API Orders" (or Gateway's longer "...and
+                               Ticket Precautions..." label)
+
       Present in Gateway's Lock and Exit panel (one of two, depending
       on whether the account has the autorestart daily-token cycle
       enabled — Gateway shows *either* Auto Log Off Time *or* Auto
@@ -3176,8 +3213,8 @@ def handle_post_login_config():
       isn't showing in this session, a clear warning is logged.
 
       NOT present in Gateway's config dialog at all (TWS-only; we warn):
-        ALLOW_BLIND_TRADING  — TWS Precautions tab; Gateway has no
-                               equivalent in its simplified config
+        ALLOW_BLIND_TRADING  — TWS Precautions tab; Gateway's
+                               Precautions page has no such box
         SAVE_TWS_SETTINGS    — not a Gateway knob
 
     Skips any knob whose env var isn't set or is empty. Non-fatal on
@@ -3190,13 +3227,16 @@ def handle_post_login_config():
     read_only_api = _coerce_yes_no(read_only_api_raw)
     auto_logoff_time = os.environ.get("AUTO_LOGOFF_TIME", "").strip()
     auto_restart_time = os.environ.get("AUTO_RESTART_TIME", "").strip()
+    bypass_precautions_raw = os.environ.get("BYPASS_ORDER_PRECAUTIONS", "")
+    bypass_precautions = _coerce_yes_no(bypass_precautions_raw)
     # Truly TWS-only — not present in any Gateway config state we've observed
     allow_blind_trading = _coerce_yes_no(os.environ.get("ALLOW_BLIND_TRADING", ""))
     save_tws_settings = os.environ.get("SAVE_TWS_SETTINGS", "").strip()
 
     wanted_api_tab = master_client_id or read_only_api is not None
+    wanted_precautions_tab = bypass_precautions is not None
     wanted_lock_exit_tab = bool(auto_logoff_time) or bool(auto_restart_time)
-    wanted_anything = wanted_api_tab or wanted_lock_exit_tab
+    wanted_anything = wanted_api_tab or wanted_precautions_tab or wanted_lock_exit_tab
 
     # Early warning for the truly TWS-only vars
     tws_only_set = []
@@ -3221,8 +3261,17 @@ def handle_post_login_config():
         f"Post-login config env: TWS_MASTER_CLIENT_ID={master_client_id!r}, "
         f"READ_ONLY_API={read_only_api_raw!r} (coerced={read_only_api!r}), "
         f"AUTO_LOGOFF_TIME={auto_logoff_time!r}, "
-        f"AUTO_RESTART_TIME={auto_restart_time!r}"
+        f"AUTO_RESTART_TIME={auto_restart_time!r}, "
+        f"BYPASS_ORDER_PRECAUTIONS={bypass_precautions_raw!r} "
+        f"(coerced={bypass_precautions!r})"
     )
+    for name, raw, coerced in (
+            ("READ_ONLY_API", read_only_api_raw, read_only_api),
+            ("BYPASS_ORDER_PRECAUTIONS", bypass_precautions_raw, bypass_precautions)):
+        if raw.strip() and coerced is None:
+            log.warning(f"Post-login config: {name}={raw.strip()!r} isn't one of "
+                        "yes/no, true/false, on/off, 1/0; leaving that setting "
+                        "as Gateway has it")
 
     if not wanted_anything:
         log.info("Post-login config: no supported env vars set, skipping")
@@ -3238,6 +3287,8 @@ def handle_post_login_config():
     # Read back after OK, like the Lock and Exit time (#69).
     read_only_written = False
     client_id_written = False
+    # The bypass box's label as Gateway showed it, once written.
+    precautions_written = None
     # (label, value, env var) of the Lock and Exit time we wrote, if any.
     # Verified after OK — see _verify_lock_exit_time_persisted.
     lock_exit_written = None
@@ -3267,6 +3318,29 @@ def handle_post_login_config():
                     read_only_written = True
                 else:
                     log.warning("  Failed to toggle Read-Only API")
+
+    if wanted_precautions_tab:
+        log.info("  Navigating to API → Precautions")
+        not_set = label = None
+        if not agent_jtree_select_path(CONFIG_WINDOW_TITLE_SUBSTR, "API/Precautions"):
+            not_set = "could not select API → Precautions"
+        else:
+            time.sleep(0.5)  # let the right panel render
+            label, not_set = _bypass_precautions_label()
+            if label is not None:
+                log.info(f"  Setting {label} = {bypass_precautions}")
+                if agent_jcheck(CONFIG_WINDOW_TITLE_SUBSTR, label, bypass_precautions):
+                    changed = True
+                    precautions_written = label
+                else:
+                    not_set = "the bypass box could not be set"
+        if not_set:
+            log.error(
+                f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
+                f"setting=\"{label or _BYPASS_PRECAUTIONS_LABELS[0]}\" "
+                f"env_var=BYPASS_ORDER_PRECAUTIONS "
+                f"requested=\"{bypass_precautions_raw.strip()}\" "
+                f"reason=\"{not_set}\"")
 
     if wanted_lock_exit_tab:
         log.info("  Navigating to Lock and Exit")
@@ -3350,7 +3424,9 @@ def handle_post_login_config():
                 ("Read-Only API", "READ_ONLY_API", read_only_api_raw,
                  read_only_api is not None),
                 ("Master API client ID", "TWS_MASTER_CLIENT_ID", master_client_id,
-                 bool(str(master_client_id or "").strip()))):
+                 bool(str(master_client_id or "").strip())),
+                (precautions_written, "BYPASS_ORDER_PRECAUTIONS",
+                 bypass_precautions_raw, precautions_written is not None)):
             if applied:
                 log.error(
                     f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
@@ -3377,6 +3453,9 @@ def handle_post_login_config():
                                 master_client_id))
             if read_only_written:
                 unsaved.append(("Read-Only API", "READ_ONLY_API", read_only_api_raw))
+            if precautions_written is not None:
+                unsaved.append((precautions_written, "BYPASS_ORDER_PRECAUTIONS",
+                                bypass_precautions_raw))
             if lock_exit_written is not None:
                 label, value, env_var = lock_exit_written
                 unsaved.append((label, env_var, value))
@@ -3413,6 +3492,23 @@ def handle_post_login_config():
             else:
                 log.warning("  Could not verify Read-Only API — check it "
                             "under Configure → Settings → API → Settings.")
+        if precautions_written is not None:
+            label = precautions_written
+            time.sleep(1.0)  # let the dialog fully dispose before re-opening
+            verified = _verify_checkbox_persisted("API/Precautions", label,
+                                                  bypass_precautions)
+            if verified is True:
+                log.info(f"  Verified: {label} reads back as {bypass_precautions}")
+            elif verified is False:
+                log.error(
+                    f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
+                    f"setting=\"{label}\" env_var=BYPASS_ORDER_PRECAUTIONS "
+                    f"requested=\"{bypass_precautions_raw.strip()}\" "
+                    f"reason=\"Gateway did not retain the value after OK; "
+                    f"{'API orders still go through order precautions' if bypass_precautions else 'API orders still bypass order precautions'}\"")
+            else:
+                log.warning(f"  Could not verify {label} — check it under "
+                            "Configure → Settings → API → Precautions.")
         if lock_exit_written is not None:
             label, value, env_var = lock_exit_written
             time.sleep(1.0)  # let the dialog fully dispose before re-opening
