@@ -130,7 +130,7 @@ if TRADING_MODE == "paper":
         PASSWORD = _paper_pass
 
 # IBKR regional server hostname. IB accounts are bound to one regional
-# data center (ndc1.ibllc.com / cdc1.ibllc.com / gdc1.ibllc.com / etc.).
+# data center (ndc1.ibllc.com / cdc1.ibllc.com / zdc1.ibllc.com / etc.).
 # Without this set, Gateway tries the default and fails the SSL
 # handshake on the misc URLs port for accounts hosted elsewhere.
 # Users can find their server in their IB account portal, or by running
