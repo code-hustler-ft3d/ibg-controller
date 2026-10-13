@@ -648,11 +648,12 @@ def agent_click_in_window(title_substring, button_text):
     try:
         resp = _agent_request(f"CLICK_IN_WIN {title_substring}|{button_text}")
     except Exception as e:
-        log.error(f"agent CLICK_IN_WIN {title_substring!r}: {type(e).__name__}: {e}")
+        log.error(_redact_logs(
+            f"agent CLICK_IN_WIN {title_substring!r}: {type(e).__name__}: {e}"))
         return False
     if resp.startswith("OK"):
         return True
-    log.error(f"agent CLICK_IN_WIN {title_substring!r}: {resp}")
+    log.error(_redact_logs(f"agent CLICK_IN_WIN {title_substring!r}: {resp}"))
     return False
 
 
@@ -753,6 +754,21 @@ def agent_jcheck(title_substring, name, desired):
         return True
     log.error(f"agent JCHECK {name!r}: {resp}")
     return False
+
+
+def agent_jstate(title_substring, name):
+    """Read a toggle-style button's selected state without changing it.
+    Returns True/False, or None if it couldn't be read."""
+    try:
+        resp = _agent_request(f"JSTATE {title_substring}|{name}")
+    except Exception as e:
+        log.warning(f"agent JSTATE {name!r}: {type(e).__name__}: {e}")
+        return None
+    m = re.match(r"OK value=(true|false)\b", resp or "")
+    if m:
+        return m.group(1) == "true"
+    log.warning(f"agent JSTATE {name!r}: {resp}")
+    return None
 
 
 def agent_settext_by_label(title_substring, label_text, value):
@@ -3033,6 +3049,112 @@ def _verify_lock_exit_time_persisted(label, expected):
         return None
 
 
+def _verify_read_only_api_persisted(expected):
+    """Re-open Configure → Settings after OK and confirm Read-Only API
+    holds ``expected``. Returns True/False, or None if it couldn't be
+    checked.
+
+    While the box is ticked the API answers trading requests with error
+    321 (#69). A click that succeeded in the dialog doesn't show that
+    Gateway kept the change; a read-back after the commit does.
+    """
+    try:
+        if not _config_open():
+            log.warning("  Could not re-open config dialog to verify "
+                        "Read-Only API; treating as unverified")
+            return None
+        try:
+            if not agent_jtree_select_path(CONFIG_WINDOW_TITLE_SUBSTR,
+                                           "API/Settings"):
+                log.warning("  Could not re-select API/Settings to verify "
+                            "Read-Only API; treating as unverified")
+                return None
+            time.sleep(0.5)  # same panel-render settle as the write path
+            state = agent_jstate(CONFIG_WINDOW_TITLE_SUBSTR, "Read-Only API")
+            return None if state is None else state == expected
+        finally:
+            # Cancel, never OK: verification must not itself commit anything.
+            if not _config_close("Cancel"):
+                log.warning("  Could not close the verification dialog with "
+                            "Cancel — check for a stray config window")
+    except Exception as e:
+        log.warning(f"  Verification of Read-Only API raised "
+                    f"{type(e).__name__}: {e}; treating as unverified")
+        return None
+
+
+# Gateway 10.50.1f answers OK with this notice when the commit newly
+# selects Auto restart: a modal titled "IBKR Gateway", like the main
+# frame, reading "You have elected to have your trading platform restart
+# automatically on a daily basis…" with one OK button (monitored_panels.p).
+# OK waits on it: until it's answered the dialog stays open and the rest
+# of the commit, Read-Only API included, isn't saved (#69). The title is
+# shared, so the notice is recognised by its text.
+_AUTO_RESTART_NOTICE_TEXT = "restart automatically on a daily basis"
+_CONFIG_COMMIT_TIMEOUT = 15.0
+
+
+def _modal_texts(windows):
+    """{title: [text lines]} for each modal dialog in an agent_windows()
+    list, read from its WINDOW dump."""
+    out = {}
+    for title in dict.fromkeys(t for _w, t, modal in windows if modal):
+        out[title] = [ln.strip() for ln in _modal_sections(agent_window(title))
+                      if ' text="' in ln]
+    return out
+
+
+def _wait_config_committed(timeout=None):
+    """After OK, wait for the settings dialog to close, acknowledging
+    Gateway's Automatic Restart notice if it comes up.
+
+    Returns True once the dialog is gone, False if it's still open at the
+    deadline (the open dialogs and their text are logged), or None if the
+    window list couldn't be read at all.
+    """
+    timeout = _CONFIG_COMMIT_TIMEOUT if timeout is None else timeout
+    # Bounded by both: polls keep it short when sleep is instant, the clock
+    # when each agent call is slow.
+    polls = max(1, int(timeout / 0.5))
+    deadline = time.monotonic() + timeout
+    last = []
+    next_check = 0
+    acknowledged = False
+    for i in range(polls):
+        if i and time.monotonic() >= deadline:
+            break
+        windows = agent_windows() or []
+        if windows:
+            last = windows
+            if not any(CONFIG_WINDOW_TITLE_SUBSTR in t for _w, t, _m in windows):
+                return True
+            if i >= next_check and any(m for _w, _t, m in windows):
+                # CLICK_IN_WIN only queues the click; look again in 3 s.
+                next_check = i + 6
+                modals = _modal_texts(windows)
+                notice = next((title for title, lines in modals.items()
+                               if any(_AUTO_RESTART_NOTICE_TEXT in ln for ln in lines)),
+                              None)
+                # CLICK_IN_WIN clicks the first OK in any modal whose title
+                # contains this one, so click only when the notice is the
+                # sole such modal; anything else stays up for the operator.
+                if notice and sum(1 for _w, t, m in windows if m and notice in t) == 1:
+                    if agent_click_in_window(notice, "OK") and not acknowledged:
+                        log.info("  Acknowledged Gateway's Automatic Restart notice")
+                        acknowledged = True
+        time.sleep(0.5)
+    if not last:
+        return None
+    modals = _modal_texts(last)
+    log.warning(_redact_logs(
+        f"  Settings dialog still open after OK; dialogs showing: "
+        f"{', '.join(modals) or 'none'}"))
+    for title, lines in modals.items():
+        for ln in lines[:5]:
+            log.warning(_redact_logs(f"    [{title}] {ln}"))
+    return False
+
+
 def handle_post_login_config():
     """Drive Gateway's Configure → Settings dialog to apply env-var
     overrides for the IBC-compatible API config knobs.
@@ -3113,6 +3235,9 @@ def handle_post_login_config():
         return False
 
     changed = False
+    # Read back after OK, like the Lock and Exit time (#69).
+    read_only_written = False
+    client_id_written = False
     # (label, value, env var) of the Lock and Exit time we wrote, if any.
     # Verified after OK — see _verify_lock_exit_time_persisted.
     lock_exit_written = None
@@ -3131,6 +3256,7 @@ def handle_post_login_config():
                                           "Master API client ID",
                                           master_client_id):
                     changed = True
+                    client_id_written = True
                 else:
                     log.warning("  Failed to set Master API client ID")
             if read_only_api is not None:
@@ -3138,6 +3264,7 @@ def handle_post_login_config():
                 if agent_jcheck(CONFIG_WINDOW_TITLE_SUBSTR,
                                 "Read-Only API", read_only_api):
                     changed = True
+                    read_only_written = True
                 else:
                     log.warning("  Failed to toggle Read-Only API")
 
@@ -3240,7 +3367,52 @@ def handle_post_login_config():
         if not _config_close("OK"):
             log.warning("Could not click OK to commit config changes")
             return False
+        committed = _wait_config_committed()
+        if committed is False:
+            # Reading back now would read the unsaved dialog, so report
+            # every setting it held instead.
+            unsaved = []
+            if client_id_written:
+                unsaved.append(("Master API client ID", "TWS_MASTER_CLIENT_ID",
+                                master_client_id))
+            if read_only_written:
+                unsaved.append(("Read-Only API", "READ_ONLY_API", read_only_api_raw))
+            if lock_exit_written is not None:
+                label, value, env_var = lock_exit_written
+                unsaved.append((label, env_var, value))
+            for setting, env_var, value in unsaved:
+                log.error(
+                    f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
+                    f"setting=\"{setting}\" env_var={env_var} "
+                    f"requested=\"{str(value).strip()}\" "
+                    f"reason=\"the settings dialog did not close after OK; "
+                    f"see the dialog Gateway is showing\"")
+            return False
+        if committed is None:
+            # The agent didn't answer for the whole wait, so the dialog may
+            # still be open behind a prompt, and a read-back would read it
+            # unsaved and then cancel it.
+            log.warning("Could not confirm the settings dialog closed after OK; "
+                        "not reading settings back. Check them under "
+                        "Configure → Settings.")
+            return True
         log.info("Post-login config committed; dialog closed")
+        if read_only_written:
+            time.sleep(1.0)  # let the dialog fully dispose before re-opening
+            verified = _verify_read_only_api_persisted(read_only_api)
+            if verified is True:
+                log.info(f"  Verified: Read-Only API reads back as {read_only_api}")
+            elif verified is False:
+                # Stable grep token, as for the times below.
+                log.error(
+                    f"ALERT_CONFIG_NOT_APPLIED mode={TRADING_MODE} "
+                    f"setting=\"Read-Only API\" env_var=READ_ONLY_API "
+                    f"requested=\"{read_only_api_raw.strip()}\" "
+                    f"reason=\"Gateway did not retain the value after OK; "
+                    f"{'API clients can place orders' if read_only_api else 'API clients cannot place or change orders'}\"")
+            else:
+                log.warning("  Could not verify Read-Only API — check it "
+                            "under Configure → Settings → API → Settings.")
         if lock_exit_written is not None:
             label, value, env_var = lock_exit_written
             time.sleep(1.0)  # let the dialog fully dispose before re-opening

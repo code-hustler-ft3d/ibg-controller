@@ -4,6 +4,37 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`READ_ONLY_API=no` with only `AUTO_RESTART_TIME` set left the API
+  read-only (issue #69).** When the commit newly selects Auto restart (a
+  fresh container, or settings still in Auto logoff), Gateway 10.50.1f
+  answers OK with a notice ("You have elected to have your trading
+  platform restart automatically on a daily basis…", in a dialog titled
+  "IBKR Gateway") and holds the settings dialog open until it's
+  answered. v0.16.0 never answered it, so the commit didn't finish:
+  Read-Only API stayed on and API clients got error 321 on trading
+  requests. v0.16.0's `Verified: Set Auto Restart Time` line in that case
+  read the dialog that was still open. The controller now recognises the
+  notice by its text, clicks its OK, and waits for the settings dialog
+  to close before it reads anything back. If the dialog is still open
+  after 15 s, each setting it held gets `ALERT_CONFIG_NOT_APPLIED` with
+  `reason="the settings dialog did not close after OK; ..."`, and the
+  WARNING before them quotes the dialogs Gateway is showing.
+
+### Added
+
+- **`READ_ONLY_API` is read back after login (issue #69).** The
+  controller re-opens Configure → Settings after OK and reads the
+  Read-Only API checkbox, as it already did for the Lock and Exit time.
+  If Gateway didn't keep the requested value it logs
+  `ALERT_CONFIG_NOT_APPLIED setting="Read-Only API"`; with
+  `READ_ONLY_API=no` that means API clients get error 321 on trading
+  requests. The in-JVM agent gains `JSTATE`, which reads a checkbox or
+  radio button without clicking it.
+
 ## [0.16.0] - 2026-10-12
 
 ### Changed

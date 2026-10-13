@@ -252,7 +252,7 @@ real product.
 | Var | Notes |
 |---|---|
 | `TWS_MASTER_CLIENT_ID` | Master API client ID |
-| `READ_ONLY_API` | `yes`/`no` |
+| `READ_ONLY_API` | `yes`/`no`. Read back after login; `ALERT_CONFIG_NOT_APPLIED` if Gateway didn't keep it. |
 | `AUTO_LOGOFF_TIME` / `AUTO_RESTART_TIME` | `HH:MM` / `HH:MM AM/PM`. Gateway shows one field or the other, depending on whether its Auto logoff (the default) or Auto restart button is selected; set both vars and the controller handles whichever is displayed. With only `AUTO_RESTART_TIME` set, the controller selects **Auto restart** first, since Gateway starts in Auto logoff mode (11:45 PM). It also selects the AM or PM radio button beside the time, and the read-back after login confirms what Gateway kept (`ALERT_CONFIG_NOT_APPLIED` if not). Gateway's own logoff timer is unreliable, so if the same Gateway is still running 5 minutes after `AUTO_LOGOFF_TIME`, the controller logs it off itself (`LOGOFF_BACKSTOP`). It only does this for a time written with AM or PM (`05:01 PM`) that Gateway showed back on that login, for a session that logged in before that time, within an hour after it, and only when `AUTO_RESTART_TIME` is unset and Gateway's time zone (`TIME_ZONE`) matches the container's (`TZ`) — so it never adds a logoff Gateway wasn't already scheduled to do. With no `AUTO_LOGOFF_TIME`, nothing changes. |
 | `AUTO_RESTART_ADOPT` | Default `yes`: when Gateway restarts itself at `AUTO_RESTART_TIME`, adopt the new JVM instead of launching a second one. Gateway normally carries the session across, so no login and no 2FA; when it doesn't, the controller re-drives login on the adopted JVM. `no` restores always-relaunch. Wait budget: `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` (90). |
 

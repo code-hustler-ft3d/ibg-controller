@@ -60,6 +60,7 @@ import javax.swing.tree.TreePath;
  *   JTREE_SELECT_PATH <title>|<p1>/<p2>/..→ OK selected=<path> | ERR ...
  *   JLIST_SELECT <title>|<item>          → OK selected=<entry> | ERR jlist_item_not_found want=… have=[…] | ERR jlist_item_ambiguous …
  *   JCHECK <title>|<name>|<true|false>    → OK unchanged=<v> | OK changed=<v> | ERR ...
+ *   JSTATE <title>|<name>                 → OK value=<true|false> | ERR ...
  *   SETTEXT_BY_LABEL <title>|<label>|<v>  → OK set label=<label> value=<v> | ERR ...
  *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
  *   SETTEXT_LOGIN_PASSWORD <text>         → OK | ERR ...
@@ -249,6 +250,11 @@ public class GatewayInputAgent {
                 // JToggleButton) to a desired state.
                 // Protocol: JCHECK <title_substr>|<name>|<true|false>
                 return doJCheck(rest);
+            }
+            case "JSTATE": {
+                // Read a toggle-style button's state without changing it.
+                // Protocol: JSTATE <title_substr>|<name>
+                return doJState(rest);
             }
             case "SETTEXT_BY_LABEL": {
                 // Set a text value by matching against an adjacent
@@ -733,7 +739,45 @@ public class GatewayInputAgent {
         if (target == null) {
             return "ERR not_found window_title_substring=" + titleSubstr;
         }
+        Object found = findToggle(target, name, titleSubstr);
+        if (found instanceof String) {
+            return (String) found;
+        }
+        final JToggleButton target2 = (JToggleButton) found;
+        final boolean before = target2.isSelected();
+        if (before == desired) {
+            return "OK unchanged value=" + desired;
+        }
+        SwingUtilities.invokeAndWait(target2::doClick);
+        return "OK changed from=" + before + " to=" + desired;
+    }
 
+    private static String doJState(String rest) throws Exception {
+        // Protocol: JSTATE <title_substr>|<name>
+        // Reads, never clicks. Same match as JCHECK, so a read-back after
+        // OK reads the control the write set.
+        int p1 = rest.indexOf('|');
+        if (p1 < 0) return "ERR jstate_missing_pipe";
+        String titleSubstr = rest.substring(0, p1);
+        String name = rest.substring(p1 + 1);
+        Window target = findWindowByTitleSubstring(titleSubstr);
+        if (target == null) {
+            return "ERR not_found window_title_substring=" + titleSubstr;
+        }
+        Object found = findToggle(target, name, titleSubstr);
+        if (found instanceof String) {
+            return (String) found;
+        }
+        final JToggleButton box = (JToggleButton) found;
+        // On the event thread, after whatever the panel queued as it opened.
+        final boolean[] selected = new boolean[1];
+        SwingUtilities.invokeAndWait(() -> selected[0] = box.isSelected());
+        return "OK value=" + selected[0];
+    }
+
+    /** The toggle button named {@code name} in {@code target}, or an
+     *  "ERR ..." reply. */
+    private static Object findToggle(Window target, String name, String titleSubstr) {
         // Find a toggle-style button matching the name. We accept any
         // AbstractButton that maintains a selected state (JCheckBox,
         // JRadioButton, JToggleButton, and install4j-obfuscated
@@ -760,13 +804,7 @@ public class GatewayInputAgent {
             return "ERR jcheck_ambiguous jtoggle=" + name + " matches=" + matches
                     + " in_window=" + titleSubstr;
         }
-        final JToggleButton target2 = box;
-        final boolean before = box.isSelected();
-        if (before == desired) {
-            return "OK unchanged value=" + desired;
-        }
-        SwingUtilities.invokeAndWait(target2::doClick);
-        return "OK changed from=" + before + " to=" + desired;
+        return box;
     }
 
     private static String doSetTextByLabel(String rest) throws Exception {

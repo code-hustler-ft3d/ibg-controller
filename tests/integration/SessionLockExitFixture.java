@@ -38,12 +38,20 @@ import javax.swing.tree.TreePath;
  *   time field and an AM/PM pair. OK prints the saved state:
  *       SAVED|mode=<restart|logoff>|time=<HH:MM>|ampm=<AM|PM>|ro=<bool>|cid=<id>
  *   Cancel prints CANCELLED. The time is read the way Gateway reads it.
+ *   OK with Auto restart newly selected first shows Gateway's Automatic
+ *   Restart notice (NOTICE|Automatic Restart): a modal titled "IBKR
+ *   Gateway", like the main frame, with Gateway's text. It saves only once
+ *   the notice's OK is clicked (ACKNOWLEDGED); a dialog cancelled
+ *   underneath it saves nothing (#69).
  * - "Existing session detected" (modal) on the SESSION command, with
  *   IBKR's text and buttons. A click prints CLICKED|<button>, then holds
  *   the event thread for LAG ms before closing, so the dialog is still
  *   listed after the agent has replied (CLICK_IN_WIN is asynchronous).
  *
- * Commands on stdin: SESSION, RESET, NO_DAILY, DAILY.
+ * - RO_STUCK makes OK leave Read-Only API as it was (#69: the API stayed
+ *   read-only after the controller unticked it); RO_KEPT undoes that.
+ *
+ * Commands on stdin: SESSION, RESET, NO_DAILY, DAILY, RO_STUCK, RO_KEPT.
  * Not part of the shipped agent jar.
  */
 public class SessionLockExitFixture {
@@ -52,7 +60,7 @@ public class SessionLockExitFixture {
     static final int LAG = 1500;
 
     static String mode, time, ampm, clientId;
-    static boolean readOnly, dailyAllowed = true;
+    static boolean readOnly, dailyAllowed = true, roStuck;
     static JFrame main;
 
     static void reset() {
@@ -158,10 +166,17 @@ public class SessionLockExitFixture {
 
         JButton ok = new JButton("OK");
         ok.addActionListener(ev -> {
+            if (restart.isSelected() && !"restart".equals(mode)) {
+                say("NOTICE|Automatic Restart");
+                showRestartNotice();          // modal: OK waits here
+                if (!d.isDisplayable()) {
+                    return;                   // cancelled underneath it
+                }
+            }
             mode = restart.isSelected() ? "restart" : "logoff";
             time = gatewayTime(field.getText());
             ampm = am.isSelected() ? "AM" : "PM";
-            readOnly = ro.isSelected();
+            if (!roStuck) readOnly = ro.isSelected();
             clientId = cid.getText().trim();
             say("SAVED|mode=" + mode + "|time=" + time + "|ampm=" + ampm
                 + "|ro=" + readOnly + "|cid=" + clientId);
@@ -181,6 +196,28 @@ public class SessionLockExitFixture {
         d.add(buttons, BorderLayout.SOUTH);
         d.pack();
         d.setVisible(true);
+    }
+
+    /** Gateway 10.50.1f: monitored_panels.p shows this from inside OK when
+     *  the commit newly selects Auto restart (messages.aN.fN). Its title is
+     *  the main frame's, as captured on 2026-10-12. */
+    static void showRestartNotice() {
+        JDialog n = new JDialog(main, "IBKR Gateway", true);
+        n.add(new JLabel("<html><p>You have elected to have your trading platform restart"
+                         + " automatically on a daily basis. There are some considerations"
+                         + " you would need to take into account if you select the auto"
+                         + " restart: please click here for more information.</p></html>"),
+              BorderLayout.CENTER);
+        JButton ok = new JButton("OK");
+        ok.addActionListener(ev -> {
+            say("ACKNOWLEDGED");
+            n.dispose();
+        });
+        JPanel buttons = new JPanel();
+        buttons.add(ok);
+        n.add(buttons, BorderLayout.SOUTH);
+        n.pack();
+        n.setVisible(true);
     }
 
     static void showExistingSession() {
@@ -230,6 +267,8 @@ public class SessionLockExitFixture {
                 case "RESET": reset(); break;
                 case "NO_DAILY": dailyAllowed = false; break;
                 case "DAILY": dailyAllowed = true; break;
+                case "RO_STUCK": roStuck = true; break;
+                case "RO_KEPT": roStuck = false; break;
                 default: break;
             }
             say("ACK|" + line.trim());

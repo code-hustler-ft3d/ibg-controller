@@ -4474,6 +4474,7 @@ class TestLogoffBackstop(unittest.TestCase):
              patch.object(gc, "agent_jtree_select_path", return_value=True), \
              patch.object(gc, "agent_settext_by_label", return_value=True), \
              patch.object(gc, "_config_close", return_value=True), \
+             patch.object(gc, "_wait_config_committed", return_value=True), \
              patch.object(gc, "_verify_lock_exit_time_persisted", return_value=verified), \
              patch.object(gc, "_gateway_zone_matches_local", return_value=True), \
              patch.object(gc.time, "sleep"), \
@@ -4544,6 +4545,7 @@ class TestLogoffBackstop(unittest.TestCase):
              patch.object(gc, "agent_jtree_select_path", return_value=True), \
              patch.object(gc, "agent_settext_by_label", return_value=True), \
              patch.object(gc, "_config_close", return_value=True), \
+             patch.object(gc, "_wait_config_committed", return_value=True), \
              patch.object(gc, "_verify_lock_exit_time_persisted", return_value=True), \
              patch.object(gc, "_gateway_zone_matches_local", return_value=False), \
              patch.object(gc.time, "sleep"), \
@@ -5055,6 +5057,7 @@ class TestAutoRestartSelection(unittest.TestCase):
                           if label in (self.LOGOFF, self.RESTART) else True) as st, \
              patch.object(gc, "_agent_request", side_effect=request), \
              patch.object(gc, "_config_close", return_value=True) as close, \
+             patch.object(gc, "_wait_config_committed", return_value=True), \
              patch.object(gc, "_verify_lock_exit_time_persisted", return_value=True), \
              patch.object(gc, "_gateway_zone_matches_local", return_value=True), \
              patch.object(gc.time, "sleep"), \
@@ -5131,6 +5134,247 @@ class TestAutoRestartSelection(unittest.TestCase):
             write_ok=False, switch_back_fails=True)
         self.assertFalse(any("env_var=READ_ONLY_API" in e and "discarded" in e for e in errors))
 
+
+class TestReadOnlyApiReadBack(unittest.TestCase):
+    """Issue #69: READ_ONLY_API=no was logged as set, yet the API still
+    answered with error 321. After OK the controller re-opens the dialog
+    and reads Read-Only API back, as it does for the Lock and Exit time."""
+
+    def _config(self, env, verified=True, jcheck_ok=True):
+        base = {"AUTO_LOGOFF_TIME": "", "AUTO_RESTART_TIME": "",
+                "TWS_MASTER_CLIENT_ID": "", "READ_ONLY_API": ""}
+        with patch.dict(os.environ, {**base, **env}), \
+             patch.object(gc, "_config_open", return_value=True), \
+             patch.object(gc, "agent_jtree_select_path", return_value=True), \
+             patch.object(gc, "agent_jcheck", return_value=jcheck_ok), \
+             patch.object(gc, "_config_close", return_value=True), \
+             patch.object(gc, "_wait_config_committed", return_value=True), \
+             patch.object(gc, "_verify_read_only_api_persisted",
+                          return_value=verified) as verify, \
+             patch.object(gc.time, "sleep"), \
+             self.assertLogs("controller", level="INFO") as cm, \
+             _capture_controller_errors() as errors:
+            gc.handle_post_login_config()
+        return verify, cm.output, errors
+
+    def test_a_kept_value_is_reported_verified(self):
+        verify, out, errors = self._config({"READ_ONLY_API": "no"})
+        verify.assert_called_once_with(False)
+        self.assertTrue(any("Verified: Read-Only API reads back as False" in m for m in out))
+        self.assertEqual(errors, [])
+
+    def test_a_value_gateway_did_not_keep_alerts(self):
+        _v, _out, errors = self._config({"READ_ONLY_API": "no"}, verified=False)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertTrue(errors[0].startswith("ALERT_CONFIG_NOT_APPLIED "))
+        self.assertIn('setting="Read-Only API" env_var=READ_ONLY_API requested="no"', errors[0])
+        self.assertIn("cannot place or change orders", errors[0])
+
+    def test_the_alert_names_the_other_direction_too(self):
+        _v, _out, errors = self._config({"READ_ONLY_API": "yes"}, verified=False)
+        self.assertIn('requested="yes"', errors[0])
+        self.assertIn("API clients can place orders", errors[0])
+
+    def test_an_unreadable_value_is_unverified_not_wrong(self):
+        _v, out, errors = self._config({"READ_ONLY_API": "no"}, verified=None)
+        self.assertEqual(errors, [])
+        self.assertTrue(any("Could not verify Read-Only API" in m for m in out))
+
+    def test_no_read_back_when_it_was_not_set(self):
+        verify, _o, _e = self._config({"READ_ONLY_API": "no"}, jcheck_ok=False)
+        verify.assert_not_called()
+        verify, _o, _e = self._config({"TWS_MASTER_CLIENT_ID": "7"})
+        verify.assert_not_called()
+
+    def _verify(self, jstate_reply, tree_ok=True):
+        with patch.object(gc, "_config_open", return_value=True), \
+             patch.object(gc, "agent_jtree_select_path", return_value=tree_ok) as tree, \
+             patch.object(gc, "_agent_request", return_value=jstate_reply) as req, \
+             patch.object(gc, "_config_close", return_value=True) as close, \
+             patch.object(gc.time, "sleep"), \
+             self.assertLogs("controller", level="DEBUG"):
+            gc.log.debug("start")
+            result = gc._verify_read_only_api_persisted(False)
+        return result, tree, req, close
+
+    def test_the_read_back_reads_the_api_settings_box_and_cancels(self):
+        result, tree, req, close = self._verify("OK value=false")
+        self.assertIs(result, True)
+        self.assertEqual(tree.call_args.args[1], "API/Settings")
+        req.assert_called_once_with(f"JSTATE {gc.CONFIG_WINDOW_TITLE_SUBSTR}|Read-Only API")
+        close.assert_called_once_with("Cancel")
+
+    def test_a_ticked_box_reads_back_false(self):
+        result, _t, _r, close = self._verify("OK value=true")
+        self.assertIs(result, False)
+        close.assert_called_once_with("Cancel")
+
+    def test_an_agent_error_is_unverified(self):
+        result, _t, _r, close = self._verify("ERR not_found jtoggle=Read-Only API")
+        self.assertIsNone(result)
+        close.assert_called_once_with("Cancel")
+        result, _t, req, close = self._verify("OK value=false", tree_ok=False)
+        self.assertIsNone(result)
+        req.assert_not_called()
+        close.assert_called_once_with("Cancel")
+
+
+class TestConfigCommitWait(unittest.TestCase):
+    """Issue #69: Gateway 10.50.1f answers OK with a notice when the commit
+    newly selects Auto restart, and saves the rest of the dialog only once
+    it's answered. The notice is a modal titled "IBKR Gateway", like the
+    main frame, so the controller recognises it by its text, acknowledges
+    it, and waits for the dialog to close before reading anything back."""
+
+    MAIN = ("aw", "IBKR Gateway", False)
+    CONFIG = ("ai", "DU1234567 Trader Workstation Configuration (Simulated Trading)", False)
+    MODAL = ("bI", "IBKR Gateway", True)
+    # WINDOW dumps as 10.50.1f printed them on 2026-10-12, trimmed.
+    FRAME_DUMP = ('=== window=IBKR Gateway type=aw ===\n'
+                  'aw accName="IBKR Gateway"\n'
+                  '  JLabel text="API Server: connected"\n')
+    NOTICE_DUMP = FRAME_DUMP + (
+        '=== window=IBKR Gateway type=bI modal=true ===\n'
+        'bI accName="IBKR Gateway"\n'
+        '  ew text="You have elected to have your trading platform restart '
+        'automatically on a daily basis. There are some considerations you would '
+        'need to take into account if you select the auto restart: please click he..."\n'
+        '  gX text="OK"\n')
+    OTHER_DUMP = FRAME_DUMP + (
+        '=== window=IBKR Gateway type=bI modal=true ===\n'
+        'bI accName="IBKR Gateway"\n'
+        '  ew text="Account DU1234567: time change requires restart to take effect."\n'
+        '  gX text="OK"\n')
+
+    def _wait(self, frames, dump=NOTICE_DUMP, click_ok=True, timeout=5.0):
+        seq = iter(frames)
+        with patch.object(gc, "agent_windows", side_effect=lambda: next(seq, frames[-1])), \
+             patch.object(gc, "agent_window", return_value=dump) as window, \
+             patch.object(gc, "agent_click_in_window", return_value=click_ok) as click, \
+             patch.object(gc.time, "sleep"), \
+             self.assertLogs("controller", level="DEBUG") as cm:
+            gc.log.debug("start")
+            result = gc._wait_config_committed(timeout)
+        return result, click, window, cm.output
+
+    def test_a_dialog_that_closed_needs_nothing(self):
+        result, click, window, _out = self._wait([[self.MAIN]])
+        self.assertIs(result, True)
+        click.assert_not_called()
+        window.assert_not_called()
+
+    def test_a_dialog_still_saving_without_a_modal_reads_no_dumps(self):
+        result, click, window, _out = self._wait([[self.MAIN, self.CONFIG]] * 3
+                                                 + [[self.MAIN]])
+        self.assertIs(result, True)
+        click.assert_not_called()
+        window.assert_not_called()
+
+    def test_the_notice_is_acknowledged_then_the_dialog_closes(self):
+        result, click, _window, out = self._wait([[self.MAIN, self.CONFIG, self.MODAL],
+                                                  [self.MAIN, self.CONFIG, self.MODAL],
+                                                  [self.MAIN]])
+        self.assertIs(result, True)
+        click.assert_called_once_with("IBKR Gateway", "OK")
+        self.assertEqual(sum("Acknowledged Gateway's Automatic Restart notice" in m
+                             for m in out), 1)
+
+    def test_a_notice_still_up_after_3_s_is_clicked_again(self):
+        result, click, _window, _out = self._wait([[self.MAIN, self.CONFIG, self.MODAL]] * 8
+                                                  + [[self.MAIN]])
+        self.assertIs(result, True)
+        self.assertEqual(click.call_count, 2)
+
+    def test_another_gateway_modal_is_left_alone_and_reported(self):
+        result, click, _window, out = self._wait([[self.MAIN, self.CONFIG, self.MODAL]],
+                                                 dump=self.OTHER_DUMP, timeout=2.0)
+        self.assertIs(result, False)
+        click.assert_not_called()
+        self.assertTrue(any("still open after OK" in m and "IBKR Gateway" in m
+                            for m in out))
+        self.assertTrue(any("time change requires restart" in m for m in out))
+        self.assertFalse(any("API Server" in m for m in out))   # main frame skipped
+        self.assertFalse(any("DU1234567" in m for m in out))
+
+    def test_two_gateway_modals_are_both_left_for_the_operator(self):
+        # CLICK_IN_WIN would press the first OK it finds in either, so an
+        # error modal showing alongside the notice could be dismissed unseen.
+        both = self.NOTICE_DUMP + self.OTHER_DUMP[len(self.FRAME_DUMP):]
+        result, click, _window, out = self._wait(
+            [[self.MAIN, self.CONFIG, self.MODAL, self.MODAL]], dump=both, timeout=2.0)
+        self.assertIs(result, False)
+        click.assert_not_called()
+        self.assertTrue(any("restart automatically" in m for m in out))
+        self.assertTrue(any("time change requires restart" in m for m in out))
+
+    def test_a_slow_agent_stops_at_the_deadline(self):
+        clock = iter(range(0, 1000, 5))   # every reading 5 s later
+        with patch.object(gc.time, "monotonic", side_effect=lambda: next(clock)), \
+             patch.object(gc, "agent_windows",
+                          return_value=[self.MAIN, self.CONFIG]) as windows, \
+             patch.object(gc.time, "sleep"), \
+             self.assertLogs("controller", level="WARNING"):
+            result = gc._wait_config_committed(15.0)
+        self.assertIs(result, False)
+        self.assertEqual(windows.call_count, 3)   # not 30 polls
+
+    def test_an_unreadable_window_list_is_unknown(self):
+        result, click, _window, _out = self._wait([[]])
+        self.assertIsNone(result)
+        click.assert_not_called()
+
+    def test_an_unclosed_dialog_reports_each_setting_and_reads_nothing_back(self):
+        env = {"AUTO_LOGOFF_TIME": "05:01 PM", "AUTO_RESTART_TIME": "",
+               "TWS_MASTER_CLIENT_ID": "7", "READ_ONLY_API": "no"}
+        with patch.dict(os.environ, env), \
+             patch.object(gc, "_config_open", return_value=True), \
+             patch.object(gc, "agent_jtree_select_path", return_value=True), \
+             patch.object(gc, "agent_settext_by_label", return_value=True), \
+             patch.object(gc, "agent_jcheck", return_value=True), \
+             patch.object(gc, "_lock_exit_label_shown", return_value=True), \
+             patch.object(gc, "_set_meridiem"), \
+             patch.object(gc, "_config_close", return_value=True) as close, \
+             patch.object(gc, "_wait_config_committed", return_value=False), \
+             patch.object(gc, "_verify_read_only_api_persisted") as ro, \
+             patch.object(gc, "_verify_lock_exit_time_persisted") as lock, \
+             patch.object(gc.time, "sleep"), \
+             self.assertLogs("controller", level="INFO") as cm, \
+             _capture_controller_errors() as errors:
+            gc.handle_post_login_config()
+        alerts = [e for e in errors if e.startswith("ALERT_CONFIG_NOT_APPLIED ")]
+        self.assertEqual(len(alerts), 3, errors)
+        for want in ('env_var=TWS_MASTER_CLIENT_ID requested="7"',
+                     'env_var=READ_ONLY_API requested="no"',
+                     'env_var=AUTO_LOGOFF_TIME requested="05:01 PM"'):
+            self.assertTrue(any(want in a and "did not close after OK" in a for a in alerts),
+                            want)
+        ro.assert_not_called()
+        lock.assert_not_called()
+        self.assertEqual([c.args[0] for c in close.call_args_list], ["OK"])
+        self.assertFalse(any("Post-login config committed" in m for m in cm.output))
+
+
+    def test_an_unconfirmed_close_reads_nothing_back(self):
+        env = {"AUTO_LOGOFF_TIME": "", "AUTO_RESTART_TIME": "10:35 PM",
+               "TWS_MASTER_CLIENT_ID": "", "READ_ONLY_API": "no"}
+        with patch.dict(os.environ, env), \
+             patch.object(gc, "_config_open", return_value=True), \
+             patch.object(gc, "agent_jtree_select_path", return_value=True), \
+             patch.object(gc, "agent_settext_by_label", return_value=True), \
+             patch.object(gc, "agent_jcheck", return_value=True), \
+             patch.object(gc, "_lock_exit_label_shown", return_value=True), \
+             patch.object(gc, "_set_meridiem"), \
+             patch.object(gc, "_config_close", return_value=True), \
+             patch.object(gc, "_wait_config_committed", return_value=None), \
+             patch.object(gc, "_verify_read_only_api_persisted") as ro, \
+             patch.object(gc, "_verify_lock_exit_time_persisted") as lock, \
+             patch.object(gc.time, "sleep"), \
+             self.assertLogs("controller", level="INFO") as cm:
+            self.assertTrue(gc.handle_post_login_config())
+        ro.assert_not_called()
+        lock.assert_not_called()
+        self.assertTrue(any("not reading settings back" in m for m in cm.output))
+        self.assertFalse(any("Verified" in m for m in cm.output))
 
 class TestExistingSessionTakeoverLimit(unittest.TestCase):
     """IBKR's prompt, answered as IBC did: continue once per Gateway launch;

@@ -10,6 +10,12 @@ the API port, and the halt (recorded instead of blocking).
   a panel already in restart mode is left alone, an AM logoff time
   sticks, and a mode Gateway won't show (no daily restart) is switched
   back rather than saved without its time.
+- #69: newly selecting Auto restart makes Gateway answer OK with its
+  Automatic Restart notice (a modal titled "IBKR Gateway", like the main
+  frame) and save the rest only once that's answered; the controller
+  recognises it by its text, acknowledges it and waits for the dialog to
+  close before reading back. Read-Only API is read back; a value Gateway didn't keep
+  raises ALERT_CONFIG_NOT_APPLIED.
 - #63: an existing-session prompt during the API-port wait is answered
   with Continue Login once, even though the dialog stays listed for
   1.5 s after the click; a second prompt in the same Gateway gets Cancel
@@ -119,8 +125,13 @@ def main():
             return 2
 
         print("\n--- #65: only AUTO_RESTART_TIME set, Gateway in its default Auto logoff ---")
+        mark = len(LINES)
         saved, cancelled, logs = config_pass(
             {"AUTO_RESTART_TIME": "08:00 PM", "READ_ONLY_API": "no"})
+        check("#69: Gateway's Automatic Restart notice was acknowledged",
+              since(mark, "NOTICE|") == ["NOTICE|Automatic Restart"]
+              and since(mark, "ACKNOWLEDGED") == ["ACKNOWLEDGED"],
+              str(since(mark, "NOTICE|") + since(mark, "ACKNOWLEDGED")))
         check("one save", len(saved) == 1, str(saved))
         check("saved in Auto restart mode at 08:00 PM",
               saved and saved[0].startswith("SAVED|mode=restart|time=08:00|ampm=PM|ro=false"),
@@ -130,8 +141,13 @@ def main():
               [m for m in logs if "erif" in m][-2:])
         check("no ALERT_CONFIG_NOT_APPLIED",
               not any("ALERT_CONFIG_NOT_APPLIED" in m for m in logs))
+        if hasattr(gc, "agent_jstate"):
+            check("Read-Only API read back as off",
+                  any("Verified: Read-Only API reads back as False" in m for m in logs),
+                  [m for m in logs if "Read-Only" in m])
 
         print("\n--- #65: next boot, the panel is already in Auto restart ---")
+        mark = len(LINES)
         if hasattr(gc, "_select_lock_exit_radio"):
             with patch.object(gc, "_select_lock_exit_radio",
                               wraps=gc._select_lock_exit_radio) as radio:
@@ -143,6 +159,8 @@ def main():
             saved, _c, logs = config_pass({"AUTO_RESTART_TIME": "08:00 PM"})
         check("still Auto restart at 08:00 PM",
               saved and saved[-1].startswith("SAVED|mode=restart|time=08:00|ampm=PM"), str(saved))
+        check("no notice when Auto restart was already selected",
+              not since(mark, "NOTICE|"), str(since(mark, "NOTICE|")))
 
         print("\n--- AM logoff time, from a panel in Auto restart ---")
         saved, _c, logs = config_pass({"AUTO_LOGOFF_TIME": "11:39 AM"})
@@ -164,6 +182,20 @@ def main():
               any("ALERT_CONFIG_NOT_APPLIED" in m and "switched back" in m for m in logs),
               [m for m in logs if "ALERT" in m])
         send("DAILY")
+
+        print("\n--- #69: Gateway doesn't keep Read-Only API off after OK ---")
+        send("RESET")
+        send("RO_STUCK")
+        saved, cancelled, logs = config_pass({"READ_ONLY_API": "no"})
+        check("the untick was saved with OK", len(saved) == 1, str(saved))
+        check("Gateway kept it on", saved and "|ro=true|" in saved[-1], str(saved))
+        check("the read-back closed with Cancel", len(cancelled) == 1, str(cancelled))
+        check("ALERT_CONFIG_NOT_APPLIED for Read-Only API",
+              any("ALERT_CONFIG_NOT_APPLIED" in m and 'setting="Read-Only API"' in m
+                  and "cannot place or change orders" in m for m in logs),
+              [m for m in logs if "ALERT" in m or "Read-Only" in m])
+        send("RO_KEPT")
+        send("RESET")
 
         print("\n--- #63: prompt during the API-port wait (click lands 1.5 s late) ---")
         for name in ("_existing_session_takeovers", "_existing_session_click_times"):

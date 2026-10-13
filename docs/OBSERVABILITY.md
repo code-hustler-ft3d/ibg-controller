@@ -283,6 +283,29 @@ one of the two times is set and the controller selects its mode:
   line with `reason="discarded with a Lock and Exit change that could not
   be undone"`. Check Read-Only API over VNC before trading.
 
+`READ_ONLY_API` is read back the same way (#69):
+
+```
+ALERT_CONFIG_NOT_APPLIED mode=live setting="Read-Only API" env_var=READ_ONLY_API requested="no" reason="Gateway did not retain the value after OK; API clients cannot place or change orders"
+```
+
+With `requested="no"`, Gateway kept the API read-only: clients connect
+and read, but trading requests get error 321 ("The API interface is
+currently in Read-Only mode"). With `requested="yes"` the reason ends
+`API clients can place orders`.
+
+`reason="the settings dialog did not close after OK; see the dialog
+Gateway is showing"` (v0.16.1): Gateway held the dialog open behind a
+prompt the controller doesn't answer, so nothing in it is confirmed
+saved and nothing is read back. Each setting the dialog held gets its own
+line, and the WARNINGs just before them name the dialogs that were
+showing and quote their text. Answer the prompt over VNC, then check the
+settings. The one prompt the controller does answer is Gateway's
+Automatic Restart notice ("You have elected to have your trading
+platform restart automatically on a daily basis…", titled "IBKR
+Gateway"), which comes up when the commit newly selects Auto restart
+(INFO `Acknowledged Gateway's Automatic Restart notice`).
+
 **What it means**: any automation you have built on that daily boundary
 — a restart, a reconnect, a downstream job — will not be triggered by
 Gateway. This is not a controller crash; the session is logged in and

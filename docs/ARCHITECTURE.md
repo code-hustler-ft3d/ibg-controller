@@ -187,6 +187,14 @@ entries matching that way are refused with `ERR jlist_item_ambiguous`,
 and a miss returns `ERR jlist_item_not_found want=… have=[a | b]` listing
 the entries. `OK selected=` reports the entry's painted label.
 
+**v0.16.1 addition (Read-Only API read-back, #69)**:
+```
+JSTATE <title_substr>|<name>               → OK value=<true|false> | ERR ...
+```
+Reads a toggle button's selected state without clicking it, matching
+the same control `JCHECK` would set (showing, enabled, exactly one
+match). Used to read Read-Only API back after OK.
+
 Why each was added:
 
 - **`GET_PID`** — returns `ProcessHandle.current().pid()`. Used by the
@@ -267,7 +275,19 @@ Why each was added:
    and Exit, depending on which of its Auto logoff / Auto restart radio
    buttons is selected. With only `AUTO_RESTART_TIME` set the handler
    selects Auto restart first (`JCHECK`), then sets the AM/PM radio to
-   match the time.
+   match the time. When the commit newly selects Auto restart, Gateway
+   10.50.1f answers OK with a modal Automatic Restart notice and holds
+   the dialog open until it's answered (#69). The notice is titled "IBKR
+   Gateway", like the main frame, so it's recognised by its text ("restart
+   automatically on a daily basis") in a `WINDOW` dump of the modal
+   dialogs. `CLICK_IN_WIN` only queues the OK click, so the handler then
+   waits for the dialog to close, clicking the notice's OK
+   (`CLICK_IN_WIN IBKR Gateway|OK`, which tries modal dialogs first) if it
+   appears and no other modal shares its title. A dialog still open after
+   15 s means `ALERT_CONFIG_NOT_APPLIED`, the open dialogs' text in the
+   log, and no read-back. If the agent never returns a window list, nothing
+   is read back either (a WARNING says so). Once the dialog has closed, it re-opens it and reads
+   back what it wrote: the Lock and Exit time, and Read-Only API (`JSTATE`).
 10. **Command server** (v0.2): `start_command_server()` — if
     `CONTROLLER_COMMAND_SERVER_PORT` is set, start a daemon thread
     listening on that TCP port for IBC-compat commands (`STOP`,
