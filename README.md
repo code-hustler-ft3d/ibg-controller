@@ -165,9 +165,13 @@ real product.
   stops there — the WebAuthn ceremony must be completed by an
   authenticator running alongside the container (a virtual FIDO device
   such as [passless](https://github.com/pando85/passless), a key
-  passed through, or a person). The controller never holds a passkey
-  and never emulates one; that is a different job than driving
-  Gateway's dialogs. Unset, a passkey prompt fails loudly
+  passed through, or a person). A passkey kept on a phone, used by
+  scanning a QR code, can't complete it: that route needs Bluetooth
+  between the phone and the machine showing the code, and Gateway's
+  browser in the container offers only a USB security key. The
+  controller never holds a passkey and never emulates one; that is a
+  different job than driving Gateway's dialogs. Unset, a passkey prompt
+  fails loudly
   (`ALERT_2FA_FAILED reason="passkey/WebAuthn 2FA flow ..."`) as it has
   since v0.8.1. Contributed and used in production by @jpike88; the
   maintainer has no passkey account, so this is ⚠️ rather than ✅.
