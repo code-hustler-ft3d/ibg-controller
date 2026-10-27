@@ -382,6 +382,7 @@ ALERT_AUTO_RESTART mode=live status=adopted detected_via=agent_socket old_pid=27
 ALERT_AUTO_RESTART mode=live status=adopted detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=94 reason="session not preserved; full login re-driven on the adopted JVM"
 ALERT_AUTO_RESTART mode=live status=failed_no_agent detected_via=restarter_log old_pid=27 new_pid=none elapsed_seconds=90 reason="no new Gateway JVM answered on /tmp/gateway-input-live.sock within 90s; falling back to a controller-driven relaunch"
 ALERT_AUTO_RESTART mode=live status=failed_api_timeout detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=183 reason="API port 4001 did not open within 180s of adoption and no login dialog appeared; falling back to a controller-driven relaunch"
+ALERT_AUTO_RESTART mode=live status=failed_api_timeout detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=183 reason="API port 4001 did not open within 180s of adoption while Gateway was logging in with its saved session; falling back to a controller-driven relaunch"
 ```
 
 **When fired**: the Gateway JVM exited and the controller concluded
@@ -421,11 +422,11 @@ adoption raised …`). Added v0.9.0.
 
 | status | level | meaning |
 |---|---|---|
-| `adopted` | INFO | The self-restarted Gateway is serving again. `reason` says whether the session was preserved (API port opened with no login — the normal case) or a login dialog appeared and the full login was re-driven on the adopted JVM (e.g. IBKR's weekly full re-authentication). |
+| `adopted` | INFO | The self-restarted Gateway is serving again. `reason` says whether the session was preserved (API port opened with no login from the controller — the normal case) or a login dialog waiting for credentials appeared and the full login was re-driven on the adopted JVM (e.g. IBKR's weekly full re-authentication). A preserved session can take a few seconds: the restarted Gateway shows its login window with the fields greyed out while it logs in with the session it saved, and the controller waits for that (`AUTORESTART: Gateway is logging in with the session it saved before restarting`, v0.16.3). |
 | `failed_no_agent` | WARNING | No JVM with a new PID answered on the agent socket within `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`. The controller fell back to its own relaunch (`do_restart_in_place`). If install4j's instance then turns up *after* the fallback started, you are back in the pre-fix two-instance race for that night — check for a second `ibgateway` process if the following login fails. |
 | `failed_jvm_exited` | WARNING | The adopted JVM died before its API port opened. Fell back to a relaunch. |
 | `failed_login` | WARNING | A login dialog appeared on the adopted JVM and the re-driven login failed. A more specific token (`ALERT_LOGIN_FAILED`, `ALERT_2FA_FAILED`) usually precedes it, but not every failure path emits one. The adopted instance is torn down, then the controller falls back to a relaunch. |
-| `failed_api_timeout` | WARNING | Adopted, but the API port did not open within 180 s and no login dialog appeared. The adopted instance is torn down, then the controller falls back to a relaunch. |
+| `failed_api_timeout` | WARNING | Adopted, but the API port did not open within 180 s, either with no login dialog at all or while Gateway's own login with its saved session never finished (the `reason` says which). The adopted instance is torn down, then the controller falls back to a relaunch. |
 
 **What it means**: `status=adopted` is the benign nightly signal — a
 session-preserving restart that cost a few seconds and no second

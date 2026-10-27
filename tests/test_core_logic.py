@@ -375,6 +375,10 @@ def serve(path, texts):
                 conn.sendall(("".join("text %s\n" % t for t in texts) + "END\n").encode())
             elif cmd in ("WINDOWS", "LABELS"):
                 conn.sendall(b"END\n")
+            elif cmd == "LOGIN_STATE":
+                conn.sendall(b"OK busy\n" if "--busy" in sys.argv else
+                             b"OK ready\n" if texts else
+                             b"ERR no_login_frame\n")
             else:
                 conn.sendall(b"ERR unsupported\n")
         except Exception:
@@ -385,6 +389,13 @@ def serve(path, texts):
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 texts = ["Username", "Password"] if "--login-dialog" in sys.argv else []
 threading.Thread(target=serve, args=(args[0], texts), daemon=True).start()
+# --api-after=N: open the API port N seconds in, as Gateway does once the
+# login it started itself (with the session saved before an auto-restart)
+# goes through.
+delay = [float(a.split("=", 1)[1]) for a in sys.argv if a.startswith("--api-after=")]
+if delay:
+    import time
+    time.sleep(delay[0])
 if len(args) > 1 and args[1] != "-":
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -456,11 +467,16 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
             except Exception:
                 pass
 
-    def _start_jvm(self, api=False, login_dialog=False):
+    def _start_jvm(self, api=False, login_dialog=False, busy=False,
+                   api_after=None):
         args = [sys.executable, self.fake, self.sock,
                 str(self.api_port) if api else "-"]
         if login_dialog:
             args.append("--login-dialog")
+        if busy:
+            args.append("--busy")
+        if api_after is not None:
+            args.append(f"--api-after={api_after}")
         p = subprocess.Popen(args)
         self.procs.append(p)
         deadline = time.monotonic() + 15
@@ -561,6 +577,39 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
 
         self.assertEqual(relaunches, 1)
         self.assertIsNotNone(dying.poll())
+
+    def test_gateway_logging_itself_in_is_adopted_not_typed_over(self):
+        # Issue #76: the replacement Gateway shows its login window with
+        # the fields greyed out while it logs in with the session it saved,
+        # then opens its API port. Typing over that login timed out and
+        # the controller tore down a Gateway that was about to be ready.
+        self._running_then_killed()
+        self._write_restarter_log()
+        new = self._start_jvm(api=True, login_dialog=True, busy=True,
+                              api_after=3)
+        redrives = []
+        with patch.object(gc, "_redrive_login",
+                          side_effect=lambda app: (redrives.append(app), False)[1]):
+            ok, relaunches, _ = self._recover()
+
+        self.assertTrue(ok)
+        self.assertEqual(redrives, [], "typed over Gateway's own login")
+        self.assertEqual(relaunches, 0, "tore down the self-restarted Gateway")
+        self.assertEqual(gc.GATEWAY_PROC.pid, new.pid)
+        self.assertIsNone(new.poll(), "adopted JVM was killed")
+        self.assertTrue(os.path.exists(self.ready))
+
+    def test_login_window_waiting_for_credentials_is_still_driven(self):
+        self._running_then_killed()
+        self._write_restarter_log()
+        self._start_jvm(api=False, login_dialog=True)     # fields enabled
+        redrives = []
+        with patch.object(gc, "_redrive_login",
+                          side_effect=lambda app: (redrives.append(app), True)[1]):
+            ok, relaunches, _ = self._recover()
+        self.assertTrue(ok)
+        self.assertEqual(len(redrives), 1)
+        self.assertEqual(relaunches, 0)
 
     def test_the_same_restart_is_not_adopted_twice(self):
         self._running_then_killed()

@@ -391,8 +391,14 @@ once per night per mode is the expected signal.
   ```
 - `/health` flips to `unhealthy` for a few seconds (`jvm_alive:
   false`, then a new `jvm_pid`) and back to `healthy`.
+- The restarted Gateway may show its login window for a few seconds
+  with the username and password greyed out: it is logging in with the
+  session it saved before restarting. The controller waits for that
+  (`AUTORESTART: Gateway is logging in with the session it saved before
+  restarting ...`, v0.16.3) and the API port opening ends in
+  `status=adopted`.
 - On the night of IBKR's weekly full re-authentication the session is
-  *not* preserved: a login dialog appears on the self-restarted JVM
+  *not* preserved: the login window is left waiting for credentials
   and the controller drives the normal re-auth pipeline on it
   (`status=adopted` with `reason="session not preserved; ..."`, and a
   second factor is required as usual).
@@ -401,8 +407,9 @@ once per night per mode is the expected signal.
 
 Gateway's Lock-and-Exit "Set Auto Restart Time" makes the JVM spawn
 install4j's `.install4j/restarter`, which shuts the calling launcher
-down and re-executes it. The replacement re-uses the session
-credentials. Before the issue #23 fix the controller treated the
+down and re-executes it. The replacement restores the session token
+the old instance saved and logs in with it, so no credentials or
+second factor are needed while IBKR still accepts that session. Before the issue #23 fix the controller treated the
 code-0 exit as a crash and launched a **second** Gateway about two
 seconds before install4j launched its own: two instances on one X
 display and one settings dir, the agent drove the wrong window,

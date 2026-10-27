@@ -4,6 +4,31 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **After Gateway's daily auto-restart the controller typed over the
+  login Gateway had started itself, then tore Gateway down (issue
+  #76).** With `AUTO_RESTART_TIME` set, the restarted Gateway restores
+  the session it saved and logs in with it on its own. Its login window
+  shows during that login with the username and password boxes greyed
+  out. The controller took the window to mean the session was lost and
+  re-drove the login. The password box stayed disabled past the 10 s the
+  controller waited (`agent SETTEXT_LOGIN_PASSWORD: TimeoutError`), so it
+  logged `ALERT_AUTO_RESTART status=failed_login`, terminated the
+  self-restarted Gateway and relaunched it, costing a minute or more of
+  API downtime. The controller now asks the agent whether the login
+  window is waiting for credentials (new agent command `LOGIN_STATE`).
+  While the boxes are greyed out it waits and logs `AUTORESTART: Gateway
+  is logging in with the session it saved before restarting`; the API
+  port opening then ends in `status=adopted` as a preserved session. If
+  Gateway's own login doesn't go through and the boxes are enabled again,
+  the controller logs in as before. The controller's wait for
+  `SETTEXT_LOGIN_USER` and `SETTEXT_LOGIN_PASSWORD` is now 15 s, longer
+  than the agent's own 10 s wait for the box, so a box that stays
+  disabled is reported by the agent instead of by a socket timeout.
+
 ## [0.16.2] - 2026-10-12
 
 ### Added

@@ -65,6 +65,7 @@ import javax.swing.tree.TreePath;
  *   SETTEXT_LOGIN_USER <text>             → OK | ERR ...
  *   SETTEXT_LOGIN_PASSWORD <text>         → OK | ERR ...
  *   WAIT_LOGIN_FRAME <timeout_ms>         → OK | ERR timeout | ERR invalid_timeout=...
+ *   LOGIN_STATE                           → OK ready | OK busy | ERR no_login_frame
  *   CLOSE_WIN <title_substr>              → OK | ERR not_found window_title_substring=...
  *
  * Component lookup is by AccessibleContext.getAccessibleName() or by
@@ -292,6 +293,14 @@ public class GatewayInputAgent {
                 // truthful regardless of modal overlay, so the JVM-side
                 // lookup sees the frame correctly.
                 return doWaitLoginFrame(rest);
+            }
+            case "LOGIN_STATE": {
+                // Whether the login window is waiting for credentials.
+                // "busy" means Gateway has greyed out the password box
+                // because it is logging in on its own: after a daily
+                // auto-restart it restores the session it saved and
+                // logs in with it (issue #76). Read-only.
+                return doLoginState();
             }
             case "CLOSE_WIN": {
                 // v0.5.6: post a WINDOW_CLOSING event to the first showing
@@ -984,6 +993,20 @@ public class GatewayInputAgent {
             Thread.sleep(200);
         }
         return "ERR timeout";
+    }
+
+    private static String doLoginState() {
+        Window loginFrame = findLoginFrame();
+        if (loginFrame == null) {
+            return "ERR no_login_frame";
+        }
+        for (javax.swing.JPasswordField f
+                : collect(loginFrame, javax.swing.JPasswordField.class)) {
+            if (f.isShowing() && f.isEnabled() && f.isEditable()) {
+                return "OK ready";
+            }
+        }
+        return "OK busy";
     }
 
     /**

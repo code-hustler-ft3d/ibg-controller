@@ -12,6 +12,10 @@ drill pins the fix: exact still wins; otherwise one entry matching
 without regard to case, spacing or HTML is accepted; entries differing
 only in case are refused as ambiguous; and a failure lists the entries.
 
+Issue #76: LOGIN_STATE reports a login window whose boxes Gateway has
+greyed out for a login of its own as busy, and SETTEXT_LOGIN_PASSWORD
+waits for the box to come back before it types.
+
 Not part of `make test`: it needs a display, a JDK to build and ~20 s.
 From the repo root:
 
@@ -185,6 +189,37 @@ def main():
               "TOGGLED|Solo|true" in lines[before:], str(lines[before:]))
         r = request("JCHECK Toggle Case|Disabled|true")
         check("a disabled toggle is not touched", r.startswith("ERR not_found"), r)
+
+        print("\n--- LOGIN_STATE and a login Gateway started itself (#76) ---")
+        r = request("LOGIN_STATE")
+        check("login window waiting for credentials: OK ready", r == "OK ready", r)
+        before = len(lines)
+        r = request("CLICK_IN_WIN Login Drill|Log In")
+        check("Log In pressed", r.startswith("OK"), r)
+        for _ in range(20):
+            if "LOGIN_BUSY" in lines[before:]:
+                break
+            time.sleep(0.1)
+        r = request("LOGIN_STATE")
+        check("fields greyed out during that login: OK busy", r == "OK busy", r)
+        t0 = time.monotonic()
+        r = request("SETTEXT_LOGIN_PASSWORD drill-pw", timeout=15)
+        waited = time.monotonic() - t0
+        check("SETTEXT_LOGIN_PASSWORD waits for the box and then sets it",
+              r == "OK", r)
+        check("...answering only once the box is enabled again (took %.1fs)" % waited,
+              waited > 2 and "LOGIN_IDLE" in lines[before:], str(lines[before:]))
+        time.sleep(0.5)
+        check("the password really landed (length only)",
+              "PWLEN|%d" % len("drill-pw") in lines[before:], str(lines[before:]))
+        check("the password itself never reached the fixture's output",
+              not any("drill-pw" in ln for ln in lines), "")
+        r = request("LOGIN_STATE")
+        check("after that login ends: OK ready", r == "OK ready", r)
+        r = request("CLOSE_WIN Login Drill")
+        time.sleep(0.5)
+        r = request("LOGIN_STATE")
+        check("no login window: ERR no_login_frame", r == "ERR no_login_frame", r)
 
         print("\n--- errors that must not change ---")
         r = request("JLIST_SELECT No Such Window|x")

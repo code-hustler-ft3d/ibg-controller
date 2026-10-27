@@ -2849,7 +2849,7 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         individual ones per test."""
         cfg = dict(
             age=1.0, new_pid=5020, alive=True, port_open=True,
-            texts=set(), buttons=set(), redrive=True,
+            texts=set(), buttons=set(), redrive=True, login_state=None,
         )
         cfg.update(overrides)
         stack = [
@@ -2864,6 +2864,8 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
             patch.object(gc, "agent_click", return_value=True),
             patch.object(gc, "_redrive_login", return_value=cfg["redrive"]),
             patch.object(gc, "signal_ready"),
+            patch.object(gc, "agent_login_state",
+                         return_value=cfg["login_state"]),
         ]
         return stack
 
@@ -3077,6 +3079,147 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
             result, mocks = self._run(stack)
         self.assertTrue(result)
         mocks["agent_click"].assert_called_with("Accept")
+
+    # Issue #76: after a daily auto-restart Gateway restores its saved
+    # session and logs in with it on its own. Its login window shows during
+    # that login with the fields greyed out, which is not "session lost".
+
+    def _sequence(self, stack, name, values):
+        """Replace one collaborator with a fixed sequence; the last value
+        repeats."""
+        values = list(values)
+        it = iter(values)
+        idx = next(i for i, p in enumerate(stack) if p.attribute == name)
+        stack[idx] = patch.object(gc, name,
+                                  side_effect=lambda *a, **k: next(it, values[-1]))
+        return stack
+
+    def test_gateway_logging_itself_in_is_waited_for_not_typed_over(self):
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(texts={"Username", "Password"},
+                               login_state="busy")
+        self._sequence(stack, "is_api_port_open", [False, False, True])
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, mocks = self._run(stack)
+        self.assertTrue(result)
+        mocks["_redrive_login"].assert_not_called()
+        mocks["signal_ready"].assert_called_once()
+        self.assertEqual(gc.JVM_PID, 5020)
+        text = "\n".join(logs.output)
+        self.assertEqual(text.count("logging in with the session it saved"), 1)
+        self.assertIn("status=adopted", text)
+        self.assertNotIn("session was not preserved", text)
+
+    def test_own_login_that_gives_up_is_then_driven(self):
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(port_open=False, texts={"Username", "Password"})
+        self._sequence(stack, "agent_login_state", ["busy", "ready", "ready"])
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, mocks = self._run(stack)
+        self.assertTrue(result)
+        mocks["_redrive_login"].assert_called_once()
+        self.assertIn("didn't complete and the login fields are enabled again",
+                      "\n".join(logs.output))
+
+    def test_ready_fields_get_a_second_look_before_typing(self):
+        # One "ready" right after the window appears may be the moment
+        # before Gateway starts its own login; the port opening next means it did.
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(texts={"Username", "Password"},
+                               login_state="ready")
+        self._sequence(stack, "is_api_port_open", [False, True])
+        result, mocks = self._run(stack)
+        self.assertTrue(result)
+        mocks["_redrive_login"].assert_not_called()
+
+    def test_fields_ready_twice_means_login_is_needed(self):
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(port_open=False, texts={"Username", "Password"},
+                               login_state="ready")
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, mocks = self._run(stack)
+        self.assertTrue(result)
+        mocks["_redrive_login"].assert_called_once()
+        self.assertEqual(mocks["agent_login_state"].call_count, 2)
+        self.assertIn("session was not preserved", "\n".join(logs.output))
+
+    def test_no_answer_on_login_state_keeps_the_old_behaviour(self):
+        # An agent without LOGIN_STATE (or no reply) must not stall
+        # adoption: the login window is driven straight away, as before.
+        stack = self._adopting(port_open=False, texts={"Username"},
+                               login_state=None)
+        result, mocks = self._run(stack)
+        self.assertTrue(result)
+        mocks["_redrive_login"].assert_called_once()
+        mocks["agent_login_state"].assert_called_once()
+
+    def test_login_state_not_asked_without_a_login_window(self):
+        result, mocks = self._run(self._adopting(port_open=False))
+        self.assertFalse(result)
+        mocks["agent_login_state"].assert_not_called()
+
+    def test_own_login_never_finishing_times_out_and_says_why(self):
+        stack = self._adopting(port_open=False, texts={"Username", "Password"},
+                               login_state="busy")
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, mocks = self._run(stack)
+        self.assertFalse(result)
+        mocks["_redrive_login"].assert_not_called()
+        self.assertIsInstance(gc.GATEWAY_PROC, gc._AdoptedProcess)
+        text = "\n".join(logs.output)
+        self.assertIn("status=failed_api_timeout", text)
+        self.assertIn("while Gateway was logging in with its saved session",
+                      text)
+
+
+class TestAgentLoginState(unittest.TestCase):
+    """agent_login_state maps the agent's LOGIN_STATE reply (#76)."""
+
+    def _state(self, reply=None, exc=None):
+        kw = {"side_effect": exc} if exc else {"return_value": reply}
+        with patch.object(gc, "_agent_request", **kw) as req:
+            state = gc.agent_login_state()
+        return state, req
+
+    def test_ready(self):
+        state, req = self._state("OK ready")
+        self.assertEqual(state, "ready")
+        req.assert_called_once_with("LOGIN_STATE", timeout=3)
+
+    def test_busy(self):
+        self.assertEqual(self._state("OK busy")[0], "busy")
+
+    def test_no_login_frame_is_none(self):
+        self.assertIsNone(self._state("ERR no_login_frame")[0])
+
+    def test_older_agent_is_none(self):
+        self.assertIsNone(self._state("ERR unknown_command=LOGIN_STATE")[0])
+
+    def test_socket_error_is_none(self):
+        self.assertIsNone(self._state(exc=OSError("timed out"))[0])
+
+
+class TestSetTextLoginTimeout(unittest.TestCase):
+    """The agent waits up to 10 s for the login box to be enabled before
+    answering SETTEXT_LOGIN_*; the controller's socket timeout must
+    outlast that wait (#76: it gave up at exactly 10 s)."""
+
+    def test_both_commands_outlast_the_agent_wait(self):
+        for fn, cmd in ((gc.agent_settext_login_user, "SETTEXT_LOGIN_USER"),
+                        (gc.agent_settext_login_password,
+                         "SETTEXT_LOGIN_PASSWORD")):
+            with patch.object(gc, "_agent_request", return_value="OK") as req:
+                self.assertTrue(fn("x"))
+            line = req.call_args[0][0]
+            self.assertTrue(line.startswith(cmd + " "))
+            self.assertGreater(req.call_args[1]["timeout"], 10)
+
+    def test_timeout_is_logged_without_the_password(self):
+        with patch.object(gc, "_agent_request",
+                          side_effect=socket.timeout("timed out")), \
+             self.assertLogs(gc.log, level="ERROR") as logs:
+            self.assertFalse(gc.agent_settext_login_password("s3cret-pw"))
+        self.assertNotIn("s3cret-pw", "\n".join(logs.output))
 
 
 class TestRecoverAdoptsSelfRestartFirst(unittest.TestCase):

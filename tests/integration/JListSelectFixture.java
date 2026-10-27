@@ -8,6 +8,8 @@ import javax.swing.JCheckBox;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
+import javax.swing.JTextField;
+import javax.swing.JPasswordField;
 import javax.swing.JList;
 import javax.swing.JPanel;
 import javax.swing.JRadioButton;
@@ -133,6 +135,46 @@ public class JListSelectFixture {
             toggles.add(tp);
             toggles.pack();
             toggles.setVisible(true);
+
+            // Gateway's login window (#76): pressing Log In greys out the
+            // username and password boxes until that login ends; here it
+            // "fails" after 4 s and the boxes come back.
+            JFrame login = new JFrame("Login Drill");
+            JTextField user = new JTextField(12);
+            JPasswordField pw = new JPasswordField(12);
+            pw.getDocument().addDocumentListener(new javax.swing.event.DocumentListener() {
+                void report() {
+                    System.out.println("PWLEN|" + pw.getPassword().length);
+                    System.out.flush();
+                }
+                public void insertUpdate(javax.swing.event.DocumentEvent e) { report(); }
+                public void removeUpdate(javax.swing.event.DocumentEvent e) { }
+                public void changedUpdate(javax.swing.event.DocumentEvent e) { }
+            });
+            JButton logIn = new JButton("Log In");
+            logIn.addActionListener(e -> {
+                user.setEnabled(false);
+                pw.setEnabled(false);
+                System.out.println("LOGIN_BUSY");
+                System.out.flush();
+                javax.swing.Timer t = new javax.swing.Timer(4000, ev -> {
+                    user.setEnabled(true);
+                    pw.setEnabled(true);
+                    System.out.println("LOGIN_IDLE");
+                    System.out.flush();
+                });
+                t.setRepeats(false);
+                t.start();
+            });
+            JPanel lp = new JPanel();
+            lp.add(new JLabel("Username"));
+            lp.add(user);
+            lp.add(new JLabel("Password"));
+            lp.add(pw);
+            lp.add(logIn);
+            login.add(lp);
+            login.pack();
+            login.setVisible(true);
         });
         System.out.println("READY");
         System.out.flush();

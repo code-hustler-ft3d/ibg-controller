@@ -555,6 +555,12 @@ def agent_click(name, quiet=False):
     return False
 
 
+# The agent waits up to 10 s for the login box to be enabled before it
+# answers; the socket timeout has to outlast that wait, or the controller
+# gives up just before the agent replies.
+_SETTEXT_LOGIN_TIMEOUT = 15.0
+
+
 def agent_settext_login_user(text):
     """Set the Gateway login frame's username via in-JVM role-based lookup.
 
@@ -569,7 +575,8 @@ def agent_settext_login_user(text):
     connecting to server" retry animation).
     """
     try:
-        resp = _agent_request(f"SETTEXT_LOGIN_USER {text}")
+        resp = _agent_request(f"SETTEXT_LOGIN_USER {text}",
+                              timeout=_SETTEXT_LOGIN_TIMEOUT)
     except Exception as e:
         log.error(f"agent SETTEXT_LOGIN_USER: {type(e).__name__}: {e}")
         return False
@@ -587,7 +594,8 @@ def agent_settext_login_password(text):
     Swing type) future-proofs against name drift.
     """
     try:
-        resp = _agent_request(f"SETTEXT_LOGIN_PASSWORD {text}")
+        resp = _agent_request(f"SETTEXT_LOGIN_PASSWORD {text}",
+                              timeout=_SETTEXT_LOGIN_TIMEOUT)
     except Exception as e:
         log.error(f"agent SETTEXT_LOGIN_PASSWORD: {type(e).__name__}: {e}")
         return False
@@ -595,6 +603,26 @@ def agent_settext_login_password(text):
         return True
     log.error(f"agent SETTEXT_LOGIN_PASSWORD: {resp}")
     return False
+
+
+def agent_login_state():
+    """Whether Gateway's login window is waiting for credentials.
+
+    ``"ready"``: its password box is enabled. ``"busy"``: the window is up
+    but Gateway has greyed out its fields because it is logging in on its
+    own. After a daily auto-restart Gateway restores the session it saved
+    and logs in with it on its own, and the window shows while it does
+    (issue #76). ``None``: no login window, or no usable answer.
+    """
+    try:
+        resp = _agent_request("LOGIN_STATE", timeout=3)
+    except Exception:
+        return None
+    if resp == "OK ready":
+        return "ready"
+    if resp == "OK busy":
+        return "busy"
+    return None
 
 
 def agent_wait_login_frame(timeout_ms=120_000):
@@ -4375,6 +4403,8 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
         deadline = time.monotonic() + _AUTO_RESTART_API_TIMEOUT_SECONDS
         last_status = time.monotonic()
         died = False
+        own_login_seen = False
+        ready_polls = 0
         while time.monotonic() < deadline:
             if GATEWAY_PROC.poll() is not None:
                 died = True
@@ -4387,10 +4417,34 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                 signal_ready()
                 return True
             texts, buttons = agent_list()
-            if "Username" in texts or "Password" in texts:
-                log.info("AUTORESTART: login dialog on the self-restarted "
-                         "Gateway — the session was not preserved (e.g. IBKR's "
-                         "weekly full re-authentication); re-driving login")
+            login_window = "Username" in texts or "Password" in texts
+            state = agent_login_state() if login_window else None
+            if state == "busy":
+                # Gateway restores the session it saved before restarting
+                # and logs in with it on its own, with its fields greyed out
+                # until that login finishes. Typing over it fails (#76),
+                # so wait: the API port opens if the session carried over.
+                if not own_login_seen:
+                    log.info("AUTORESTART: Gateway is logging in with the "
+                             "session it saved before restarting (its login "
+                             "fields are greyed out); waiting for it")
+                    own_login_seen = True
+                ready_polls = 0
+            elif state == "ready" and ready_polls == 0:
+                # Gateway may start that login a moment after showing the
+                # window, so look once more before treating it as waiting
+                # for us.
+                ready_polls = 1
+            elif login_window:
+                if own_login_seen:
+                    log.info("AUTORESTART: Gateway's own login with its saved "
+                             "session didn't complete and the login fields "
+                             "are enabled again; re-driving login")
+                else:
+                    log.info("AUTORESTART: login dialog on the self-restarted "
+                             "Gateway — the session was not preserved (e.g. "
+                             "IBKR's weekly full re-authentication); "
+                             "re-driving login")
                 # AUTO_RESTART_TIME commonly sits inside IBKR's nightly
                 # maintenance window. Adoption itself needs no auth, but
                 # this branch does, so the v0.5.10 drain guard applies.
@@ -4406,6 +4460,8 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                        "login on the adopted Gateway failed; falling back to a "
                        "controller-driven relaunch")
                 return False
+            else:
+                ready_polls = 0
             # Same opportunistic disclaimer handling as wait_for_api_port.
             for btn in SAFE_DISMISS_BUTTONS:
                 if btn in buttons:
@@ -4430,10 +4486,17 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                    "adopted Gateway JVM exited before its API port opened; "
                    "falling back to a controller-driven relaunch")
             return False
-        _alert(log.warning, "failed_api_timeout", new_pid,
-               f"API port {api_port} did not open within "
-               f"{_AUTO_RESTART_API_TIMEOUT_SECONDS}s of adoption and no login "
-               "dialog appeared; falling back to a controller-driven relaunch")
+        if own_login_seen:
+            why = (f"API port {api_port} did not open within "
+                   f"{_AUTO_RESTART_API_TIMEOUT_SECONDS}s of adoption while "
+                   "Gateway was logging in with its saved session; falling "
+                   "back to a controller-driven relaunch")
+        else:
+            why = (f"API port {api_port} did not open within "
+                   f"{_AUTO_RESTART_API_TIMEOUT_SECONDS}s of adoption and no "
+                   "login dialog appeared; falling back to a "
+                   "controller-driven relaunch")
+        _alert(log.warning, "failed_api_timeout", new_pid, why)
         return False
 
 
