@@ -1277,6 +1277,93 @@ class TestResolveSafeDismissButtons(unittest.TestCase):
         self.assertEqual(extras, ("Continue", "Foo"))
 
 
+class TestDismissLateDisclaimer(unittest.TestCase):
+    """Issue #81: the monitor loop clicks a disclaimer that appeared after
+    the post-login check, in paper mode only, from the same allowlist."""
+
+    def setUp(self):
+        self.clicks = []
+
+    def _call(self, mode="paper", buttons=(), click_ok=True, list_error=None,
+              allow=("I understand and accept", "Acknowledge")):
+        listing = MagicMock(side_effect=list_error) if list_error else \
+            MagicMock(return_value=(set(), set(buttons)))
+        with patch.object(gc, "TRADING_MODE", mode), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", tuple(allow)), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list", listing), \
+             patch.object(gc, "agent_click", return_value=click_ok) as click, \
+             self.assertLogs(gc.log, level="DEBUG") as logs:
+            gc.log.debug("start")
+            result = gc._dismiss_late_disclaimer()
+        return result, listing, click, logs.output
+
+    def test_paper_clicks_the_disclaimer_and_says_so(self):
+        result, _, click, out = self._call(buttons={"I understand and accept"})
+        self.assertEqual(result, "I understand and accept")
+        click.assert_called_once_with("I understand and accept", quiet=True)
+        self.assertTrue(any("WARNING" in l and "after the post-login check" in l
+                            for l in out))
+
+    def test_allowlist_order_decides_and_one_click_per_pass(self):
+        result, _, click, _ = self._call(
+            buttons={"Acknowledge", "I understand and accept"})
+        self.assertEqual(result, "I understand and accept")
+        self.assertEqual(click.call_count, 1)
+
+    def test_bypass_warning_entries_are_honoured(self):
+        result, _, _, _ = self._call(buttons={"Got it"},
+                                     allow=("I understand and accept", "Got it"))
+        self.assertEqual(result, "Got it")
+
+    def test_buttons_outside_the_allowlist_are_never_clicked(self):
+        result, _, click, _ = self._call(buttons={"OK", "Cancel", "Log Out"})
+        self.assertIsNone(result)
+        click.assert_not_called()
+
+    def test_live_mode_does_not_look(self):
+        result, listing, click, _ = self._call(
+            mode="live", buttons={"I understand and accept"})
+        self.assertIsNone(result)
+        listing.assert_not_called()
+        click.assert_not_called()
+
+    def test_agent_error_is_swallowed(self):
+        result, _, click, _ = self._call(list_error=ConnectionRefusedError())
+        self.assertIsNone(result)
+        click.assert_not_called()
+
+    def test_a_button_that_keeps_coming_back_is_left_after_three_clicks(self):
+        clock = {"t": 1000.0}
+        with patch.object(gc.time, "monotonic", side_effect=lambda: clock["t"]), \
+             patch.object(gc, "TRADING_MODE", "paper"), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", ("Acknowledge",)), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list",
+                          return_value=(set(), {"Acknowledge"})), \
+             patch.object(gc, "agent_click", return_value=True) as click, \
+             self.assertLogs(gc.log, level="WARNING") as logs:
+            results = []
+            for _ in range(8):                 # 8 passes, 5 s apart
+                results.append(gc._dismiss_late_disclaimer())
+                clock["t"] += 5
+            self.assertEqual(click.call_count, 3)
+            self.assertEqual(sum("leaving it for the operator" in l
+                                 for l in logs.output), 1)
+            clock["t"] += gc._LATE_DISCLAIMER_WINDOW_SECONDS   # window passes
+            self.assertEqual(gc._dismiss_late_disclaimer(), "Acknowledge")
+        self.assertEqual(results[:3], ["Acknowledge"] * 3)
+        self.assertEqual(results[3:], [None] * 5)
+
+    def test_failed_click_is_not_reported_as_dismissed(self):
+        result, _, _, out = self._call(buttons={"I understand and accept"},
+                                       click_ok=False)
+        self.assertIsNone(result)
+        self.assertFalse(any("WARNING" in l for l in out))
+
+
 class TestShutdownAlert(unittest.TestCase):
     """v0.5.2: shutdown() emits ALERT_SHUTDOWN with a documented format.
 

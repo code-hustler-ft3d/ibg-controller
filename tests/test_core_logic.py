@@ -372,7 +372,18 @@ def serve(path, texts):
             elif cmd == "GET_PID":
                 conn.sendall(("OK %d\n" % os.getpid()).encode())
             elif cmd == "LIST":
-                conn.sendall(("".join("text %s\n" % t for t in texts) + "END\n").encode())
+                conn.sendall(("".join("text %s\n" % t for t in texts)
+                              + "".join("button %s\n" % b for b in buttons)
+                              + "END\n").encode())
+            elif cmd == "CLICK":
+                name = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip().split(" ", 1)[1]
+                if name in buttons:
+                    buttons.remove(name)
+                    with open(path + ".clicks", "a") as f:
+                        f.write(name + "\n")
+                    conn.sendall(b"OK clicked\n")
+                else:
+                    conn.sendall(b"ERR not_found\n")
             elif cmd in ("WINDOWS", "LABELS"):
                 conn.sendall(b"END\n")
             elif cmd == "LOGIN_STATE":
@@ -388,6 +399,14 @@ def serve(path, texts):
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 texts = ["Username", "Password"] if "--login-dialog" in sys.argv else []
+buttons = []
+# --late-button=LABEL@N: a dialog with that button appears N seconds in, as
+# the paper-trading disclaimer can after the post-login check (issue #81).
+# Clicks are appended to <socket>.clicks.
+for a in sys.argv:
+    if a.startswith("--late-button="):
+        label, secs = a.split("=", 1)[1].rsplit("@", 1)
+        threading.Timer(float(secs), buttons.append, args=(label,)).start()
 threading.Thread(target=serve, args=(args[0], texts), daemon=True).start()
 # --api-after=N: open the API port N seconds in, as Gateway does once the
 # login it started itself (with the session saved before an auto-restart)
@@ -468,9 +487,11 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
                 pass
 
     def _start_jvm(self, api=False, login_dialog=False, busy=False,
-                   api_after=None):
+                   api_after=None, late_button=None):
         args = [sys.executable, self.fake, self.sock,
                 str(self.api_port) if api else "-"]
+        if late_button is not None:
+            args.append(f"--late-button={late_button}")
         if login_dialog:
             args.append("--login-dialog")
         if busy:
@@ -626,6 +647,53 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
 
         self.assertEqual(relaunches, 1)
         self.assertLess(elapsed, 12, "waited on an already-handled restart")
+
+
+class _StopMonitor(Exception):
+    pass
+
+
+class TestLateDisclaimerEndToEnd(unittest.TestCase):
+    """Issue #81: a paper-trading disclaimer that appears after the
+    post-login check, with the API port already open. The real monitor loop
+    runs against a fake Gateway whose dialog shows up a second in."""
+
+    LABEL = "I understand and accept"
+    setUp = TestAutoRestartAdoptionEndToEnd.setUp
+    _kill_all = TestAutoRestartAdoptionEndToEnd._kill_all
+    _start_jvm = TestAutoRestartAdoptionEndToEnd._start_jvm
+
+    def _monitor(self, mode, seconds=6):
+        jvm = self._start_jvm(api=True, late_button=f"{self.LABEL}@1")
+        clicks = self.sock + ".clicks"
+        deadline = time.monotonic() + seconds
+
+        def pause(_seconds):
+            if os.path.exists(clicks) or time.monotonic() > deadline:
+                raise _StopMonitor()
+            time.sleep(0.5)
+
+        with patch.object(gc, "TRADING_MODE", mode), \
+             patch.object(gc, "GATEWAY_PROC", jvm), \
+             patch.object(gc, "_late_disclaimer_clicks", [], create=True), \
+             patch.object(gc, "_late_disclaimer_capped", False, create=True), \
+             patch.object(gc, "_UPSTREAM_POLL_SECONDS", 10 ** 9), \
+             patch.object(gc, "_logoff_backstop_boundary", return_value=None), \
+             patch.object(gc, "_sleep_watching_incoming", side_effect=pause):
+            with self.assertRaises(_StopMonitor):
+                gc.monitor_loop(object())
+        self.assertIsNone(jvm.poll())
+        if not os.path.exists(clicks):
+            return []
+        with open(clicks) as f:
+            return f.read().splitlines()
+
+    def test_paper_disclaimer_after_ready_is_accepted(self):
+        self.assertEqual(self._monitor("paper"), [self.LABEL],
+                         "late paper disclaimer left up (Error 10141)")
+
+    def test_live_session_dialogs_are_left_alone(self):
+        self.assertEqual(self._monitor("live", seconds=3), [])
 
 
 class TestLockExitTimeVerification(unittest.TestCase):
