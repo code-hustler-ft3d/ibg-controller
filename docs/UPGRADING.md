@@ -107,6 +107,17 @@ anything from you.
   containers showed unhealthy for good. If something of yours restarts
   unhealthy containers, it no longer has that reason to.
 
+### v0.17.0
+
+- **Ubuntu 26.04 base, Gateway 10.50.1g.** Release images build on
+  gnzsnz's 10.50.1g, which moved from Ubuntu 24.04 to 26.04: Python
+  3.14, bash 5.3, and Ubuntu's Rust coreutils for `date`, `seq`,
+  `sleep`, `tr` and most other core commands (the GNU ones are installed
+  as `gnudate`, `gnuseq`, and so on). Nothing to do for a container run
+  as shipped. If you build an image on top of this one, install packages
+  by their 26.04 names and check scripts of your own that rely on
+  GNU-only options.
+
 ### v0.16.0
 
 - **IB Gateway 10.50.1f.** Release images move from 10.45.1j to the
