@@ -118,8 +118,9 @@ jobs:
           java-version: "17"
 
       - name: Install build deps on the runner
-        # The runner is ubuntu-24.04 — same distro the shipped image
-        # is built on. We deliberately do NOT install python3-gi /
+        # A stock ubuntu-24.04 runner (the shipped image is on Ubuntu
+        # 26.04 since Gateway 10.50.1g; the matrix job below runs the
+        # same import inside it). We deliberately do NOT install python3-gi /
         # gir1.2-atspi-2.0 / at-spi2-core: the import smoke test below
         # must succeed without them (v0.5.14 dropped the gi imports;
         # this job is the regression guard).
@@ -156,10 +157,11 @@ jobs:
     # (JRE path, apt package rename, userid shift) before users do.
     #
     # The matrix covers the Gateway versions we verify against: earlier
-    # pins (10.45.1c, 10.45.1g, 10.45.1j, 10.50.1e), the current stable
-    # pinned in the Dockerfile (10.50.1f), and the head of upstream's
-    # `latest` channel (10.51.1b). Add a new entry here when bumping
-    # verified versions in README.md / docs/FROM_IBC.md.
+    # pins (10.45.1c, 10.45.1g, 10.45.1j, 10.50.1e, 10.50.1f), the
+    # current stable pinned in the Dockerfile (the `pinned` entry), and
+    # a build from upstream's `latest` channel (10.51.1b). Add a new
+    # entry here when bumping verified versions in README.md /
+    # docs/FROM_IBC.md.
     #
     # Version tags, never the floating `:stable` / `:latest`, so a PR
     # run stays deterministic and upstream moving a channel can't turn
@@ -238,6 +240,24 @@ jobs:
             ibg-controller:matrix-test \
             -c 'import sys; sys.path.insert(0, "/home/ibgateway/scripts"); import gateway_controller as gc; print(f"OK upstream={gc.__version__} TRADING_MODE={gc.TRADING_MODE}")'
 
+      - name: run.sh process tests on the image's own shell
+        # The runner has bash 5.2 and GNU coreutils. The image has its
+        # own: on the Ubuntu 26.04 base, bash 5.3 and the Rust coreutils.
+        # run.sh's wait_for_controllers depends on `wait -n -p`, so its
+        # tests also run where it ships. A skipped test fails the step:
+        # skipping is how these tests report a shell they can't use.
+        run: |
+          docker run --rm -v "$PWD":/repo:ro -w /repo \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            --entrypoint bash ibg-controller:matrix-test -c '
+              set -o pipefail
+              bash --version | head -1
+              python3 -m unittest -v tests.test_run_sh 2>&1 | tee /tmp/run_sh_tests.log
+              if grep -q "skipped" /tmp/run_sh_tests.log; then
+                echo "REGRESSION: run.sh tests were skipped in the image"
+                exit 1
+              fi'
+
       - name: Verify AT-SPI bridge stays absent (regression guard)
         # v0.5.13 removed the JRE accessibility.properties write and
         # the libatk-wrapper.so copy into JAVA_HOME/lib (and the apt
@@ -258,9 +278,18 @@ jobs:
         run: |
           docker run --rm --entrypoint bash ibg-controller:matrix-test -c '
             set -e
-            GW_JAVA=$(find /usr/local/i4j_jres -name java -type f 2>/dev/null | head -1)
+            # Gateway 10.45.x keeps its JRE under /usr/local/i4j_jres;
+            # 10.50.x keeps it under $TWS_PATH/ibgateway/<version>/jre.
+            GW_JAVA=$(find /usr/local/i4j_jres "${TWS_PATH:-/home/ibgateway/Jts}" \
+                        -path "*/bin/java" -type f 2>/dev/null | head -1)
             if [ -z "$GW_JAVA" ]; then
               GW_JAVA=$(find /usr/local -path "*/zulu*/bin/java" -type f 2>/dev/null | head -1)
+            fi
+            if [ -z "$GW_JAVA" ]; then
+              echo "REGRESSION: no Gateway JRE found, so checks 1 and 2 below"
+              echo "would test nothing. Find where this Gateway keeps its JRE"
+              echo "and add that location to the search above."
+              exit 1
             fi
             JAVA_HOME=$(dirname $(dirname "$GW_JAVA"))
             echo "JAVA_HOME=$JAVA_HOME"

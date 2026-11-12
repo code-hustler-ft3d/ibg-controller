@@ -4,6 +4,30 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **Release images build on gnzsnz's `10.50.1g` (its `stable` line), which
+  moved from Ubuntu 24.04 to Ubuntu 26.04.** The image now runs on Ubuntu
+  26.04 with Python 3.14 and bash 5.3. Gateway itself changed little
+  between 10.50.1f and 10.50.1g: the same Java runtime (25.0.2) and
+  libraries, and no change to the text of the login window, second-factor
+  dialogs or settings the controller drives. If you build your own image
+  on top of this one: use Ubuntu 26.04 package names, and note that on
+  26.04 `date`, `seq`, `sleep`, `tr` and most other core commands are
+  Ubuntu's Rust coreutils (the GNU ones are installed as `gnudate`,
+  `gnuseq`, and so on), so check scripts that rely on GNU-only options.
+  Run before release on the arm64 image with a real paper login: login,
+  the paper disclaimer, post-login settings read back, VNC, the port
+  forwarder, the healthcheck and an API client.
+
+### Documentation
+
+- Passkey: the browser libraries Gateway's passkey prompt needs come with
+  the base image; release images have included them since v0.16.0, so no
+  image of your own is needed for them. amd64 only, as before.
+
 ## [0.16.4] - 2026-11-12
 
 ### Fixed

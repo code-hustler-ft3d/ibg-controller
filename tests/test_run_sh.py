@@ -12,8 +12,9 @@ restart policy acts. These tests extract the real function from run.sh and
 drive it against stub controllers, so they pin the shipped code rather than
 a copy of it.
 
-They need bash >= 5.1 for ``wait -n`` with PID arguments. The release image
-ships bash 5.2 and CI runs on Ubuntu 24.04 (5.2); macOS's /bin/bash is 3.2,
+They need bash >= 5.1 for ``wait -n`` with PID arguments. CI runs them on
+its Ubuntu 24.04 runner (bash 5.2) and again inside each built image, on the
+image's own bash (5.3 on the Ubuntu 26.04 base); macOS's /bin/bash is 3.2,
 so the tests skip there rather than report a false failure.
 """
 import os
