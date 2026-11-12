@@ -177,10 +177,10 @@ real product.
   maintainer has no passkey account, so this is ⚠️ rather than ✅.
   Needs an amd64 base, because IBKR's arm64 installer ships no browser.
   The prompt opens Gateway's embedded browser. The system libraries it
-  needs come with the base image, which has installed them since
-  10.50.1f
-  ([gnzsnz/ib-gateway-docker#440](https://github.com/gnzsnz/ib-gateway-docker/pull/440)),
-  so no image of your own is needed for them. See
+  needs come with the base image
+  ([gnzsnz/ib-gateway-docker#440](https://github.com/gnzsnz/ib-gateway-docker/pull/440));
+  release images have included them since v0.16.0, so no image of your
+  own is needed for them. See
   [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22)
   and [#29](https://github.com/code-hustler-ft3d/ibg-controller/pull/29).
 - **Accounts with more than one method**: Gateway pre-picks one, and

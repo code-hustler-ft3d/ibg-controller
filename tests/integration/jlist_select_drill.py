@@ -53,7 +53,11 @@ def check(name, ok, detail=""):
 def find_java():
     if os.environ.get("JAVA"):
         return os.environ["JAVA"]
-    hits = sorted(glob.glob("/usr/local/i4j_jres/*/*/bin/java"))
+    # Gateway 10.45.x keeps its JRE under /usr/local/i4j_jres; 10.50.x
+    # keeps it under $TWS_PATH/ibgateway/<version>/jre.
+    jts = os.environ.get("TWS_PATH", "/home/ibgateway/Jts")
+    hits = sorted(glob.glob("/usr/local/i4j_jres/*/*/bin/java")
+                  + glob.glob(os.path.join(jts, "ibgateway/*/jre/bin/java")))
     return hits[0] if hits else "java"
 
 
