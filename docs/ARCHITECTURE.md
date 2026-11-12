@@ -262,7 +262,12 @@ Why each was added:
    initial `handle_post_login_dialogs` poll missed it.
 7. **Disclaimers**: `dismiss_post_login_disclaimers()` — click any
    "I understand and accept" style buttons. Conservative: never clicks
-   bare "OK".
+   bare "OK". In paper mode the monitor loop looks for the same buttons
+   on every pass (`_dismiss_late_disclaimer()`, v0.16.4, issue #81),
+   because the paper disclaimer can appear after this step with the API
+   port already open, and Gateway refuses API clients (Error 10141) until
+   it's accepted. That check clicks only a button that is showing and
+   enabled, at most 3 times in 10 minutes.
 8. **Wait for API port**: `wait_for_api_port()` — poll TCP port 4001
    (live) / 4002 (paper) until it accepts a connection. **This is the
    definitive readiness signal.**

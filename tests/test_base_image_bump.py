@@ -79,10 +79,17 @@ class TestCheckRefuses(unittest.TestCase):
             os.chdir(d)
             try:
                 with patch.object(bump, "registry_stable", return_value=stable), \
+                     patch.object(bump, "image_revision", return_value="b" * 40), \
+                     patch.object(bump, "base_os",
+                                  side_effect=lambda r: "ubuntu:26.04" if r == "a" * 40
+                                  else "ubuntu:24.04"), \
                      patch.object(bump, "gnzsnz_commit", return_value=commit), \
                      patch.object(bump, "ibkr_stable_version", return_value="10.50.1g"), \
                      patch.object(sys, "argv", ["base_image_bump.py", "check", "--body", "b.md"]):
                     bump.main()
+                if os.path.exists("b.md"):
+                    with open("b.md") as f:
+                        self.body = f.read()
             finally:
                 os.chdir(cwd)
 
@@ -105,6 +112,61 @@ class TestCheckRefuses(unittest.TestCase):
         with redirect_stdout(out):
             self._check({**self.STABLE, "digest": OLD})
         self.assertEqual(out.getvalue().strip(), "changed=false")
+
+
+    def test_the_report_flags_a_change_of_ubuntu_release(self):
+        import io
+        from contextlib import redirect_stdout
+        with redirect_stdout(io.StringIO()):
+            self._check(self.STABLE)
+        self.assertIn("| Base OS | `ubuntu:26.04`, **changed** from `ubuntu:24.04`", self.body)
+
+
+class TestBaseOs(unittest.TestCase):
+    """The Ubuntu release comes from gnzsnz's Dockerfile at the image's
+    commit, and goes into a public issue."""
+
+    REV = "c" * 40
+
+    def _os(self, dockerfile=None, error=None, revision=REV):
+        import base64
+        from unittest.mock import patch
+        reply = {"content": base64.b64encode(dockerfile.encode()).decode()} if dockerfile else {}
+        with patch.object(bump, "_gh", side_effect=error, return_value=reply) as gh:
+            return bump.base_os(revision), gh
+
+    def test_reads_the_final_stage(self):
+        got, gh = self._os("FROM ubuntu:24.04 AS setup\nRUN x\nFROM ubuntu:26.04\nENV A=1\n")
+        self.assertEqual(got, "ubuntu:26.04")
+        gh.assert_called_once_with(f"contents/stable/Dockerfile?ref={self.REV}")
+
+    def test_a_digest_pinned_from_line_still_reads(self):
+        got, _ = self._os(f"FROM ubuntu:26.04@{NEW}\n")
+        self.assertEqual(got, "ubuntu:26.04")
+
+    def test_anything_but_an_ubuntu_release_is_not_reported(self):
+        for text in ("FROM ubuntu:26.04` @everyone\n", "FROM ubuntu:latest\n",
+                     "FROM debian:13\n", "FROM ubuntu:26.04|x\n"):
+            got, _ = self._os(text)
+            self.assertIsNone(got, text)
+
+    def test_a_malformed_revision_is_not_looked_up(self):
+        got, gh = self._os("FROM ubuntu:26.04\n", revision="main; rm -rf /")
+        self.assertIsNone(got)
+        gh.assert_not_called()
+
+    def test_an_unreadable_dockerfile_reads_as_unknown(self):
+        import urllib.error
+        got, _ = self._os(error=urllib.error.URLError("down"))
+        self.assertIsNone(got)
+        got, _ = self._os(dockerfile=None)
+        self.assertIsNone(got)
+
+    def test_row_wording(self):
+        self.assertIn("**changed** from `ubuntu:24.04`", bump.os_line("ubuntu:26.04", "ubuntu:24.04"))
+        self.assertEqual(bump.os_line("ubuntu:26.04", "ubuntu:26.04"), "`ubuntu:26.04` (unchanged)")
+        self.assertIn("current pin's could not be read", bump.os_line("ubuntu:26.04", None))
+        self.assertEqual(bump.os_line(None, "ubuntu:24.04"), "could not be read")
 
 
 class TestBumpWorkflowOrder(unittest.TestCase):

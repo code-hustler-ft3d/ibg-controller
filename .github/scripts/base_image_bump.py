@@ -20,10 +20,13 @@ default branch (a fork's commit is also served under the parent's URL, so
 carries ONBUILD instructions, which would run during our own build.
 These labels are set by whoever pushed the image and gnzsnz publishes no
 signatures, so they are sanity checks, not proof. IBKR's own stable
-channel is compared and reported, not required.
+channel and the Ubuntu release the image is built on are reported, not
+required: gnzsnz moved from Ubuntu 24.04 to 26.04 with 10.50.1g, and a
+change like that has to be visible in the issue.
 """
 
 import argparse
+import base64
 import json
 import os
 import re
@@ -37,6 +40,8 @@ IBKR_STABLE = ("https://download2.interactivebrokers.com/installers/ibgateway/"
                "stable-standalone/version.json")
 VERSION_RE = re.compile(r"^\d+\.\d+\.\d+[a-z]?$")
 DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+# Only this shape goes into the issue body.
+OS_RE = re.compile(r"^FROM\s+(ubuntu:\d{2}\.\d{2})(?:@sha256:[0-9a-f]{64})?(?:\s|$)", re.M)
 PIN_RE = re.compile(r"^ARG UPSTREAM_IMAGE=ghcr\.io/gnzsnz/ib-gateway:(\S+)@(sha256:[0-9a-f]{64})$", re.M)
 IDX = "application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
 MAN = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json"
@@ -61,8 +66,13 @@ def _get(url, accept=None, token=None):
 
 def registry_stable():
     """Version, index digest, OCI labels and architectures of :stable."""
+    return registry_image("stable")
+
+
+def registry_image(ref):
+    """Version, index digest, OCI labels and architectures of a tag or digest."""
     tok = json.loads(_get(f"https://ghcr.io/token?scope=repository:{UPSTREAM}:pull")[0])["token"]
-    body, headers = _get(f"https://ghcr.io/v2/{UPSTREAM}/manifests/stable", IDX, tok)
+    body, headers = _get(f"https://ghcr.io/v2/{UPSTREAM}/manifests/{ref}", IDX, tok)
     digest = headers.get("Docker-Content-Digest", "")
     index = json.loads(body)
     arches = {m["platform"]["architecture"]: m["digest"] for m in index.get("manifests", [])
@@ -125,6 +135,39 @@ def gnzsnz_commit(revision):
     return safe_text(message.splitlines()[0] if message else "")
 
 
+def image_revision(digest):
+    """The gnzsnz commit an image was built from, by its revision label, or None."""
+    try:
+        return registry_image(digest)["revision"]
+    except (urllib.error.URLError, OSError, KeyError, ValueError, SystemExit):
+        return None
+
+
+def base_os(revision):
+    """The Ubuntu release gnzsnz's stable Dockerfile builds on at that
+    commit, such as "ubuntu:26.04", or None if it can't be read."""
+    if not re.fullmatch(r"[0-9a-f]{40}", revision or ""):
+        return None
+    try:
+        content = _gh(f"contents/stable/Dockerfile?ref={revision}")["content"]
+        text = base64.b64decode(content).decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, KeyError, ValueError, TypeError):
+        return None
+    found = OS_RE.findall(text)
+    return found[-1] if found else None  # the final stage is the image
+
+
+def os_line(now, was):
+    if now and was and now != was:
+        return (f"`{now}`, **changed** from `{was}`: our Dockerfile installs its "
+                "packages from the new release, and images built on ours change with it")
+    if now and was:
+        return f"`{now}` (unchanged)"
+    if now:
+        return f"`{now}` (the current pin's could not be read)"
+    return "could not be read"
+
+
 def apply(dockerfile, readme, version, digest):
     """Return the Dockerfile and README with the pin moved to ``version@digest``."""
     if not VERSION_RE.fullmatch(version) or not DIGEST_RE.fullmatch(digest):
@@ -142,7 +185,7 @@ def apply(dockerfile, readme, version, digest):
     return dockerfile, readme
 
 
-def report(pin_version, stable, ibkr, commit):
+def report(pin_version, stable, ibkr, commit, os_now=None, os_was=None):
     ibkr_line = ("matches" if ibkr == stable["version"]
                  else f"**differs**: IBKR stable is `{ibkr}`" if ibkr else "could not be read")
     return f"""gnzsnz's `stable` image moved from `{pin_version}` to `{stable['version']}`.
@@ -154,6 +197,7 @@ def report(pin_version, stable, ibkr, commit):
 | Built from | {stable['source']} @ `{stable['revision'][:12]}` (on its default branch): `{commit}` |
 | ONBUILD instructions | none |
 | IBKR's own stable channel | {ibkr_line} |
+| Base OS | {os_line(os_now, os_was)} |
 
 These come from the image's own labels, which gnzsnz doesn't sign, so they are sanity checks rather than proof.
 
@@ -194,7 +238,8 @@ def main():
             raise SystemExit(f"stable's revision {stable['revision']!r} isn't a commit on "
                              "gnzsnz/ib-gateway-docker's default branch")
         with open(args.body, "w", encoding="utf-8") as f:
-            f.write(report(pin_version, stable, ibkr_stable_version(), commit))
+            f.write(report(pin_version, stable, ibkr_stable_version(), commit,
+                           base_os(stable["revision"]), base_os(image_revision(pin_digest))))
         print("changed=true")
         print(f"version={stable['version']}")
         print(f"digest={stable['digest']}")

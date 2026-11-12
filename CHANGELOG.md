@@ -18,12 +18,34 @@ and the project follows [Semantic Versioning](https://semver.org/).
   26.04 `date`, `seq`, `sleep`, `tr` and most other core commands are
   Ubuntu's Rust coreutils (the GNU ones are installed as `gnudate`,
   `gnuseq`, and so on), so check scripts that rely on GNU-only options.
+  Run before release on the arm64 image with a real paper login: login,
+  the paper disclaimer, post-login settings read back, VNC, the port
+  forwarder, the healthcheck and an API client.
 
 ### Documentation
 
 - Passkey: the browser libraries Gateway's passkey prompt needs come with
   the base image; release images have included them since v0.16.0, so no
   image of your own is needed for them. amd64 only, as before.
+
+## [0.16.4] - 2026-11-12
+
+### Fixed
+
+- **A paper-trading disclaimer that appeared after the post-login check
+  stayed up, and Gateway refused every API client with Error 10141
+  (issue #81).** On a cold start the disclaimer can appear after
+  the controller has looked for it and found nothing. The
+  API port is already open, so the controller reported READY and went
+  on to MONITORING, but each client got `Paper trading disclaimer must
+  first be accepted for API connection` until the container was
+  restarted. In paper mode the monitor loop now looks for the same
+  disclaimer buttons on every pass (every 5 s), using the allowlist the
+  post-login check uses, `BYPASS_WARNING` additions included. It clicks
+  only a button that is showing and enabled, at most 3 times in 10
+  minutes, and logs
+  `Monitor: clicked 'I understand and accept' on a disclaimer that
+  appeared after the post-login check`. Live mode is unchanged.
 
 ## [0.16.3] - 2026-10-27
 
