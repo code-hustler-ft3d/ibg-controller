@@ -2850,6 +2850,7 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         cfg = dict(
             age=1.0, new_pid=5020, alive=True, port_open=True,
             texts=set(), buttons=set(), redrive=True, login_state=None,
+            maintenance=False,
         )
         cfg.update(overrides)
         stack = [
@@ -2866,6 +2867,10 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
             patch.object(gc, "signal_ready"),
             patch.object(gc, "agent_login_state",
                          return_value=cfg["login_state"]),
+            # The real check reads the clock: between 23:30 and 02:00 ET
+            # every re-drive would sit out the 8-minute maintenance delay.
+            patch.object(gc, "_is_ibkr_maintenance_window",
+                         return_value=cfg["maintenance"]),
         ]
         return stack
 
@@ -3061,9 +3066,8 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         # Adoption itself needs no auth, so it runs ahead of the v0.5.10
         # guard — but this branch does re-auth, inside the window where
         # IBKR's auth server is still draining.
-        stack = self._adopting(port_open=False, texts={"Username"})
-        stack.append(patch.object(gc, "_is_ibkr_maintenance_window",
-                                  return_value=True))
+        stack = self._adopting(port_open=False, texts={"Username"},
+                               maintenance=True)
         stack.append(patch.object(gc, "_apply_maintenance_recovery_delay"))
         result, mocks = self._run(stack)
         self.assertTrue(result)
