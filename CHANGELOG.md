@@ -17,7 +17,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
   first be accepted for API connection` until the container was
   restarted. In paper mode the monitor loop now looks for the same
   disclaimer buttons on every pass (every 5 s), using the allowlist the
-  post-login check uses, `BYPASS_WARNING` additions included, and logs
+  post-login check uses, `BYPASS_WARNING` additions included. It clicks
+  only a button that is showing and enabled, at most 3 times in 10
+  minutes, and logs
   `Monitor: clicked 'I understand and accept' on a disclaimer that
   appeared after the post-login check`. Live mode is unchanged.
 

@@ -669,19 +669,23 @@ def agent_settext_in_window(title_substring, text):
     return False
 
 
-def agent_click_in_window(title_substring, button_text):
+def agent_click_in_window(title_substring, button_text, quiet=False):
     """Click a button (matched by getText() or accessible name) inside
     a window whose title contains the substring. Used for dialogs whose
-    button identifiers overlap with main window buttons."""
+    button identifiers overlap with main window buttons. Only a button
+    that is showing and enabled is clicked; an empty substring searches
+    every showing window, modal dialogs first. ``quiet`` as for
+    agent_click."""
+    level = log.debug if quiet else log.error
     try:
         resp = _agent_request(f"CLICK_IN_WIN {title_substring}|{button_text}")
     except Exception as e:
-        log.error(_redact_logs(
+        level(_redact_logs(
             f"agent CLICK_IN_WIN {title_substring!r}: {type(e).__name__}: {e}"))
         return False
     if resp.startswith("OK"):
         return True
-    log.error(_redact_logs(f"agent CLICK_IN_WIN {title_substring!r}: {resp}"))
+    level(_redact_logs(f"agent CLICK_IN_WIN {title_substring!r}: {resp}"))
     return False
 
 
@@ -2703,10 +2707,14 @@ def _dismiss_late_disclaimer():
     Same allowlist as the post-login check, one click per call. Live mode is
     left alone: Error 10141 is the paper disclaimer, and a dialog that appears
     mid-session in a live account stays up for the operator to read.
+    LIST also reports buttons that sit hidden inside a showing window, so
+    the click goes through CLICK_IN_WIN, which only clicks a button that is
+    showing and enabled: this runs every few seconds for the whole session.
     A dialog closes when its button is clicked; a matching button that keeps
     coming back is something else, so after _LATE_DISCLAIMER_MAX_CLICKS
-    clicks in _LATE_DISCLAIMER_WINDOW_SECONDS the controller stops clicking
-    and says so once. Returns the button clicked, or None.
+    clicks within _LATE_DISCLAIMER_WINDOW_SECONDS the controller stops
+    clicking and says so; it tries again once the oldest of those clicks
+    has aged out of the window. Returns the button clicked, or None.
     """
     global _late_disclaimer_capped
     if TRADING_MODE != "paper":
@@ -2732,7 +2740,7 @@ def _dismiss_late_disclaimer():
                         "it for the operator (VNC)")
                 return None
             _late_disclaimer_capped = False
-            if agent_click(btn, quiet=True):
+            if agent_click_in_window("", btn, quiet=True):
                 _late_disclaimer_clicks.append(now)
                 log.warning(f"Monitor: clicked {btn!r} on a disclaimer that "
                             "appeared after the post-login check")

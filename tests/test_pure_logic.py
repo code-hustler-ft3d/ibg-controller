@@ -1293,7 +1293,7 @@ class TestDismissLateDisclaimer(unittest.TestCase):
              patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
              patch.object(gc, "_late_disclaimer_capped", False), \
              patch.object(gc, "agent_list", listing), \
-             patch.object(gc, "agent_click", return_value=click_ok) as click, \
+             patch.object(gc, "agent_click_in_window", return_value=click_ok) as click, \
              self.assertLogs(gc.log, level="DEBUG") as logs:
             gc.log.debug("start")
             result = gc._dismiss_late_disclaimer()
@@ -1302,7 +1302,8 @@ class TestDismissLateDisclaimer(unittest.TestCase):
     def test_paper_clicks_the_disclaimer_and_says_so(self):
         result, _, click, out = self._call(buttons={"I understand and accept"})
         self.assertEqual(result, "I understand and accept")
-        click.assert_called_once_with("I understand and accept", quiet=True)
+        # Any showing window; the agent skips hidden or disabled buttons.
+        click.assert_called_once_with("", "I understand and accept", quiet=True)
         self.assertTrue(any("WARNING" in l and "after the post-login check" in l
                             for l in out))
 
@@ -1343,7 +1344,7 @@ class TestDismissLateDisclaimer(unittest.TestCase):
              patch.object(gc, "_late_disclaimer_capped", False), \
              patch.object(gc, "agent_list",
                           return_value=(set(), {"Acknowledge"})), \
-             patch.object(gc, "agent_click", return_value=True) as click, \
+             patch.object(gc, "agent_click_in_window", return_value=True) as click, \
              self.assertLogs(gc.log, level="WARNING") as logs:
             results = []
             for _ in range(8):                 # 8 passes, 5 s apart
@@ -2638,6 +2639,35 @@ class TestLoginButtonLabels(unittest.TestCase):
             self.assertEqual(gc._login_button_labels()[0], "Paper Log In")
         with patch.object(gc, "TRADING_MODE", "live"):
             self.assertEqual(gc._login_button_labels()[0], "Log In")
+
+
+class TestAgentClickInWindowQuiet(unittest.TestCase):
+    """quiet=True on agent_click_in_window: a miss logs DEBUG, not ERROR,
+    because the monitor loop's disclaimer check calls it every few seconds."""
+
+    def _miss(self, quiet, **req):
+        with patch.object(gc, "_agent_request", **req), \
+             patch.object(gc.log, "error") as err, \
+             patch.object(gc.log, "debug") as dbg:
+            self.assertFalse(gc.agent_click_in_window("", "I Accept", quiet=quiet))
+        return err, dbg
+
+    def test_failure_logs_error_by_default(self):
+        err, dbg = self._miss(False, return_value="ERR not_found")
+        err.assert_called_once()
+        dbg.assert_not_called()
+
+    def test_quiet_failure_and_exception_log_debug(self):
+        for req in ({"return_value": "ERR not_found"},
+                    {"side_effect": OSError("boom")}):
+            err, dbg = self._miss(True, **req)
+            err.assert_not_called()
+            dbg.assert_called_once()
+
+    def test_sends_an_empty_title_for_any_window(self):
+        with patch.object(gc, "_agent_request", return_value="OK") as req:
+            self.assertTrue(gc.agent_click_in_window("", "I Accept", quiet=True))
+        req.assert_called_once_with("CLICK_IN_WIN |I Accept")
 
 
 class TestAgentClickQuiet(unittest.TestCase):

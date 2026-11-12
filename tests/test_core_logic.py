@@ -375,9 +375,12 @@ def serve(path, texts):
                 conn.sendall(("".join("text %s\n" % t for t in texts)
                               + "".join("button %s\n" % b for b in buttons)
                               + "END\n").encode())
-            elif cmd == "CLICK":
-                name = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip().split(" ", 1)[1]
-                if name in buttons:
+            elif cmd in ("CLICK", "CLICK_IN_WIN"):
+                # Like the agent: CLICK takes any listed button, hidden or
+                # not; CLICK_IN_WIN only one that is showing.
+                rest = buf.split(b"\n", 1)[0].decode("utf-8", "replace").strip().split(" ", 1)[1]
+                name = rest.split("|", 1)[1] if cmd == "CLICK_IN_WIN" else rest
+                if name in buttons and not (cmd == "CLICK_IN_WIN" and name in hidden):
                     buttons.remove(name)
                     with open(path + ".clicks", "a") as f:
                         f.write(name + "\n")
@@ -400,6 +403,10 @@ def serve(path, texts):
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 texts = ["Username", "Password"] if "--login-dialog" in sys.argv else []
 buttons = []
+# --hidden-button=LABEL: a button that LIST reports but that isn't showing,
+# as one inside a hidden panel of a showing window would be.
+hidden = {a.split("=", 1)[1] for a in sys.argv if a.startswith("--hidden-button=")}
+buttons.extend(hidden)
 # --late-button=LABEL@N: a dialog with that button appears N seconds in, as
 # the paper-trading disclaimer can after the post-login check (issue #81).
 # Clicks are appended to <socket>.clicks.
@@ -487,11 +494,13 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
                 pass
 
     def _start_jvm(self, api=False, login_dialog=False, busy=False,
-                   api_after=None, late_button=None):
+                   api_after=None, late_button=None, hidden_button=None):
         args = [sys.executable, self.fake, self.sock,
                 str(self.api_port) if api else "-"]
         if late_button is not None:
             args.append(f"--late-button={late_button}")
+        if hidden_button is not None:
+            args.append(f"--hidden-button={hidden_button}")
         if login_dialog:
             args.append("--login-dialog")
         if busy:
@@ -663,8 +672,9 @@ class TestLateDisclaimerEndToEnd(unittest.TestCase):
     _kill_all = TestAutoRestartAdoptionEndToEnd._kill_all
     _start_jvm = TestAutoRestartAdoptionEndToEnd._start_jvm
 
-    def _monitor(self, mode, seconds=6):
-        jvm = self._start_jvm(api=True, late_button=f"{self.LABEL}@1")
+    def _monitor(self, mode, seconds=6, hidden=False):
+        jvm = (self._start_jvm(api=True, hidden_button=self.LABEL) if hidden
+               else self._start_jvm(api=True, late_button=f"{self.LABEL}@1"))
         clicks = self.sock + ".clicks"
         deadline = time.monotonic() + seconds
 
@@ -694,6 +704,11 @@ class TestLateDisclaimerEndToEnd(unittest.TestCase):
 
     def test_live_session_dialogs_are_left_alone(self):
         self.assertEqual(self._monitor("live", seconds=3), [])
+
+    def test_a_hidden_button_is_never_clicked(self):
+        # The check runs all session; a matching button that isn't showing
+        # is not a disclaimer on screen.
+        self.assertEqual(self._monitor("paper", seconds=3, hidden=True), [])
 
 
 class TestLockExitTimeVerification(unittest.TestCase):
