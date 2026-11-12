@@ -258,9 +258,18 @@ jobs:
         run: |
           docker run --rm --entrypoint bash ibg-controller:matrix-test -c '
             set -e
-            GW_JAVA=$(find /usr/local/i4j_jres -name java -type f 2>/dev/null | head -1)
+            # Gateway 10.45.x keeps its JRE under /usr/local/i4j_jres;
+            # 10.50.x and later under $TWS_PATH/ibgateway/<version>/jre.
+            GW_JAVA=$(find /usr/local/i4j_jres "${TWS_PATH:-/home/ibgateway/Jts}" \
+                        -path "*/bin/java" -type f 2>/dev/null | head -1)
             if [ -z "$GW_JAVA" ]; then
               GW_JAVA=$(find /usr/local -path "*/zulu*/bin/java" -type f 2>/dev/null | head -1)
+            fi
+            if [ -z "$GW_JAVA" ]; then
+              echo "REGRESSION: no Gateway JRE found, so checks 1 and 2 below"
+              echo "would test nothing. Find where this Gateway keeps its JRE"
+              echo "and add that location to the search above."
+              exit 1
             fi
             JAVA_HOME=$(dirname $(dirname "$GW_JAVA"))
             echo "JAVA_HOME=$JAVA_HOME"

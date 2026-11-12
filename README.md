@@ -109,7 +109,7 @@ Deeper guides:
 
 | Requirement | Notes |
 |---|---|
-| Linux `amd64`/`arm64` | Ubuntu 24.04 base tested |
+| Linux `amd64`/`arm64` | Ubuntu 26.04 base (gnzsnz moved from 24.04 with 10.50.1g); Python 3.14 in the image |
 | IB Gateway 10.x | Release images pin **10.50.1g** (gnzsnz `:stable` line) |
 | Python 3.10+ | Runtime; stdlib only, no pip installs |
 | JDK 17+ | Build time only — runtime uses the JRE bundled with Gateway |
@@ -123,7 +123,7 @@ Deeper guides:
 | TOTP 2FA (single method) | ✅ verified | ⚠️ code in place | |
 | IB Key push 2FA | ✅ wait mode | ✅ wait mode | waits for you to approve on the phone |
 | Multi-method 2FA | ⚠️ needs one method | ⚠️ needs one method | both dialog shapes are detected and driven, but IBKR kicks the session on most accounts we've seen when the method is switched mid-login; run a single method, see [2FA](#2fa) |
-| Passkey prompt (`PASSKEY_AUTHENTICATE=yes`) | ⚠️ contributor-validated | ⚠️ untested | presses Authenticate; your authenticator completes WebAuthn; amd64 plus extra libraries; see [2FA](#2fa) |
+| Passkey prompt (`PASSKEY_AUTHENTICATE=yes`) | ⚠️ contributor-validated | ⚠️ untested | presses Authenticate; your authenticator completes WebAuthn; amd64 only; see [2FA](#2fa) |
 | Existing-session dialog | ✅ verified | ⚠️ code in place | also answered when it appears after the TOTP code (v0.16.0, unit-tested) |
 | Post-login config (`READ_ONLY_API`, `BYPASS_ORDER_PRECAUTIONS`, `TWS_MASTER_CLIENT_ID`, auto logoff/restart times) | ✅ verified | ⚠️ untested | `BYPASS_ORDER_PRECAUTIONS` (v0.16.2) and selecting Auto restart with Gateway's notice (v0.16.1): run on a paper 10.50.1f Gateway; the AM button: unit-tested |
 | Command server (`STOP`, `RESTART`, `RECONNECTACCOUNT`, `ENABLEAPI`) | ✅ verified | ⚠️ untested | `RECONNECTDATA` is TWS-only |
@@ -176,10 +176,11 @@ real product.
   since v0.8.1. Contributed and used in production by @jpike88; the
   maintainer has no passkey account, so this is ⚠️ rather than ✅.
   Needs an amd64 base, because IBKR's arm64 installer ships no browser.
-  The prompt opens Gateway's embedded browser, whose system libraries
-  this image doesn't include: add the packages from
-  [gnzsnz/ib-gateway-docker#440](https://github.com/gnzsnz/ib-gateway-docker/pull/440)
-  in an image of your own. See
+  The prompt opens Gateway's embedded browser. The system libraries it
+  needs come with the base image, which has installed them since
+  10.50.1f
+  ([gnzsnz/ib-gateway-docker#440](https://github.com/gnzsnz/ib-gateway-docker/pull/440)),
+  so no image of your own is needed for them. See
   [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22)
   and [#29](https://github.com/code-hustler-ft3d/ibg-controller/pull/29).
 - **Accounts with more than one method**: Gateway pre-picks one, and
@@ -230,7 +231,7 @@ real product.
 | `TWS_PASSWORD_FILE`, `TWOFACTOR_CODE_FILE` | Docker-secrets variants: read the value from a file |
 | `TRADING_MODE` | `live`, `paper` (default), or `both`. In `both`, a mode that fails to log in relaunches its own Gateway up to three times without touching the other. If that fails, live takes priority: a dead live controller stops the container so its restart policy brings both back, while a dead paper controller leaves live running and waits for the next restart. Run two single-mode containers if the modes must stay fully independent. |
 | `TWOFA_DEVICE` | Multi-method accounts only: names the method `TWOFACTOR_CODE` satisfies (default `Mobile Authenticator app`). Matched against Gateway's device list without regard to case or spacing; if nothing matches, the log lists the entries it found. Ignored on single-method accounts. **Setting this rarely makes a two-method account work unattended** — on most accounts we've seen, IBKR kicks the session when the method is switched mid-login. See [2FA](#2fa). |
-| `PASSKEY_AUTHENTICATE` | `yes` makes the controller press **Authenticate** on Gateway's passkey prompt; an authenticator running alongside the container completes the WebAuthn ceremony. Unset, a passkey prompt fails loudly. Needs an amd64 base and extra browser libraries; see [2FA](#2fa). |
+| `PASSKEY_AUTHENTICATE` | `yes` makes the controller press **Authenticate** on Gateway's passkey prompt; an authenticator running alongside the container completes the WebAuthn ceremony. Unset, a passkey prompt fails loudly. Needs an amd64 base; see [2FA](#2fa). |
 
 ### Connection
 
