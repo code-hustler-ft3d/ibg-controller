@@ -12,7 +12,11 @@ restart policy acts. These tests extract the real function from run.sh and
 drive it against stub controllers, so they pin the shipped code rather than
 a copy of it.
 
-They need bash >= 5.1 for ``wait -n`` with PID arguments. CI runs them on
+The choice between ibg-controller and IBC (``choose_login_automation``) and
+the healthcheck's reading of the same setting are tested the same way.
+
+The ``wait_for_controllers`` tests need bash >= 5.1 for ``wait -n`` with PID
+arguments. CI runs them on
 its Ubuntu 24.04 runner (bash 5.2) and again inside each built image, on the
 image's own bash (5.3 on the Ubuntu 26.04 base); macOS's /bin/bash is 3.2,
 so the tests skip there rather than report a false failure.
@@ -246,8 +250,9 @@ class TestWaitForControllers(unittest.TestCase):
 
     def test_ibc_path_keeps_its_old_behaviour(self):
         # Scoped to the controller path: the legacy IBC path is untouched.
+        # choose_login_automation leaves the setting as exactly yes or no.
         r, _ = self._run("""
-            USE_IBG_CONTROLLER=
+            USE_IBG_CONTROLLER=no
             pid=()
             ( sleep 0.2; exit 0 ) & pid+=("$!")
             ( sleep 0.4; exit 0 ) & pid+=("$!")
@@ -293,6 +298,148 @@ class TestWaitForControllers(unittest.TestCase):
                 proc.kill()
         self.assertEqual(out.count("STOP_IBC"), 1, out)
         self.assertLess(time.monotonic() - start, 10)
+
+
+ANY_BASH = shutil.which("bash")
+HEALTHCHECK = os.path.join(REPO, "scripts", "healthcheck.sh")
+
+# value -> the path run.sh takes: "yes" (ibg-controller), "no" (IBC) or
+# None (refused). Includes a value that differs from every default.
+SETTINGS = {
+    "yes": "yes", "YES": "yes", "Yes": "yes", "true": "yes", "True": "yes",
+    "1": "yes", "on": "yes", " yes ": "yes", '"yes"': "yes", "'true'": "yes",
+    "no": "no", "No": "no", "false": "no", "FALSE": "no", "0": "no",
+    "off": "no", '"no"': "no", " off": "no",
+    "enabled": None, "y": None, "2": None, "ibc": None, "yes please": None,
+}
+
+
+@unittest.skipUnless(ANY_BASH, "needs bash")
+class TestChooseLoginAutomation(unittest.TestCase):
+    """The image runs ibg-controller unless USE_IBG_CONTROLLER says no.
+    These run the real functions from run.sh."""
+
+    def _choose(self, env):
+        script = (_extract("use_controller_setting") + _extract("choose_login_automation")
+                  + 'rc=0; choose_login_automation || rc=$?\n'
+                  + 'echo "RC=$rc CHOICE=${USE_IBG_CONTROLLER-<unset>}"\n'
+                  + 'bash -c \'echo "CHILD=${USE_IBG_CONTROLLER-<unset>}"\'\n')
+        base = {"PATH": os.environ["PATH"]}
+        base.update(env)
+        r = subprocess.run([ANY_BASH, "-c", script], capture_output=True,
+                           text=True, timeout=20, env=base)
+        m = re.search(r"^RC=(\d+) CHOICE=(.*)$", r.stdout, re.M)
+        self.assertIsNotNone(m, r.stdout + r.stderr)
+        child = re.search(r"^CHILD=(.*)$", r.stdout, re.M).group(1)
+        return int(m.group(1)), m.group(2), child, r.stdout, r.stderr
+
+    def test_unset_runs_the_controller(self):
+        rc, choice, child, out, _ = self._choose({})
+        self.assertEqual((rc, choice, child), (0, "yes", "yes"))
+        self.assertIn("Login automation: ibg-controller", out)
+
+    def test_empty_runs_the_controller(self):
+        rc, choice, _, _, _ = self._choose({"USE_IBG_CONTROLLER": ""})
+        self.assertEqual((rc, choice), (0, "yes"))
+
+    def test_every_spelling(self):
+        for value, want in SETTINGS.items():
+            with self.subTest(value=value):
+                rc, choice, child, _, err = self._choose({"USE_IBG_CONTROLLER": value})
+                if want is None:
+                    self.assertEqual(rc, 78)
+                    self.assertIn("is not a value this image understands", err)
+                    self.assertIn(value, err)
+                else:
+                    # Exactly yes or no, and exported: the rest of run.sh
+                    # and its children compare against those two words.
+                    self.assertEqual((rc, choice, child), (0, want, want))
+
+    def test_no_starts_ibc_and_says_so(self):
+        rc, choice, _, out, _ = self._choose({"USE_IBG_CONTROLLER": "no"})
+        self.assertEqual((rc, choice), (0, "no"))
+        self.assertIn("Login automation: IBC", out)
+
+    def test_unset_with_a_hand_kept_ibc_config_stays_on_ibc(self):
+        # CUSTOM_CONFIG=yes: the user maintains IBC's config.ini, and their
+        # credentials may be only there.
+        rc, choice, _, out, _ = self._choose({"CUSTOM_CONFIG": "yes"})
+        self.assertEqual((rc, choice), (0, "no"))
+        self.assertIn("CUSTOM_CONFIG=yes: starting IBC", out)
+
+    def test_an_explicit_yes_wins_over_custom_config(self):
+        rc, choice, _, out, _ = self._choose({"CUSTOM_CONFIG": "yes",
+                                              "USE_IBG_CONTROLLER": "yes"})
+        self.assertEqual((rc, choice), (0, "yes"))
+        self.assertNotIn("starting IBC", out)
+
+    def test_custom_config_other_than_yes_does_not_change_the_default(self):
+        rc, choice, _, _, _ = self._choose({"CUSTOM_CONFIG": "no"})
+        self.assertEqual((rc, choice), (0, "yes"))
+
+    def test_run_sh_chooses_before_anything_reads_the_setting(self):
+        with open(RUN_SH, encoding="utf-8") as f:
+            src = f.read()
+        call = src.index('\nchoose_login_automation || exit "$?"\n')
+        body_end = src.index("\n}\n", src.index("\nchoose_login_automation() {")) + 3
+        uses = [m.start() for m in re.finditer(r'"\$USE_IBG_CONTROLLER" !?= "', src)]
+        self.assertGreaterEqual(len(uses), 5)
+        self.assertTrue(all(u > call for u in uses if u > body_end))
+        # Every later test compares with the two words the choice leaves.
+        for m in re.finditer(r'"\$USE_IBG_CONTROLLER" !?= "([^"]*)"', src):
+            self.assertIn(m.group(1), ("yes", "no"))
+
+
+@unittest.skipUnless(shutil.which("sh"), "needs sh")
+class TestHealthcheckPath(unittest.TestCase):
+    """scripts/healthcheck.sh asks the controller's /health, and on the
+    IBC path, where nothing serves it, reports healthy without asking."""
+
+    def _check(self, env, curl_rc=0):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            calls = os.path.join(d, "calls")
+            curl = os.path.join(d, "curl")
+            with open(curl, "w") as f:
+                f.write(f'#!/bin/sh\necho "$@" >> "{calls}"\nexit {curl_rc}\n')
+            os.chmod(curl, 0o755)
+            base = {"PATH": d + os.pathsep + os.environ["PATH"]}
+            base.update(env)
+            r = subprocess.run(["sh", HEALTHCHECK], capture_output=True,
+                               text=True, timeout=20, env=base)
+            probes = []
+            if os.path.exists(calls):
+                with open(calls) as f:
+                    probes = f.read().splitlines()
+        return r.returncode, probes
+
+    def test_controller_path_asks_health_and_reports_its_answer(self):
+        rc, probes = self._check({})
+        self.assertEqual(rc, 0)
+        self.assertEqual(len(probes), 1)
+        self.assertIn("http://127.0.0.1:8080/health", probes[0])
+        rc, probes = self._check({}, curl_rc=22)
+        self.assertNotEqual(rc, 0)
+
+    def test_agrees_with_run_sh_on_every_spelling(self):
+        for value, want in SETTINGS.items():
+            with self.subTest(value=value):
+                rc, probes = self._check({"USE_IBG_CONTROLLER": value}, curl_rc=22)
+                if want == "no":
+                    self.assertEqual((rc, probes), (0, []))
+                else:
+                    # The controller path, and values run.sh refuses (that
+                    # container never starts): ask, and report the answer.
+                    self.assertEqual(len(probes), 1)
+                    self.assertNotEqual(rc, 0)
+
+    def test_unset_with_custom_config_is_the_ibc_path(self):
+        rc, probes = self._check({"CUSTOM_CONFIG": "yes"}, curl_rc=22)
+        self.assertEqual((rc, probes), (0, []))
+        rc, probes = self._check({"CUSTOM_CONFIG": "yes", "USE_IBG_CONTROLLER": "yes"},
+                                 curl_rc=22)
+        self.assertEqual(len(probes), 1)
+        self.assertNotEqual(rc, 0)
 
 
 if __name__ == "__main__":

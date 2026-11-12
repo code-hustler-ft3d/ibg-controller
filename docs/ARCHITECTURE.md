@@ -320,7 +320,8 @@ Why each was added:
 
 ### 6. Dual mode (`TRADING_MODE=both`) dispatch (v0.2)
 
-When `TRADING_MODE=both` and `USE_IBG_CONTROLLER=yes`, `run.sh`
+When `TRADING_MODE=both` on the controller path (the default; see
+`choose_login_automation` in `run.sh`), `run.sh`
 spawns `start_process` twice in sequence — once with live env, then
 with paper env. Each invocation exports distinct per-instance values:
 

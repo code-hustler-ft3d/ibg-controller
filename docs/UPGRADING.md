@@ -76,6 +76,37 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.18.0
+
+- **The image runs ibg-controller unless told otherwise.** Until now it
+  started IBC unless `USE_IBG_CONTROLLER` was exactly `yes`.
+  - You set `USE_IBG_CONTROLLER=yes`: nothing changes.
+  - You set nothing and want IBC: add `USE_IBG_CONTROLLER=no`. With
+    `CUSTOM_CONFIG=yes` (your own IBC `config.ini`) the image keeps
+    starting IBC anyway and logs a notice asking you to choose.
+  - You set nothing and your settings are env vars: the controller reads
+    the same ones (`TWS_USERID`, `TWS_PASSWORD`, `TRADING_MODE`,
+    `TWOFACTOR_CODE`, ...). At start-up it lists any IBC settings it
+    doesn't honor. See [`FROM_IBC.md`](FROM_IBC.md).
+  - You wrote `true`, `1`, `on` or `"yes"` with its quotes: that started
+    IBC before, without a word. It now starts ibg-controller. `false`,
+    `0` and `off` mean `no`. Any other value stops the container with
+    `USE_IBG_CONTROLLER='...' is not a value this image understands`.
+  The first log lines say which one is running: `Login automation:
+  ibg-controller` or `Login automation: IBC`.
+- **If you are switched from IBC, the controller's `/health` starts
+  listening on port 8080 inside the container.** It is read-only status
+  (state, version, ports, timings; no credentials or account data) and
+  is reachable from outside only if you publish that port or share a
+  Docker network. `CONTROLLER_HEALTH_SERVER_PORT=` (empty) turns it off;
+  the Docker healthcheck then fails, so override or disable that too.
+  The command server stays off unless you set
+  `CONTROLLER_COMMAND_SERVER_PORT`.
+- **The Docker healthcheck reports healthy on the IBC path.** It asks the
+  controller's `/health`, which nothing serves when IBC runs, so those
+  containers showed unhealthy for good. If something of yours restarts
+  unhealthy containers, it no longer has that reason to.
+
 ### v0.16.0
 
 - **IB Gateway 10.50.1f.** Release images move from 10.45.1j to the

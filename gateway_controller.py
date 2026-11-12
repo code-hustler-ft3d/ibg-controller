@@ -6119,8 +6119,8 @@ def _warn_unsupported_env_vars():
     if hit:
         log.warning("These IBC-compat env vars are SET but NOT honored by "
                     "the controller. If you're migrating from IBC and "
-                    "depending on any of these, you'll need to stay on IBC "
-                    "for those specific behaviors:")
+                    "depending on any of these, USE_IBG_CONTROLLER=no "
+                    "starts IBC instead, which has them:")
         for name, reason in hit:
             log.warning(f"  - {name}: {reason}")
 
