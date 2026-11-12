@@ -4,6 +4,20 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Documentation
+
+- README: a notice that the project is not affiliated with Interactive
+  Brokers and is used at your own risk.
+- README, 2FA: what keeping a TOTP secret in the container trades away
+  against IB Key, and `TWOFACTOR_CODE_FILE` as the way to pass it.
+- `docs/FROM_IBC.md`: ib_async's `Watchdog` needs an IBC installation;
+  what replaces it with ibg-controller.
+- `docs/UPGRADING.md`: a v0.17.0 note on the Ubuntu 26.04 base.
+- Dockerfile comment: an empty `CONTROLLER_HEALTH_SERVER_PORT` disables
+  `/health`; `0` does not.
+
 ## [0.17.0] - 2026-11-12
 
 ### Changed

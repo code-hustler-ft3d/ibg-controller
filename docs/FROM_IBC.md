@@ -326,6 +326,15 @@ same `config.ini` you were using before.
    password *before* the account locks out and escalate differently
    once it has.
 
+7. **ib_async's `Watchdog`**. `ib_async.Watchdog`, like ib_insync's
+   before it, starts and restarts Gateway through its `IBC` class,
+   which runs IBC's start scripts, so it needs an IBC installation.
+   With ibg-controller the container does that part: it logs in,
+   relaunches Gateway when it dies and recovers a lost session. Connect
+   with a plain `IB()` and reconnect when the API port comes back;
+   `/health` and the `ALERT_*` log lines say what the container is
+   doing in between.
+
 ## Questions / gotchas
 
 **Do I need to change my trading-client (gnzsnz-style socat port)

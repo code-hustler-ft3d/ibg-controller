@@ -21,6 +21,10 @@ clicking and typing.
   log tokens for paging.
 - **Signed releases.** Multi-arch images, cosign-signed, with an SBOM.
 
+> Not affiliated with or endorsed by Interactive Brokers. Automated
+> trading carries risk: use this at your own risk. The software comes
+> as is, without warranty (see [LICENSE](LICENSE)).
+
 **Coming from IBC?** IBC was retired on 1 September 2026 and its
 repository is archived. Your existing env vars from
 [gnzsnz's image](https://github.com/gnzsnz/ib-gateway-docker), like
@@ -138,6 +142,13 @@ real product.
   `TWOFACTOR_CODE` to the base32 secret from IBKR's authenticator
   setup. This is the only method a headless container can satisfy on
   its own.
+- **What TOTP in a container trades away.** The TOTP secret sits next
+  to the password, so whoever takes over the host has both factors. IB
+  Key keeps the second factor on your phone, at the cost of approving
+  each full login there. If you use TOTP, run it on a host only you
+  control and pass the secret as `TWOFACTOR_CODE_FILE` (a Docker
+  secret), which keeps it out of your compose file and out of
+  `docker inspect`.
 - **IB Key push** requires a human to tap approve on a phone. The
   controller will wait for that (leave `TWOFACTOR_CODE` unset), which
   is fine attended and a dead end for automation.

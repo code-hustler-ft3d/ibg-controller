@@ -81,7 +81,8 @@ COPY scripts/healthcheck.sh /home/ibgateway/scripts/healthcheck.sh
 # Default port for the /health HTTP server the controller starts in
 # main(). docker/run.sh offsets the paper instance to base+1 when
 # DUAL_MODE=yes so both controllers can bind in the same container.
-# Override with --env CONTROLLER_HEALTH_SERVER_PORT=0 to disable.
+# Override with --env CONTROLLER_HEALTH_SERVER_PORT= (empty) to disable;
+# 0 would bind a random port.
 ENV CONTROLLER_HEALTH_SERVER_PORT=8080 \
     CONTROLLER_HEALTH_SERVER_HOST=0.0.0.0
 
