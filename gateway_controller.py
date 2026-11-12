@@ -2710,6 +2710,7 @@ def _dismiss_late_disclaimer():
     LIST also reports buttons that sit hidden inside a showing window, so
     the click goes through CLICK_IN_WIN, which only clicks a button that is
     showing and enabled: this runs every few seconds for the whole session.
+    A listed label with no such button is passed over for the next one.
     A dialog closes when its button is clicked; a matching button that keeps
     coming back is something else, so after _LATE_DISCLAIMER_MAX_CLICKS
     clicks within _LATE_DISCLAIMER_WINDOW_SECONDS the controller stops
@@ -2724,34 +2725,35 @@ def _dismiss_late_disclaimer():
     except Exception as e:
         log.debug(f"Monitor: disclaimer check skipped: {type(e).__name__}: {e}")
         return None
-    for btn in SAFE_DISMISS_BUTTONS:
-        if btn in buttons:
-            now = time.monotonic()
-            _late_disclaimer_clicks[:] = [
-                t for t in _late_disclaimer_clicks
-                if now - t < _LATE_DISCLAIMER_WINDOW_SECONDS]
-            if len(_late_disclaimer_clicks) >= _LATE_DISCLAIMER_MAX_CLICKS:
-                if not _late_disclaimer_capped:
-                    _late_disclaimer_capped = True
-                    log.warning(
-                        f"Monitor: {btn!r} is still showing after "
-                        f"{_LATE_DISCLAIMER_MAX_CLICKS} clicks in "
-                        f"{_LATE_DISCLAIMER_WINDOW_SECONDS // 60} min; leaving "
-                        "it for the operator (VNC)")
-                return None
-            _late_disclaimer_capped = False
-            if agent_click_in_window("", btn, quiet=True):
-                _late_disclaimer_clicks.append(now)
-                log.warning(f"Monitor: clicked {btn!r} on a disclaimer that "
-                            "appeared after the post-login check")
-                return btn
-            return None
+    present = [btn for btn in SAFE_DISMISS_BUTTONS if btn in buttons]
+    if not present:
+        return None
+    now = time.monotonic()
+    _late_disclaimer_clicks[:] = [
+        (t, label) for t, label in _late_disclaimer_clicks
+        if now - t < _LATE_DISCLAIMER_WINDOW_SECONDS]
+    if len(_late_disclaimer_clicks) >= _LATE_DISCLAIMER_MAX_CLICKS:
+        if not _late_disclaimer_capped:
+            _late_disclaimer_capped = True
+            log.warning(
+                f"Monitor: {_late_disclaimer_clicks[-1][1]!r} is still showing after "
+                f"{_LATE_DISCLAIMER_MAX_CLICKS} clicks in "
+                f"{_LATE_DISCLAIMER_WINDOW_SECONDS // 60} min; leaving "
+                "it for the operator (VNC)")
+        return None
+    _late_disclaimer_capped = False
+    for btn in present:
+        if agent_click_in_window("", btn, quiet=True):
+            _late_disclaimer_clicks.append((now, btn))
+            log.warning(f"Monitor: clicked {btn!r} on a disclaimer that "
+                        "appeared after the post-login check")
+            return btn
     return None
 
 
 _LATE_DISCLAIMER_MAX_CLICKS = 3
 _LATE_DISCLAIMER_WINDOW_SECONDS = 600
-_late_disclaimer_clicks = []
+_late_disclaimer_clicks = []     # (monotonic time, label) of recent clicks
 _late_disclaimer_capped = False
 
 

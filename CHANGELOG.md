@@ -10,8 +10,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 - **A paper-trading disclaimer that appeared after the post-login check
   stayed up, and Gateway refused every API client with Error 10141
-  (issue #81).** On a cold start the disclaimer can appear a few
-  seconds after the controller has looked for it and found nothing. The
+  (issue #81).** On a cold start the disclaimer can appear after
+  the controller has looked for it and found nothing. The
   API port is already open, so the controller reported READY and went
   on to MONITORING, but each client got `Paper trading disclaimer must
   first be accepted for API connection` until the container was

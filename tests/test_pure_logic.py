@@ -1358,6 +1358,39 @@ class TestDismissLateDisclaimer(unittest.TestCase):
         self.assertEqual(results[:3], ["Acknowledge"] * 3)
         self.assertEqual(results[3:], [None] * 5)
 
+    def test_a_label_with_no_showing_button_is_passed_over(self):
+        # "I Accept" is listed but hidden (the agent refuses the click); the
+        # disclaimer on screen has the next label.
+        with patch.object(gc, "TRADING_MODE", "paper"), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", ("I Accept", "Acknowledge")), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list",
+                          return_value=(set(), {"I Accept", "Acknowledge"})), \
+             patch.object(gc, "agent_click_in_window",
+                          side_effect=[False, True]) as click:
+            self.assertEqual(gc._dismiss_late_disclaimer(), "Acknowledge")
+        self.assertEqual([c.args[1] for c in click.call_args_list],
+                         ["I Accept", "Acknowledge"])
+        self.assertEqual(len(self.clicks), 1)
+
+    def test_the_warning_names_the_button_that_was_clicked(self):
+        # Not the first listed label, which here is one that isn't showing.
+        with patch.object(gc, "TRADING_MODE", "paper"), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", ("I Accept", "Acknowledge")), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list",
+                          return_value=(set(), {"I Accept", "Acknowledge"})), \
+             patch.object(gc, "agent_click_in_window",
+                          side_effect=lambda title, btn, quiet: btn == "Acknowledge"), \
+             self.assertLogs(gc.log, level="WARNING") as logs:
+            for _ in range(4):
+                gc._dismiss_late_disclaimer()
+        left = [l for l in logs.output if "leaving it for the operator" in l]
+        self.assertEqual(len(left), 1)
+        self.assertIn("'Acknowledge' is still showing after 3 clicks in 10 min", left[0])
+
     def test_failed_click_is_not_reported_as_dismissed(self):
         result, _, _, out = self._call(buttons={"I understand and accept"},
                                        click_ok=False)
