@@ -669,19 +669,23 @@ def agent_settext_in_window(title_substring, text):
     return False
 
 
-def agent_click_in_window(title_substring, button_text):
+def agent_click_in_window(title_substring, button_text, quiet=False):
     """Click a button (matched by getText() or accessible name) inside
     a window whose title contains the substring. Used for dialogs whose
-    button identifiers overlap with main window buttons."""
+    button identifiers overlap with main window buttons. Only a button
+    that is showing and enabled is clicked; an empty substring searches
+    every showing window, modal dialogs first. ``quiet`` as for
+    agent_click."""
+    level = log.debug if quiet else log.error
     try:
         resp = _agent_request(f"CLICK_IN_WIN {title_substring}|{button_text}")
     except Exception as e:
-        log.error(_redact_logs(
+        level(_redact_logs(
             f"agent CLICK_IN_WIN {title_substring!r}: {type(e).__name__}: {e}"))
         return False
     if resp.startswith("OK"):
         return True
-    log.error(_redact_logs(f"agent CLICK_IN_WIN {title_substring!r}: {resp}"))
+    level(_redact_logs(f"agent CLICK_IN_WIN {title_substring!r}: {resp}"))
     return False
 
 
@@ -2688,6 +2692,69 @@ def _resolve_safe_dismiss_buttons():
 
 
 SAFE_DISMISS_BUTTONS = _resolve_safe_dismiss_buttons()
+
+
+def _dismiss_late_disclaimer():
+    """Paper mode: click a disclaimer that appeared after the post-login check.
+
+    Issue #81: on a cold start the paper-trading disclaimer can appear after
+    dismiss_post_login_disclaimers has looked and found nothing. The API port
+    is already open, so the controller reports READY, but Gateway refuses
+    every API client with Error 10141 ("Paper trading disclaimer must first
+    be accepted") until someone accepts it. The monitor loop calls this on
+    every pass, so a late disclaimer is clicked within seconds.
+
+    Same allowlist as the post-login check, one click per call. Live mode is
+    left alone: Error 10141 is the paper disclaimer, and a dialog that appears
+    mid-session in a live account stays up for the operator to read.
+    LIST also reports buttons that sit hidden inside a showing window, so
+    the click goes through CLICK_IN_WIN, which only clicks a button that is
+    showing and enabled: this runs every few seconds for the whole session.
+    A listed label with no such button is passed over for the next one.
+    A dialog closes when its button is clicked; a matching button that keeps
+    coming back is something else, so after _LATE_DISCLAIMER_MAX_CLICKS
+    clicks within _LATE_DISCLAIMER_WINDOW_SECONDS the controller stops
+    clicking and says so; it tries again once the oldest of those clicks
+    has aged out of the window. Returns the button clicked, or None.
+    """
+    global _late_disclaimer_capped
+    if TRADING_MODE != "paper":
+        return None
+    try:
+        _, buttons = agent_list()
+    except Exception as e:
+        log.debug(f"Monitor: disclaimer check skipped: {type(e).__name__}: {e}")
+        return None
+    present = [btn for btn in SAFE_DISMISS_BUTTONS if btn in buttons]
+    if not present:
+        return None
+    now = time.monotonic()
+    _late_disclaimer_clicks[:] = [
+        (t, label) for t, label in _late_disclaimer_clicks
+        if now - t < _LATE_DISCLAIMER_WINDOW_SECONDS]
+    if len(_late_disclaimer_clicks) >= _LATE_DISCLAIMER_MAX_CLICKS:
+        if not _late_disclaimer_capped:
+            _late_disclaimer_capped = True
+            log.warning(
+                f"Monitor: {_late_disclaimer_clicks[-1][1]!r} is still showing after "
+                f"{_LATE_DISCLAIMER_MAX_CLICKS} clicks in "
+                f"{_LATE_DISCLAIMER_WINDOW_SECONDS // 60} min; leaving "
+                "it for the operator (VNC)")
+        return None
+    _late_disclaimer_capped = False
+    for btn in present:
+        if agent_click_in_window("", btn, quiet=True):
+            _late_disclaimer_clicks.append((now, btn))
+            log.warning(f"Monitor: clicked {btn!r} on a disclaimer that "
+                        "appeared after the post-login check")
+            return btn
+    return None
+
+
+_LATE_DISCLAIMER_MAX_CLICKS = 3
+_LATE_DISCLAIMER_WINDOW_SECONDS = 600
+_late_disclaimer_clicks = []     # (monotonic time, label) of recent clicks
+_late_disclaimer_capped = False
 
 
 def api_port_for_mode():
@@ -6996,6 +7063,8 @@ def monitor_loop(app):
       - Heartbeat the API port; if it closes, check for a re-auth dialog
       - If a re-auth dialog is up (daily restart, session expiry), re-drive
         the full login flow
+      - Paper mode: click a disclaimer that appeared after the post-login
+        check (issue #81)
 
     The heartbeat runs every HEARTBEAT_INTERVAL seconds. Three consecutive
     port-closed heartbeats trigger a re-auth check. This tolerates brief
@@ -7200,6 +7269,7 @@ def monitor_loop(app):
                         consecutive_failures = 0
                         wedged_failures = 0
 
+        _dismiss_late_disclaimer()
         _sleep_watching_incoming(5)
 
 

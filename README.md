@@ -426,6 +426,14 @@ halt says what to fix. VNC stays reachable, and if you finish the
 login by hand within 300 s of the failure the controller picks the
 session up and carries on.
 
+**Paper API clients get `Error 10141: Paper trading disclaimer must
+first be accepted`.** Gateway's paper-trading disclaimer is still up.
+It can appear after the controller's post-login check, with the API
+port already open. From v0.16.4 the controller clicks it while
+monitoring in paper mode and logs `Monitor: clicked 'I understand and
+accept' on a disclaimer that appeared after the post-login check`.
+On earlier versions, accept it over VNC or restart the container.
+
 **"Existing session detected" loops forever.** Something else keeps
 logging in as the same account (another container, TWS on your
 desktop, Client Portal on the web, the mobile app). Shut the other

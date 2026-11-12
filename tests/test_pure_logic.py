@@ -1277,6 +1277,127 @@ class TestResolveSafeDismissButtons(unittest.TestCase):
         self.assertEqual(extras, ("Continue", "Foo"))
 
 
+class TestDismissLateDisclaimer(unittest.TestCase):
+    """Issue #81: the monitor loop clicks a disclaimer that appeared after
+    the post-login check, in paper mode only, from the same allowlist."""
+
+    def setUp(self):
+        self.clicks = []
+
+    def _call(self, mode="paper", buttons=(), click_ok=True, list_error=None,
+              allow=("I understand and accept", "Acknowledge")):
+        listing = MagicMock(side_effect=list_error) if list_error else \
+            MagicMock(return_value=(set(), set(buttons)))
+        with patch.object(gc, "TRADING_MODE", mode), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", tuple(allow)), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list", listing), \
+             patch.object(gc, "agent_click_in_window", return_value=click_ok) as click, \
+             self.assertLogs(gc.log, level="DEBUG") as logs:
+            gc.log.debug("start")
+            result = gc._dismiss_late_disclaimer()
+        return result, listing, click, logs.output
+
+    def test_paper_clicks_the_disclaimer_and_says_so(self):
+        result, _, click, out = self._call(buttons={"I understand and accept"})
+        self.assertEqual(result, "I understand and accept")
+        # Any showing window; the agent skips hidden or disabled buttons.
+        click.assert_called_once_with("", "I understand and accept", quiet=True)
+        self.assertTrue(any("WARNING" in l and "after the post-login check" in l
+                            for l in out))
+
+    def test_allowlist_order_decides_and_one_click_per_pass(self):
+        result, _, click, _ = self._call(
+            buttons={"Acknowledge", "I understand and accept"})
+        self.assertEqual(result, "I understand and accept")
+        self.assertEqual(click.call_count, 1)
+
+    def test_bypass_warning_entries_are_honoured(self):
+        result, _, _, _ = self._call(buttons={"Got it"},
+                                     allow=("I understand and accept", "Got it"))
+        self.assertEqual(result, "Got it")
+
+    def test_buttons_outside_the_allowlist_are_never_clicked(self):
+        result, _, click, _ = self._call(buttons={"OK", "Cancel", "Log Out"})
+        self.assertIsNone(result)
+        click.assert_not_called()
+
+    def test_live_mode_does_not_look(self):
+        result, listing, click, _ = self._call(
+            mode="live", buttons={"I understand and accept"})
+        self.assertIsNone(result)
+        listing.assert_not_called()
+        click.assert_not_called()
+
+    def test_agent_error_is_swallowed(self):
+        result, _, click, _ = self._call(list_error=ConnectionRefusedError())
+        self.assertIsNone(result)
+        click.assert_not_called()
+
+    def test_a_button_that_keeps_coming_back_is_left_after_three_clicks(self):
+        clock = {"t": 1000.0}
+        with patch.object(gc.time, "monotonic", side_effect=lambda: clock["t"]), \
+             patch.object(gc, "TRADING_MODE", "paper"), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", ("Acknowledge",)), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list",
+                          return_value=(set(), {"Acknowledge"})), \
+             patch.object(gc, "agent_click_in_window", return_value=True) as click, \
+             self.assertLogs(gc.log, level="WARNING") as logs:
+            results = []
+            for _ in range(8):                 # 8 passes, 5 s apart
+                results.append(gc._dismiss_late_disclaimer())
+                clock["t"] += 5
+            self.assertEqual(click.call_count, 3)
+            self.assertEqual(sum("leaving it for the operator" in l
+                                 for l in logs.output), 1)
+            clock["t"] += gc._LATE_DISCLAIMER_WINDOW_SECONDS   # window passes
+            self.assertEqual(gc._dismiss_late_disclaimer(), "Acknowledge")
+        self.assertEqual(results[:3], ["Acknowledge"] * 3)
+        self.assertEqual(results[3:], [None] * 5)
+
+    def test_a_label_with_no_showing_button_is_passed_over(self):
+        # "I Accept" is listed but hidden (the agent refuses the click); the
+        # disclaimer on screen has the next label.
+        with patch.object(gc, "TRADING_MODE", "paper"), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", ("I Accept", "Acknowledge")), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list",
+                          return_value=(set(), {"I Accept", "Acknowledge"})), \
+             patch.object(gc, "agent_click_in_window",
+                          side_effect=[False, True]) as click:
+            self.assertEqual(gc._dismiss_late_disclaimer(), "Acknowledge")
+        self.assertEqual([c.args[1] for c in click.call_args_list],
+                         ["I Accept", "Acknowledge"])
+        self.assertEqual(len(self.clicks), 1)
+
+    def test_the_warning_names_the_button_that_was_clicked(self):
+        # Not the first listed label, which here is one that isn't showing.
+        with patch.object(gc, "TRADING_MODE", "paper"), \
+             patch.object(gc, "SAFE_DISMISS_BUTTONS", ("I Accept", "Acknowledge")), \
+             patch.object(gc, "_late_disclaimer_clicks", self.clicks), \
+             patch.object(gc, "_late_disclaimer_capped", False), \
+             patch.object(gc, "agent_list",
+                          return_value=(set(), {"I Accept", "Acknowledge"})), \
+             patch.object(gc, "agent_click_in_window",
+                          side_effect=lambda title, btn, quiet: btn == "Acknowledge"), \
+             self.assertLogs(gc.log, level="WARNING") as logs:
+            for _ in range(4):
+                gc._dismiss_late_disclaimer()
+        left = [l for l in logs.output if "leaving it for the operator" in l]
+        self.assertEqual(len(left), 1)
+        self.assertIn("'Acknowledge' is still showing after 3 clicks in 10 min", left[0])
+
+    def test_failed_click_is_not_reported_as_dismissed(self):
+        result, _, _, out = self._call(buttons={"I understand and accept"},
+                                       click_ok=False)
+        self.assertIsNone(result)
+        self.assertFalse(any("WARNING" in l for l in out))
+
+
 class TestShutdownAlert(unittest.TestCase):
     """v0.5.2: shutdown() emits ALERT_SHUTDOWN with a documented format.
 
@@ -2553,6 +2674,35 @@ class TestLoginButtonLabels(unittest.TestCase):
             self.assertEqual(gc._login_button_labels()[0], "Log In")
 
 
+class TestAgentClickInWindowQuiet(unittest.TestCase):
+    """quiet=True on agent_click_in_window: a miss logs DEBUG, not ERROR,
+    because the monitor loop's disclaimer check calls it every few seconds."""
+
+    def _miss(self, quiet, **req):
+        with patch.object(gc, "_agent_request", **req), \
+             patch.object(gc.log, "error") as err, \
+             patch.object(gc.log, "debug") as dbg:
+            self.assertFalse(gc.agent_click_in_window("", "I Accept", quiet=quiet))
+        return err, dbg
+
+    def test_failure_logs_error_by_default(self):
+        err, dbg = self._miss(False, return_value="ERR not_found")
+        err.assert_called_once()
+        dbg.assert_not_called()
+
+    def test_quiet_failure_and_exception_log_debug(self):
+        for req in ({"return_value": "ERR not_found"},
+                    {"side_effect": OSError("boom")}):
+            err, dbg = self._miss(True, **req)
+            err.assert_not_called()
+            dbg.assert_called_once()
+
+    def test_sends_an_empty_title_for_any_window(self):
+        with patch.object(gc, "_agent_request", return_value="OK") as req:
+            self.assertTrue(gc.agent_click_in_window("", "I Accept", quiet=True))
+        req.assert_called_once_with("CLICK_IN_WIN |I Accept")
+
+
 class TestAgentClickQuiet(unittest.TestCase):
     """quiet=True demotes an expected miss to DEBUG so routine probes
     don't look like failures; real failures must stay at ERROR."""
@@ -2850,6 +3000,7 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         cfg = dict(
             age=1.0, new_pid=5020, alive=True, port_open=True,
             texts=set(), buttons=set(), redrive=True, login_state=None,
+            maintenance=False,
         )
         cfg.update(overrides)
         stack = [
@@ -2866,6 +3017,10 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
             patch.object(gc, "signal_ready"),
             patch.object(gc, "agent_login_state",
                          return_value=cfg["login_state"]),
+            # The real check reads the clock: between 23:30 and 02:00 ET
+            # every re-drive would sit out the 8-minute maintenance delay.
+            patch.object(gc, "_is_ibkr_maintenance_window",
+                         return_value=cfg["maintenance"]),
         ]
         return stack
 
@@ -3061,9 +3216,8 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         # Adoption itself needs no auth, so it runs ahead of the v0.5.10
         # guard — but this branch does re-auth, inside the window where
         # IBKR's auth server is still draining.
-        stack = self._adopting(port_open=False, texts={"Username"})
-        stack.append(patch.object(gc, "_is_ibkr_maintenance_window",
-                                  return_value=True))
+        stack = self._adopting(port_open=False, texts={"Username"},
+                               maintenance=True)
         stack.append(patch.object(gc, "_apply_maintenance_recovery_delay"))
         result, mocks = self._run(stack)
         self.assertTrue(result)

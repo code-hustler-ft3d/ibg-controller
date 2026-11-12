@@ -4,6 +4,25 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **A paper-trading disclaimer that appeared after the post-login check
+  stayed up, and Gateway refused every API client with Error 10141
+  (issue #81).** On a cold start the disclaimer can appear after
+  the controller has looked for it and found nothing. The
+  API port is already open, so the controller reported READY and went
+  on to MONITORING, but each client got `Paper trading disclaimer must
+  first be accepted for API connection` until the container was
+  restarted. In paper mode the monitor loop now looks for the same
+  disclaimer buttons on every pass (every 5 s), using the allowlist the
+  post-login check uses, `BYPASS_WARNING` additions included. It clicks
+  only a button that is showing and enabled, at most 3 times in 10
+  minutes, and logs
+  `Monitor: clicked 'I understand and accept' on a disclaimer that
+  appeared after the post-login check`. Live mode is unchanged.
+
 ## [0.16.3] - 2026-10-27
 
 ### Fixed
