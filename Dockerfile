@@ -73,9 +73,10 @@ COPY dist/gateway_controller.py  /home/ibgateway/scripts/gateway_controller.py
 # readiness signal, then brings up socat port forwarding.
 COPY docker/run.sh /home/ibgateway/scripts/run.sh
 
-# Healthcheck shim — curls the controller's /health endpoint on the
-# configured port (and on the paper-side offset port when DUAL_MODE=yes).
-# Used by the HEALTHCHECK directive below.
+# Healthcheck: asks the controller's /health on the configured port. With
+# TRADING_MODE=both it asks paper's port too and prints its state, but the
+# status follows live unless HEALTHCHECK_PAPER=yes. Used by the HEALTHCHECK
+# directive below.
 COPY scripts/healthcheck.sh /home/ibgateway/scripts/healthcheck.sh
 
 # Default port for the /health HTTP server the controller starts in
