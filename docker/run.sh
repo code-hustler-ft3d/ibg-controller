@@ -458,6 +458,15 @@ fi
 #####		Paper, Live or both start process
 ###############################################################################
 
+# With two modes, say what the Docker health status covers. Asked of the
+# healthcheck itself, before the block below rewrites TRADING_MODE and
+# DUAL_MODE, so this line and the check read the container's environment
+# the same way.
+if [ "$USE_IBG_CONTROLLER" = "yes" ] && [ -n "${CONTROLLER_HEALTH_SERVER_PORT:-}" ] &&
+	[ -x "${SCRIPT_PATH}/healthcheck.sh" ]; then
+	"${SCRIPT_PATH}/healthcheck.sh" --explain || true
+fi
+
 if [ "$TRADING_MODE" == "both" ] || [ "$DUAL_MODE" == "yes" ]; then
 	# start live and paper
 	DUAL_MODE=yes

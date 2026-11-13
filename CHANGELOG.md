@@ -27,6 +27,17 @@ and the project follows [Semantic Versioning](https://semver.org/).
   now stops the container with `USE_IBG_CONTROLLER='...' is not a value
   this image understands`.
 
+### Added
+
+- `HEALTHCHECK_PAPER=yes`: with `TRADING_MODE=both`, the Docker health
+  status goes unhealthy when paper is not ready, as well as live. It is
+  off unless set.
+- The healthcheck prints one line per mode with the state `/health`
+  reported (`live: healthy (MONITORING)`,
+  `paper: not healthy (state HALTED, HTTP 503)`). Docker keeps the lines
+  in the container's health log, and `run.sh` logs at start-up whether
+  paper counts.
+
 ### Fixed
 
 - **The Docker healthcheck failed for good on the IBC path.** It asks the
@@ -35,6 +46,14 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - `docker stop` removes the per-mode readiness files
   (`/tmp/gateway_ready_live`, `/tmp/gateway_ready_paper`), not only the
   old single-mode name.
+- The healthcheck documentation said a two-mode container goes unhealthy
+  when either mode is down. With `TRADING_MODE=both` it has only ever
+  followed live: the check looked for `DUAL_MODE=yes` in the container's
+  environment, which `run.sh` sets for its own processes only. The
+  status still follows live, so no container changes health over this,
+  and the documentation now says so. Paper is asked and reported, and
+  counts with `HEALTHCHECK_PAPER=yes`. A container started with
+  `DUAL_MODE=yes` in its own environment counts paper as before.
 
 ### Documentation
 

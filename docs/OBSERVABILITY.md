@@ -1025,13 +1025,31 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=3 \
     CMD /home/ibgateway/scripts/healthcheck.sh
 ```
 
-`scripts/healthcheck.sh` curls `/health` on
-`CONTROLLER_HEALTH_SERVER_PORT` (default `8080`). Under `DUAL_MODE=yes`
-it also curls the paper-offset port (`8081`), and **either side being
-unhealthy marks the container unhealthy**. This is deliberate: in
-dual-mode you probably want to know if live is logged in but paper
-isn't, rather than have the container appear healthy just because one
-side is up.
+`scripts/healthcheck.sh` asks `/health` on
+`CONTROLLER_HEALTH_SERVER_PORT` (default `8080`) and prints one line with
+the answer. Anything but a 2xx marks the container unhealthy.
+
+**With `TRADING_MODE=both` the status follows live.** Paper's `/health`
+(`8081`) is asked as well and its state is printed, but a paper fault on
+its own leaves the container healthy:
+
+```console
+$ docker inspect --format '{{json .State.Health}}' <container> | jq -r '.Log[-1].Output'
+live: healthy (MONITORING)
+paper: not healthy (state HALTED, HTTP 503)
+paper is not counted in the health status (HEALTHCHECK_PAPER=yes makes it count)
+```
+
+The reason is what acts on the status. An autoheal sidecar, Swarm or a
+"restart unhealthy" monitor restarts the whole container, so counting
+paper would log live out, and in again, to fix a paper problem. To watch
+paper, read the health log above, probe `8081` yourself, or follow the
+`[paper]` lines and `ALERT_` tokens in the container log.
+
+Set `HEALTHCHECK_PAPER=yes` to make paper count: the container is then
+unhealthy when either mode is not ready. That suits a setup where nothing
+restarts on the status and you want `docker ps` to show a paper fault.
+`run.sh` logs which of the two applies when a two-mode container starts.
 
 `--start-period=180s` gives the initial login pipeline (launch JVM,
 discover the AT-SPI tree, click through the login dialog, possibly
@@ -1050,6 +1068,7 @@ set `--no-healthcheck` at runtime or patch the Dockerfile.
 | Var | Default | Notes |
 |---|---|---|
 | `CONTROLLER_HEALTH_SERVER_PORT` | `8080` (in the shipped image), unset (source checkout) | TCP port to listen on. In `DUAL_MODE=yes`, paper auto-offsets to `port+1`. Set to empty to disable the health server entirely. |
+| `HEALTHCHECK_PAPER` | unset | With `TRADING_MODE=both`: `yes` makes the Docker health status unhealthy when paper is not ready, as well as live. Unset or `no`: the status follows live and paper's state is only printed in the health log. A value that is neither is treated as `no`, with a warning in the start-up log and the health log. No effect with one mode. |
 | `CONTROLLER_HEALTH_SERVER_HOST` | `0.0.0.0` (in the shipped image), `0.0.0.0` (code default) | Bind address. `0.0.0.0` is required for Docker port mapping to work; restrict external exposure with `-p 127.0.0.1:8080:8080` on the host side, not the container-internal bind. |
 | `JVM_TEARDOWN_GRACE_SECONDS` | `30` | Seconds to wait for Gateway JVM to exit after `SIGTERM` during a *mid-life* restart before escalating to `SIGKILL`. Bump to 60 if `ALERT_JVM_UNCLEAN_SHUTDOWN` is frequent — Gateway's shutdown hooks may need more time under resource pressure. Distinct from the 15s lifecycle-shutdown window in the SIGTERM handler. Added v0.5.5. |
 | `CCP_COOLDOWN_SECONDS` | `1200` | Base duration (seconds) of the silent cool-down applied before a mid-life JVM restart after a CCP lockout. This is the sleep time on the *first* restart attempt; subsequent attempts scale up via `CCP_COOLDOWN_MULTIPLIER`. |
