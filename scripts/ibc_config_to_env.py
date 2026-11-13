@@ -116,7 +116,7 @@ INFORMATIONAL: Dict[str, str] = {
 # IBC keys with no controller equivalent.
 UNSUPPORTED: Dict[str, str] = {
     "FIX":
-        "FIX CTCI mode isn't supported — stay on IBC for FIX flows",
+        "FIX CTCI mode isn't supported — USE_IBG_CONTROLLER=no keeps IBC for FIX flows",
     "FIXLoginId":
         "FIX CTCI mode isn't supported",
     "FIXPassword":

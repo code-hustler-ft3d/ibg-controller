@@ -46,15 +46,16 @@ docker pull ghcr.io/code-hustler-ft3d/ibg-controller:latest
 docker run -d --name ibkr \
   --restart on-failure \
   --env-file /path/to/your/.env \
-  -e USE_IBG_CONTROLLER=yes \
   -e TRADING_MODE=paper \
   -e TWS_SERVER_PAPER=cdc1.ibllc.com \
   -p 127.0.0.1:4002:4004 \
   ghcr.io/code-hustler-ft3d/ibg-controller:latest
 ```
 
-`USE_IBG_CONTROLLER=yes` is required. Without it the image starts the
-IBC build that ships in its base image.
+From v0.18.0 the image runs ibg-controller unless you set
+`USE_IBG_CONTROLLER=no`, which starts the IBC build that ships in its
+base image. On v0.17.x and earlier it is the other way round: add
+`-e USE_IBG_CONTROLLER=yes`, or the image starts IBC.
 
 Set a restart policy. When the controller can't recover a login on its
 own it exits, and `on-failure` lets Docker start it again. Leave off the
@@ -89,7 +90,6 @@ services:
     environment:
       TRADING_MODE: paper
       TWS_SERVER_PAPER: cdc1.ibllc.com
-      USE_IBG_CONTROLLER: "yes"
       # ... your other env vars
 ```
 
@@ -230,7 +230,7 @@ real product.
 
 | Var | Notes |
 |---|---|
-| `USE_IBG_CONTROLLER` | `yes` runs ibg-controller. Unset, the image starts the IBC build from its base image instead. |
+| `USE_IBG_CONTROLLER` | Unset or `yes`: ibg-controller. `no`: the IBC build from the base image instead (IBC was retired on 1 September 2026, so that copy gets no updates). `true`/`1`/`on` and `false`/`0`/`off` mean the same; any other value stops the container with an error. Unset together with `CUSTOM_CONFIG=yes` (you maintain IBC's `config.ini` yourself) starts IBC and says so in the log. Before v0.18.0 only the exact value `yes` selected ibg-controller and everything else started IBC. |
 
 ### Credentials
 

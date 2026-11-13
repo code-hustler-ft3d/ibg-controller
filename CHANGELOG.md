@@ -4,6 +4,38 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **The image runs ibg-controller by default.** It used to start the IBC
+  build from its base image unless `USE_IBG_CONTROLLER` was exactly
+  `yes`. Now unset or `yes` runs ibg-controller and `no` runs IBC. IBC was
+  retired on 1 September 2026, so the copy in the image gets no further
+  updates. Setups that already set `USE_IBG_CONTROLLER=yes` are
+  unchanged. Setups that set nothing switch from IBC to ibg-controller,
+  which reads the same env vars; add `USE_IBG_CONTROLLER=no` to stay on
+  IBC. One exception: unset together with `CUSTOM_CONFIG=yes` (you
+  maintain IBC's `config.ini` yourself, and your credentials may be only
+  there) keeps starting IBC and logs a notice asking you to choose. The
+  first log lines name the choice: `Login automation: ibg-controller` or
+  `Login automation: IBC`. See `docs/UPGRADING.md`.
+- **`USE_IBG_CONTROLLER` accepts `true`/`1`/`on` and `false`/`0`/`off`,
+  in any case, with or without quotes or spaces.** Only the exact string
+  `yes` used to count, so `true`, or `"yes"` with its quotes from
+  `docker run --env-file`, started IBC without saying so. Any other value
+  now stops the container with `USE_IBG_CONTROLLER='...' is not a value
+  this image understands`.
+
+### Fixed
+
+- **The Docker healthcheck failed for good on the IBC path.** It asks the
+  controller's `/health`, which nothing serves when IBC runs. With
+  `USE_IBG_CONTROLLER=no` it now reports healthy without asking.
+- `docker stop` removes the per-mode readiness files
+  (`/tmp/gateway_ready_live`, `/tmp/gateway_ready_paper`), not only the
+  old single-mode name.
+
 ## [0.17.1] - 2026-11-13
 
 ### Added

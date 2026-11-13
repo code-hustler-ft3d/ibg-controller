@@ -8,7 +8,9 @@ image. If you're running vanilla IBC today, the swap requires:
 - Compiling and installing the controller in your Dockerfile (or
   downloading a release)
 - Setting one new env var (`TWS_SERVER`) for the bootstrap
-- Flipping one flag (`USE_IBG_CONTROLLER=yes`) at runtime
+- Nothing to switch on from v0.18.0: `run.sh` starts the controller
+  unless `USE_IBG_CONTROLLER=no` (earlier releases needed
+  `USE_IBG_CONTROLLER=yes`)
 
 Existing env vars (`TWS_USERID`, `TWS_PASSWORD`, `TRADING_MODE`,
 `TWOFACTOR_CODE`, `EXISTING_SESSION_DETECTED_ACTION`, etc.) work
@@ -75,9 +77,11 @@ The new runtime packages:
 
 ## What changes in `run.sh`
 
-The gnzsnz `run.sh` gains a branch: when `USE_IBG_CONTROLLER=yes`,
+The gnzsnz `run.sh` gains a branch: unless `USE_IBG_CONTROLLER=no`,
 start the window manager and launch the controller instead of IBC.
-When unset, fall through to the IBC path unchanged. Full diff:
+With `no`, the IBC path runs unchanged. `choose_login_automation`
+reads the setting once and leaves it as exactly `yes` or `no`. In
+outline:
 
 ```bash
 # New helper functions
@@ -111,8 +115,9 @@ closed port.
 
 ### New env vars
 
-- **`USE_IBG_CONTROLLER=yes`** — opts into the new path. Default
-  (unset) uses IBC as before. (Pre-v0.6.0 the toggle was named
+- **`USE_IBG_CONTROLLER`** — unset or `yes` runs the controller; `no`
+  runs IBC as before. Before v0.18.0 the default was IBC and only
+  `yes` selected the controller. (Pre-v0.6.0 the toggle was named
   `USE_PYATSPI2_CONTROLLER`; that alias was removed in v0.6.0 — see
   [`UPGRADING.md`](UPGRADING.md#v060) if you're migrating from
   v0.5.x.)
@@ -266,8 +271,9 @@ end-to-end before that release — see CHANGELOG.md).
 
 1. Build your Docker image with the new Dockerfile.
 2. Keep your existing `docker-compose.yml` — add
-   `USE_IBG_CONTROLLER: yes` and `TWS_SERVER: <your-server>` to the
-   environment section.
+   `TWS_SERVER: <your-server>` to the environment section. On a
+   release before v0.18.0 also add `USE_IBG_CONTROLLER: "yes"`, in
+   quotes: those releases accept only the exact string `yes`.
 3. Leave all existing env vars as-is.
 4. `docker compose up -d` and watch logs.
 5. Expected log sequence (single paper mode, no post-login config):
@@ -317,9 +323,10 @@ end-to-end before that release — see CHANGELOG.md).
 
 ## Rolling back
 
-If the controller fails for you, flip `USE_IBG_CONTROLLER` back to
-unset (or `no`). The image still contains IBC and all its dependencies.
-`run.sh`'s default branch uses IBC unchanged.
+If the controller fails for you, set `USE_IBG_CONTROLLER=no`. The
+image still contains IBC and all its dependencies, and `run.sh`'s `no`
+branch runs it unchanged. IBC was retired on 1 September 2026, so that
+copy gets no further updates. (Before v0.18.0, unset also meant IBC.)
 
 You can also run both side-by-side (two containers, one IBC, one
 controller) on different account credentials to compare behavior before
