@@ -27,6 +27,17 @@ and the project follows [Semantic Versioning](https://semver.org/).
   now stops the container with `USE_IBG_CONTROLLER='...' is not a value
   this image understands`.
 
+### Fixed
+
+- **The Docker healthcheck failed for good on the IBC path.** It asks the
+  controller's `/health`, which nothing serves when IBC runs. With
+  `USE_IBG_CONTROLLER=no` it now reports healthy without asking.
+- `docker stop` removes the per-mode readiness files
+  (`/tmp/gateway_ready_live`, `/tmp/gateway_ready_paper`), not only the
+  old single-mode name.
+
+## [0.17.1] - 2026-11-13
+
 ### Added
 
 - `HEALTHCHECK_PAPER=yes`: with `TRADING_MODE=both`, the Docker health
@@ -40,12 +51,6 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- **The Docker healthcheck failed for good on the IBC path.** It asks the
-  controller's `/health`, which nothing serves when IBC runs. With
-  `USE_IBG_CONTROLLER=no` it now reports healthy without asking.
-- `docker stop` removes the per-mode readiness files
-  (`/tmp/gateway_ready_live`, `/tmp/gateway_ready_paper`), not only the
-  old single-mode name.
 - The healthcheck documentation said a two-mode container goes unhealthy
   when either mode is down. With `TRADING_MODE=both` it has only ever
   followed live: the check looked for `DUAL_MODE=yes` in the container's
