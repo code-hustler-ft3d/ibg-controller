@@ -287,6 +287,7 @@ real product.
 |---|---|
 | `CONTROLLER_HEALTH_SERVER_PORT` | HTTP `/health` port (default `8080` in the shipped image; empty disables) |
 | `CONTROLLER_HEALTH_SERVER_HOST` | Bind address, default `0.0.0.0` |
+| `HEALTHCHECK_PAPER` | With `TRADING_MODE=both`, `yes` makes the Docker health status cover paper as well as live. Default: it follows live, and paper's state is printed in the health log |
 | `CCP_MAINTENANCE_RECOVERY_DELAY_SECONDS` | Delay before re-auth inside IBKR's nightly reset window (default `480`) |
 | `IBKR_RESET_WINDOWS` / `IBKR_RESET_TZ` | IBKR's daily reset window (default `23:30-02:00` `America/New_York`, covering the published North America resets and, most of the year, Europe's). Accounts hosted in Asia: set your region's times |
 | `UPSTREAM_DOWN_GRACE_SECONDS` | How long Gateway may report no connection to IBKR before `UPSTREAM_DOWN` (default `600`) |
@@ -310,6 +311,13 @@ real product.
 and last-auth timestamp — HTTP 200 when logged in and serving, 503
 otherwise. `GET /ready` is a process-liveness probe. The shipped
 Dockerfile wires this into a Docker `HEALTHCHECK`.
+
+With `TRADING_MODE=both`, live answers on `8080` and paper on `8081`,
+and the Docker health status follows live: a paper fault is printed in
+the health log (`docker inspect`) but does not turn the container
+unhealthy, so nothing that restarts unhealthy containers logs live out
+over it. `HEALTHCHECK_PAPER=yes` makes paper count too. Details in
+[docs/OBSERVABILITY.md](docs/OBSERVABILITY.md#docker-healthcheck).
 
 **Probe the published port, not 4001.** Clients reach Gateway through a
 socat forwarder on 4003 (live) and 4004 (paper). Gateway's own port can
