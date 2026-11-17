@@ -3000,7 +3000,7 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         cfg = dict(
             age=1.0, new_pid=5020, alive=True, port_open=True,
             texts=set(), buttons=set(), redrive=True, login_state=None,
-            maintenance=False,
+            maintenance=False, refused=None,
         )
         cfg.update(overrides)
         stack = [
@@ -3012,6 +3012,8 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
             patch.object(gc, "agent_list",
                          return_value=(cfg["texts"], cfg["buttons"])),
             patch.object(gc, "agent_windows", return_value=[]),
+            patch.object(gc, "_saved_session_refused_dialog",
+                         return_value=cfg["refused"]),
             patch.object(gc, "agent_click", return_value=True),
             patch.object(gc, "_redrive_login", return_value=cfg["redrive"]),
             patch.object(gc, "signal_ready"),
@@ -3324,6 +3326,278 @@ class TestAdoptSelfRestartedGateway(unittest.TestCase):
         self.assertIn("status=failed_api_timeout", text)
         self.assertIn("while Gateway was logging in with its saved session",
                       text)
+
+
+    # Issue #93: IBKR refused the session Gateway saved before its restart
+    # (weekly re-authentication, or the session ended overnight). Gateway
+    # says so in a modal dialog and keeps its login form disabled behind
+    # it, so a login on that Gateway waited 120 s and then fell back.
+
+    def test_refused_session_dialog_goes_straight_to_a_fresh_start(self):
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(port_open=False, texts={"Username", "Password"},
+                               login_state="ready", refused="IBKR Gateway")
+        t0 = time.monotonic()
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, mocks = self._run(stack)
+        self.assertFalse(result)
+        self.assertLess(time.monotonic() - t0, 2, "waited instead of returning")
+        mocks["_redrive_login"].assert_not_called()
+        mocks["agent_click"].assert_not_called()
+        # Still pointing at the adopted Gateway, so the fallback's
+        # teardown stops it before the fresh start.
+        self.assertIsInstance(gc.GATEWAY_PROC, gc._AdoptedProcess)
+        alert = [r for r in logs.records if "ALERT_AUTO_RESTART" in r.getMessage()]
+        self.assertEqual(len(alert), 1)
+        self.assertIn("status=session_expired", alert[0].getMessage())
+        self.assertIn("IBKR refused the session", alert[0].getMessage())
+        # Expected every week: not a warning.
+        self.assertEqual(alert[0].levelname, "INFO")
+
+    def test_refused_session_dialog_ends_the_wait_on_greyed_out_fields(self):
+        # Without the check this sits out the whole API timeout.
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(port_open=False, texts={"Username", "Password"},
+                               login_state="busy")
+        self._sequence(stack, "_saved_session_refused_dialog",
+                       [None, "IBKR Gateway"])
+        t0 = time.monotonic()
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, mocks = self._run(stack)
+        self.assertFalse(result)
+        self.assertLess(time.monotonic() - t0, 5)
+        mocks["_redrive_login"].assert_not_called()
+        text = "\n".join(logs.output)
+        self.assertIn("status=session_expired", text)
+        self.assertNotIn("failed_api_timeout", text)
+
+    def test_dialog_that_opens_after_the_login_started_is_named_too(self):
+        # The form read as ready, the login was started, and the dialog
+        # came up a moment later: the login fails fast (see
+        # TestWaitForLoginForm) and the reason is still the refused session.
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(port_open=False, texts={"Username", "Password"},
+                               login_state="ready", redrive=False)
+        self._sequence(stack, "_saved_session_refused_dialog",
+                       [None, None, "IBKR Gateway"])
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, mocks = self._run(stack)
+        self.assertFalse(result)
+        mocks["_redrive_login"].assert_called_once()
+        text = "\n".join(logs.output)
+        self.assertIn("status=session_expired", text)
+        self.assertNotIn("status=failed_login", text)
+
+    def test_failed_login_without_the_dialog_is_still_failed_login(self):
+        gc._AUTO_RESTART_API_TIMEOUT_SECONDS = 10
+        stack = self._adopting(port_open=False, texts={"Username", "Password"},
+                               login_state="ready", redrive=False)
+        with self.assertLogs(gc.log, level="INFO") as logs:
+            result, _ = self._run(stack)
+        self.assertFalse(result)
+        text = "\n".join(logs.output)
+        self.assertIn("status=failed_login", text)
+        self.assertNotIn("session_expired", text)
+
+    def test_session_carried_over_is_adopted_without_reading_dialogs_first(self):
+        # The port is checked before anything else: a good restart costs
+        # no extra agent requests.
+        result, mocks = self._run(self._adopting())
+        self.assertTrue(result)
+        mocks["_saved_session_refused_dialog"].assert_not_called()
+
+
+def _window_dump(*sections):
+    """A WINDOW reply as the agent writes it: one section per window."""
+    out = ["OK"]
+    for title, modal, lines in sections:
+        out.append(f"=== window={title} type={'JDialog' if modal else 'aw'} "
+                   f"modal={'true' if modal else 'false'} ===")
+        out.extend(lines)
+    out.append("END")
+    return "\n".join(out)
+
+
+# Gateway 10.50.1f, launcher key Session_expired_login_again, behind
+# "Connection to server failed" (Gateway_login_error), as the agent's
+# WINDOW dump shows it: tags stripped, cut at 200 characters.
+_REFUSED_TEXT = (
+    "Connection to server failed: The security tokens associated with your "
+    "login credentials have expired (routinely) in accordance with our "
+    "security protocols. Please manually enter your username and password "
+    "to access IB Gateway. Auto Restart Information")[:200] + "..."
+_LOGIN_FRAME = ("IBKR Gateway", False, [
+    'aw accName="IBKR Gateway"',
+    '      JTextField accName="Username"',
+    '      JPasswordField text="<redacted password len=0>"',
+    '      JButton text="Log In"'])
+
+
+def _modal(text, title="IBKR Gateway"):
+    return (title, True, [
+        f'JDialog accName="{title}"',
+        "  JRootPane",
+        "      JOptionPane",
+        f'        JTextPane text="{text}"',
+        '        JButton text="OK"'])
+
+
+class TestSavedSessionRefusedDialog(unittest.TestCase):
+    """_saved_session_refused_dialog finds Gateway's "security tokens ...
+    have expired" modal (issue #93) and nothing else."""
+
+    def _find(self, windows, dump=None, windows_exc=None, dump_exc=None):
+        with patch.object(gc, "agent_windows", return_value=windows,
+                          side_effect=windows_exc), \
+             patch.object(gc, "agent_window", return_value=dump,
+                          side_effect=dump_exc) as aw, \
+             patch.object(gc, "agent_click_in_window") as click, \
+             patch.object(gc, "agent_click") as click2, \
+             patch.object(gc, "agent_close_window") as close:
+            found = gc._saved_session_refused_dialog()
+        click.assert_not_called()
+        click2.assert_not_called()
+        close.assert_not_called()
+        return found, aw
+
+    _BOTH = [("aw", "IBKR Gateway", False), ("JDialog", "IBKR Gateway", True)]
+
+    def test_the_dialog_is_found_by_its_text(self):
+        found, _ = self._find(
+            self._BOTH, _window_dump(_LOGIN_FRAME, _modal(_REFUSED_TEXT)))
+        self.assertEqual(found, "IBKR Gateway")
+
+    def test_text_cut_at_200_characters_still_has_the_phrase(self):
+        self.assertLessEqual(len(_REFUSED_TEXT), 203)
+        self.assertRegex(_REFUSED_TEXT, gc._SAVED_SESSION_REFUSED_MATCH)
+
+    def test_line_breaks_inside_the_phrase_do_not_hide_it(self):
+        text = ("Connection to server failed: The security  tokens associated "
+                "with your login\tcredentials have   expired (routinely)")
+        found, _ = self._find(self._BOTH, _window_dump(_modal(text)))
+        self.assertEqual(found, "IBKR Gateway")
+
+    def test_no_modal_means_no_dump_is_asked_for(self):
+        found, aw = self._find([("aw", "IBKR Gateway", False)])
+        self.assertIsNone(found)
+        aw.assert_not_called()
+
+    def test_the_same_words_in_a_window_that_is_not_modal_do_not_count(self):
+        frame = ("IBKR Gateway", False, [f'JLabel text="{_REFUSED_TEXT}"'])
+        other = _modal("Connecting to server...", title="Gateway")
+        found, _ = self._find(
+            [("aw", "IBKR Gateway", False), ("JDialog", "Gateway", True)],
+            _window_dump(frame, other))
+        self.assertIsNone(found)
+
+    def test_other_gateway_error_dialogs_are_not_this_one(self):
+        for text in (
+            "Connection to server failed: Invalid username or password. "
+            "Please check the Caps Lock key; passwords are case sensitive.",
+            "Connection to server failed: javax.net.ssl.SSLHandshakeException",
+            "Your connection was lost. Would you like to re-login?",
+            "Your password will expire in 5 days.",
+            "Second Factor Authentication",
+        ):
+            with self.subTest(text=text):
+                found, _ = self._find(self._BOTH, _window_dump(_modal(text)))
+                self.assertIsNone(found)
+
+    def test_the_refused_session_is_not_read_as_a_wrong_password(self):
+        # "credentials have expired" must not trip the halt for rejected
+        # credentials.
+        self.assertFalse(gc._detect_bad_credentials(_REFUSED_TEXT))
+
+    def test_agent_errors_read_as_no_dialog(self):
+        self.assertIsNone(self._find(None, windows_exc=OSError("gone"))[0])
+        self.assertIsNone(
+            self._find(self._BOTH, dump_exc=TimeoutError("slow"))[0])
+
+
+class TestWaitForLoginForm(unittest.TestCase):
+    """_wait_for_login_form: the 120 s wait for a usable login form, cut
+    short when the dialog in front of it is the refused-session one."""
+
+    def _wait(self, frame, refused):
+        frame, refused = list(frame), list(refused)
+        fi, ri = iter(frame), iter(refused)
+        with patch.object(gc, "agent_wait_login_frame",
+                          side_effect=lambda **k: next(fi, frame[-1])) as awlf, \
+             patch.object(gc, "_saved_session_refused_dialog",
+                          side_effect=lambda: next(ri, refused[-1])) as dlg:
+            ok = gc._wait_for_login_form()
+        return ok, awlf, dlg
+
+    def test_form_ready_at_once(self):
+        ok, awlf, dlg = self._wait([True], [None])
+        self.assertTrue(ok)
+        self.assertEqual(awlf.call_count, 1)
+        dlg.assert_not_called()
+
+    def test_form_that_takes_a_while_is_still_waited_for(self):
+        # A Gateway that needs 12 s to draw its login window.
+        ok, awlf, _ = self._wait([False, False, True], [None])
+        self.assertTrue(ok)
+        self.assertEqual(awlf.call_count, 3)
+
+    def test_gives_up_after_the_same_120_seconds_as_before(self):
+        ok, awlf, dlg = self._wait([False], [None])
+        self.assertFalse(ok)
+        self.assertEqual(awlf.call_count, 24)
+        self.assertEqual(
+            sum(c.kwargs["timeout_ms"] for c in awlf.call_args_list), 120_000)
+        # Only the last slice reports the timeout as an error.
+        self.assertEqual([c.kwargs["quiet"] for c in awlf.call_args_list],
+                         [True] * 23 + [False])
+        self.assertEqual(dlg.call_count, 24)
+
+    def test_refused_session_dialog_ends_the_wait_after_one_slice(self):
+        with self.assertLogs(gc.log, level="WARNING") as logs:
+            ok, awlf, _ = self._wait([False], ["IBKR Gateway"])
+        self.assertFalse(ok)
+        self.assertEqual(awlf.call_count, 1)
+        self.assertIn("refused its saved session", "\n".join(logs.output))
+
+    def test_dialog_that_opens_mid_wait_ends_it_then(self):
+        ok, awlf, _ = self._wait([False], [None, None, "IBKR Gateway"])
+        self.assertFalse(ok)
+        self.assertEqual(awlf.call_count, 3)
+
+    def test_handle_login_reports_what_is_in_front_of_the_form(self):
+        windows = [("aw", "IBKR Gateway", False), ("JDialog", "Notice", True)]
+        dump = _window_dump(_LOGIN_FRAME, _modal("Something new from IBKR",
+                                                 title="Notice"))
+        with patch.object(gc, "agent_wait_login_frame", return_value=False), \
+             patch.object(gc, "agent_windows", return_value=windows), \
+             patch.object(gc, "agent_window", return_value=dump), \
+             patch.object(gc, "agent_settext_login_user") as user, \
+             self.assertLogs(gc.log, level="ERROR") as logs:
+            self.assertFalse(gc.handle_login(object()))
+        user.assert_not_called()
+        text = "\n".join(logs.output)
+        self.assertIn("Login dialog never appeared", text)
+        self.assertIn("('JDialog', 'Notice', True)", text)
+        self.assertIn("modal [Notice]", text)
+        self.assertIn("Something new from IBKR", text)
+        # The login frame's own section is not dumped.
+        self.assertNotIn("Log In", text)
+
+    def test_quiet_timeout_is_not_logged_as_an_error(self):
+        with patch.object(gc, "_agent_request", return_value="ERR timeout"), \
+             self.assertNoLogs(gc.log, level="ERROR"):
+            self.assertFalse(gc.agent_wait_login_frame(timeout_ms=5000,
+                                                       quiet=True))
+        with patch.object(gc, "_agent_request", return_value="ERR timeout"), \
+             self.assertLogs(gc.log, level="ERROR"):
+            self.assertFalse(gc.agent_wait_login_frame(timeout_ms=5000))
+
+    def test_unreachable_agent_is_reported_once_not_per_slice(self):
+        with patch.object(gc, "_agent_request",
+                          side_effect=FileNotFoundError("no socket")), \
+             patch.object(gc, "agent_windows", side_effect=OSError("gone")), \
+             self.assertLogs(gc.log, level="ERROR") as logs:
+            self.assertFalse(gc._wait_for_login_form())
+        self.assertEqual(len(logs.output), 1)
 
 
 class TestAgentLoginState(unittest.TestCase):

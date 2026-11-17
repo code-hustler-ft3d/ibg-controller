@@ -398,10 +398,20 @@ once per night per mode is the expected signal.
   restarting ...`, v0.16.3) and the API port opening ends in
   `status=adopted`.
 - On the night of IBKR's weekly full re-authentication the session is
-  *not* preserved: the login window is left waiting for credentials
-  and the controller drives the normal re-auth pipeline on it
-  (`status=adopted` with `reason="session not preserved; ..."`, and a
-  second factor is required as usual).
+  *not* preserved, and neither is one that ended before the restart
+  (Gateway lost its connection and was left at "Re-login is required",
+  issue #93). Gateway (checked on 10.50.1f) says so in a modal dialog, "Connection to
+  server failed: The security tokens associated with your login
+  credentials have expired (routinely) ...", and keeps its login form
+  disabled until the dialog is closed. The controller recognises the
+  dialog, stops the restarted instance and starts a fresh Gateway,
+  which logs in with a second factor as usual
+  (`status=session_expired`, v0.17.2). Before v0.17.2 it waited 120 s
+  for the login form first (`status=failed_login`).
+- Where the login window is simply left waiting for credentials, with
+  no dialog in front, the controller drives the normal re-auth
+  pipeline on it (`status=adopted` with `reason="session not
+  preserved; ..."`, and a second factor is required as usual).
 
 ### Root cause
 
