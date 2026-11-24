@@ -44,7 +44,7 @@ docker run --rm --platform linux/arm64 \
     -e VNC_SERVER_PASSWORD=changeme \
     -p 127.0.0.1:5900:5900 \
     -v gateway-jts:/home/ibgateway/Jts \
-    ghcr.io/gnzsnz/ib-gateway:latest
+    ghcr.io/code-hustler-ft3d/ibg-controller:latest
 ```
 
 Connect with a VNC client to `localhost:5900`, log in manually (including

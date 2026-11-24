@@ -2,7 +2,17 @@
 
 This document covers swapping IBC for `ibg-controller` inside a
 [gnzsnz/ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker)-style
-image. If you're running vanilla IBC today, the swap requires:
+image of your own. The ibg-controller release image needs none of it:
+it is built from this repository's [`Dockerfile`](../Dockerfile), which
+installs Gateway from IBKR's installer.
+
+It applies to images that run IBC. gnzsnz's own image is moving from IBC
+to a different controller, not before 10 January 2027, with renamed env
+vars and scripts
+([their migration guide](https://github.com/gnzsnz/ib-gateway-docker/discussions/468));
+the steps below fit their images published before that change.
+
+If you're running vanilla IBC today, the swap requires:
 
 - Adding a couple of runtime packages to your Docker image
 - Compiling and installing the controller in your Dockerfile (or

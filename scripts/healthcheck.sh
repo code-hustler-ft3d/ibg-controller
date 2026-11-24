@@ -18,7 +18,7 @@
 set -eu
 
 # On the IBC path there is no controller and so no /health to ask: report
-# healthy, as the base image (which has no HEALTHCHECK) effectively does.
+# healthy, as an image with no HEALTHCHECK effectively does.
 # The value is read the way docker/run.sh's choose_login_automation reads
 # it; tests/test_run_sh.py keeps the two in step.
 uic=$(printf '%s' "${USE_IBG_CONTROLLER-}" | tr '[:upper:]' '[:lower:]' | tr -d ' \t"'"'")

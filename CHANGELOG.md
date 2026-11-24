@@ -4,6 +4,47 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **The image is built from Ubuntu and IBKR's own Gateway installer.**
+  Up to v0.18.x it was built on gnzsnz's `ib-gateway` image. That image
+  is moving from IBC to a different controller, with renamed env vars
+  and without the scripts this image starts from, so builds on it would
+  stop working. The `Dockerfile` now installs Gateway itself, the same
+  way: the same Ubuntu release (26.04), packages, user (`ibgateway`,
+  1000:1000), paths and env var names, and the same start-up scripts,
+  which are now in this repository (`docker/common.sh`,
+  `docker/run_socat.sh`, `docker/run_ssh.sh`; from
+  gnzsnz/ib-gateway-docker, MIT). IBC 3.24.2 is still in the image for
+  `USE_IBG_CONTROLLER=no`. Containers need no changes.
+- **The image and files the build downloads are pinned.** Ubuntu by
+  image digest; IBKR's installer by SHA-256, one per architecture; IBC's
+  release archive and its `config.ini` template by SHA-256. The build
+  stops on a file that doesn't match. Ubuntu's packages are installed at
+  their current versions, as before. IBKR's download URL serves only the
+  current build of a
+  channel, so the installers are kept, as IBKR served them, under the
+  repository's `build-inputs` release, and the build reads them from
+  there.
+- **Gateway 10.50.1h** (from 10.50.1g).
+- **`UPSTREAM_IMAGE` is no longer a build argument.** To build with
+  another Gateway version, pass `IB_GATEWAY_VERSION`,
+  `IB_GATEWAY_SHA256_X64` and `IB_GATEWAY_SHA256_ARM`, and
+  `IB_GATEWAY_INSTALLER_URL` if the installers are somewhere else. See
+  the top of the `Dockerfile` and `docs/FROM_IBC.md`.
+- The daily workflow reads IBKR's `stable` channel instead of gnzsnz's
+  image tag. When the version moves it downloads the installers from
+  IBKR, stores them under `build-inputs` and opens an issue with their
+  checksums and a branch that pins them. A release still waits for a
+  real login check.
+- CI builds the pinned image on amd64 and arm64, each natively, and one
+  version from IBKR's `latest` channel (10.53.1a) on amd64. It checks in
+  each image the user, env vars, files, tools and templates the start-up
+  scripts rely on. It no longer builds on the earlier Gateway versions'
+  images (10.45.1c to 10.50.1f).
+
 ## [0.18.0] - 2026-11-24
 
 ### Changed

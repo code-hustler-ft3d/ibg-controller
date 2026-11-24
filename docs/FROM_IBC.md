@@ -172,21 +172,32 @@ make                         # builds agent jar + stages controller
 docker build -t ibg-controller:local .
 ```
 
-The shipped `Dockerfile` defaults to the same digest-pinned base the
-release images use, so a bare `docker build .` reproduces what we
-publish. Override `--build-arg UPSTREAM_IMAGE=...` only to build
-against a different Gateway; if you do, pass `IB_GATEWAY_VERSION` too
-so the image label reports what it actually contains.
+The shipped `Dockerfile` builds the whole image from Ubuntu and IBKR's
+Gateway installer. Its defaults are the pins the release images use
+(Ubuntu by digest, the installer by SHA-256), so a bare `docker build .`
+reproduces what we publish. The installers are read from this
+repository's
+[`build-inputs` release](https://github.com/code-hustler-ft3d/ibg-controller/releases/tag/build-inputs),
+which keeps them byte for byte as IBKR served them: IBKR's own URL
+serves only the current build of each channel.
 
-Any gnzsnz base works. To build against their `latest` channel instead
-of `stable` — a newer Gateway line, e.g. for the in-app browser the
-passkey flow uses:
+To build with a different Gateway, pass its version and both checksums.
+For example a newer line from IBKR's `latest` channel, e.g. for the
+in-app browser the passkey flow uses:
 
 ```bash
 docker build -t ibg-controller:edge \
-  --build-arg UPSTREAM_IMAGE=ghcr.io/gnzsnz/ib-gateway:latest \
-  --build-arg IB_GATEWAY_VERSION=10.51.1b .
+  --build-arg IB_GATEWAY_VERSION=10.53.1a \
+  --build-arg IB_GATEWAY_SHA256_X64=eba6b0f8fe9164586343b7637065a95a7480a4be72792e608ea0252cf594229b \
+  --build-arg IB_GATEWAY_SHA256_ARM=10e3cb68d8597ae761b171d6f8c97bfeb9e4a1fc31130fa55ba5dcb0ae646e2d .
 ```
+
+The build fails if a downloaded file doesn't match its checksum. For a
+version that isn't in the `build-inputs` release, also pass
+`IB_GATEWAY_INSTALLER_URL`: a directory URL holding
+`ibgateway-<version>-standalone-linux-x64.sh` and `...-linux-arm.sh`.
+Up to v0.18.x the build took a base image instead
+(`--build-arg UPSTREAM_IMAGE=...`); that argument is gone.
 
 CI covers that line as a build-and-boot check. The login, 2FA and
 dialog handlers are verified against the pinned stable line (see the

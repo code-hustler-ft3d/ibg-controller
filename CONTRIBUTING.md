@@ -206,7 +206,8 @@ product.
 What this tool is:
 - A Python + in-JVM Java agent replacement for IBC
 - Targeted at the headless Docker use case
-- Scoped to what the `gnzsnz/ib-gateway-docker` image needs
+- Scoped to what its Docker image needs (one that keeps
+  `gnzsnz/ib-gateway-docker`'s env vars and layout)
 
 What this tool is NOT:
 - A general-purpose GUI automation library

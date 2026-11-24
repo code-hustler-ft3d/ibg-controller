@@ -32,11 +32,12 @@ repository is archived. Your existing env vars from
 command server uses IBC's command names, and a one-shot tool converts
 your `config.ini`: [`docs/FROM_IBC.md`](docs/FROM_IBC.md).
 
-Release images build on gnzsnz's `ib-gateway` image, pinned by digest,
-which supplies Gateway itself, Xvfb and VNC. `UPSTREAM_IMAGE` is a
-build arg if you need a different base. A daily workflow checks gnzsnz's
-`stable` line and, when it moves, proposes the new pin with CI run on it;
-a release still waits for a real login check on the new version.
+Release images are built from Ubuntu and IBKR's own Gateway installer,
+both pinned: Ubuntu by image digest, the installer by SHA-256. A daily
+workflow reads IBKR's `stable` channel and, when it moves, stores the new
+installer and proposes its pin with CI run on it; a release still waits
+for a real login check on the new version. To build with another Gateway
+version, see the build args at the top of the [`Dockerfile`](Dockerfile).
 
 ## Quick start
 
@@ -53,8 +54,8 @@ docker run -d --name ibkr \
 ```
 
 From v0.18.0 the image runs ibg-controller unless you set
-`USE_IBG_CONTROLLER=no`, which starts the IBC build that ships in its
-base image. On v0.17.x and earlier it is the other way round: add
+`USE_IBG_CONTROLLER=no`, which starts the IBC build that ships in the
+image. On v0.17.x and earlier it is the other way round: add
 `-e USE_IBG_CONTROLLER=yes`, or the image starts IBC.
 
 Set a restart policy. When the controller can't recover a login on its
@@ -113,11 +114,11 @@ Deeper guides:
 
 | Requirement | Notes |
 |---|---|
-| Linux `amd64`/`arm64` | Ubuntu 26.04 base (gnzsnz moved from 24.04 with 10.50.1g); Python 3.14 in the image |
-| IB Gateway 10.x | Release images pin **10.50.1g** (gnzsnz `:stable` line) |
+| Linux `amd64`/`arm64` | Ubuntu 26.04 base (since v0.17.0; 24.04 before); Python 3.14 in the image |
+| IB Gateway 10.x | Release images pin **10.50.1h** (IBKR's `stable` channel) |
 | Python 3.10+ | Runtime; stdlib only, no pip installs |
 | JDK 17+ | Build time only — runtime uses the JRE bundled with Gateway |
-| `python3`, `matchbox-window-manager`, `curl` | The only packages added on top of the upstream image |
+| `python3`, `matchbox-window-manager`, `curl` | The packages the controller needs in the image, besides Gateway's own and the start-up scripts' |
 
 ## What works
 
@@ -188,8 +189,8 @@ real product.
   maintainer has no passkey account, so this is ⚠️ rather than ✅.
   Needs an amd64 base, because IBKR's arm64 installer ships no browser.
   The prompt opens Gateway's embedded browser. The system libraries it
-  needs come with the base image
-  ([gnzsnz/ib-gateway-docker#440](https://github.com/gnzsnz/ib-gateway-docker/pull/440));
+  needs are installed in the image (the list is from
+  [gnzsnz/ib-gateway-docker#440](https://github.com/gnzsnz/ib-gateway-docker/pull/440));
   release images have included them since v0.16.0, so no image of your
   own is needed for them. See
   [#22](https://github.com/code-hustler-ft3d/ibg-controller/issues/22)
@@ -230,7 +231,7 @@ real product.
 
 | Var | Notes |
 |---|---|
-| `USE_IBG_CONTROLLER` | Unset or `yes`: ibg-controller. `no`: the IBC build from the base image instead (IBC was retired on 1 September 2026, so that copy gets no updates). `true`/`1`/`on` and `false`/`0`/`off` mean the same; any other value stops the container with an error. Unset together with `CUSTOM_CONFIG=yes` (you maintain IBC's `config.ini` yourself) starts IBC and says so in the log. Before v0.18.0 only the exact value `yes` selected ibg-controller and everything else started IBC. |
+| `USE_IBG_CONTROLLER` | Unset or `yes`: ibg-controller. `no`: the IBC build in the image instead (IBC was retired on 1 September 2026, so that copy gets no updates). `true`/`1`/`on` and `false`/`0`/`off` mean the same; any other value stops the container with an error. Unset together with `CUSTOM_CONFIG=yes` (you maintain IBC's `config.ini` yourself) starts IBC and says so in the log. Before v0.18.0 only the exact value `yes` selected ibg-controller and everything else started IBC. |
 
 ### Credentials
 
@@ -469,8 +470,9 @@ over VNC, switch it back, or use `AUTO_RESTART_TIME` instead.
 ## Security
 
 Supply chain: no third-party dependencies (Python stdlib + one
-dependency-free Java file), digest-pinned base image, cosign-signed
-release images. Verification recipes and reporting:
+dependency-free Java file), Ubuntu pinned by digest and IBKR's
+installer by SHA-256, cosign-signed release images. Verification
+recipes and reporting:
 [`SECURITY.md`](SECURITY.md).
 
 Deployment hygiene:
@@ -503,6 +505,8 @@ MIT — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
 - **[Lcstyle/ibctl](https://github.com/Lcstyle/ibctl)** for the
   in-JVM agent idea and the edge-case catalog.
 - **@gnzsnz** for
-  [ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker)
-  and for steering this tool's architecture in
+  [ib-gateway-docker](https://github.com/gnzsnz/ib-gateway-docker):
+  release images were built on its image up to v0.18.x and still use
+  its start-up scripts and env var names. And for steering this tool's
+  architecture in
   [issue #366](https://github.com/gnzsnz/ib-gateway-docker/issues/366).

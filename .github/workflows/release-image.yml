@@ -12,11 +12,11 @@ name: Release image
 #     namespace automatically, no secrets setup required beyond the
 #     default GITHUB_TOKEN.
 #   - The `platforms` list below controls architectures. We publish
-#     linux/amd64 + linux/arm64: upstream gnzsnz/ib-gateway ships both
-#     (both now use install4j's own JRE registry; arm64 used a separate
-#     Zulu JRE only before 10.45.1h, when upstream switched aarch64 to
-#     IBKR's native arm installer in gnzsnz/ib-gateway-docker#397), and
-#     the Dockerfile's ATK bridge step handles both layouts. Keep in sync
+#     linux/amd64 + linux/arm64: IBKR ships an installer for each, and
+#     the Dockerfile picks the one for the architecture it builds on.
+#     The arm64 image is built under QEMU emulation on the amd64 runner,
+#     so IBKR's arm installer runs emulated here; CI also builds the
+#     pinned image natively on an arm64 runner (ci.yml). Keep in sync
 #     with `docker-compose` consumers that pin --platform.
 #   - If you rename the workflow file, update docs/SECURITY.md's
 #     cosign verification example — the `--certificate-identity`
@@ -103,6 +103,11 @@ jobs:
         # so the image contents match the tarball contents bit-for-bit.
         run: make
 
+      - name: Set up QEMU (the arm64 image is built under emulation)
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1  # v4.4.0
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f  # v3
 
@@ -139,8 +144,9 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          # Deliberately NO build-args. The digest pin and
-          # IB_GATEWAY_VERSION are the Dockerfile's ARG defaults, which
+          # Deliberately NO build-args. The Ubuntu digest, the Gateway
+          # version and the installer checksums are the Dockerfile's ARG
+          # defaults, which
           # makes the Dockerfile the single source of truth: a bare
           # `docker build .` reproduces exactly what this workflow
           # publishes. Bump the pin there, not here.
