@@ -387,7 +387,16 @@ def serve(path, texts):
                     conn.sendall(b"OK clicked\n")
                 else:
                     conn.sendall(b"ERR not_found\n")
-            elif cmd in ("WINDOWS", "LABELS"):
+            elif cmd == "WINDOWS" and refused:
+                conn.sendall(b"OK\naw | IBKR Gateway | modal=false\n"
+                             b"JDialog | IBKR Gateway | modal=true\nEND\n")
+            elif cmd == "WINDOW" and refused:
+                conn.sendall(REFUSED_DUMP.encode())
+            elif cmd == "WAIT_LOGIN_FRAME":
+                # Like the agent: no login form while a modal is in front.
+                conn.sendall(b"ERR timeout\n" if refused or not texts
+                             else b"OK\n")
+            elif cmd in ("WINDOWS", "LABELS", "WINDOW"):
                 conn.sendall(b"END\n")
             elif cmd == "LOGIN_STATE":
                 conn.sendall(b"OK busy\n" if "--busy" in sys.argv else
@@ -410,6 +419,26 @@ buttons.extend(hidden)
 # --late-button=LABEL@N: a dialog with that button appears N seconds in, as
 # the paper-trading disclaimer can after the post-login check (issue #81).
 # Clicks are appended to <socket>.clicks.
+# --refused-dialog=N: N seconds in, Gateway's modal saying IBKR refused its
+# saved session opens in front of the login window (issue #93).
+refused = []
+REFUSED_DUMP = (
+    "OK\n"
+    "=== window=IBKR Gateway type=aw modal=false ===\n"
+    'aw accName="IBKR Gateway"\n'
+    '      JPasswordField text="<redacted password len=0>"\n'
+    "=== window=IBKR Gateway type=JDialog modal=true ===\n"
+    'JDialog accName="IBKR Gateway"\n'
+    '        JTextPane text="Connection to server failed: The security '
+    "tokens associated with your login credentials have expired (routinely) "
+    "in accordance with our security protocols. Please manually enter your "
+    'username and pass..."\n'
+    '        JButton text="OK"\n'
+    "END\n")
+for a in sys.argv:
+    if a.startswith("--refused-dialog="):
+        threading.Timer(float(a.split("=", 1)[1]), refused.append,
+                        args=(1,)).start()
 for a in sys.argv:
     if a.startswith("--late-button="):
         label, secs = a.split("=", 1)[1].rsplit("@", 1)
@@ -494,9 +523,12 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
                 pass
 
     def _start_jvm(self, api=False, login_dialog=False, busy=False,
-                   api_after=None, late_button=None, hidden_button=None):
+                   api_after=None, late_button=None, hidden_button=None,
+                   refused_dialog=None):
         args = [sys.executable, self.fake, self.sock,
                 str(self.api_port) if api else "-"]
+        if refused_dialog is not None:
+            args.append(f"--refused-dialog={refused_dialog}")
         if late_button is not None:
             args.append(f"--late-button={late_button}")
         if hidden_button is not None:
@@ -640,6 +672,58 @@ class TestAutoRestartAdoptionEndToEnd(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(len(redrives), 1)
         self.assertEqual(relaunches, 0)
+
+    def _refused(self, **jvm):
+        self._running_then_killed()
+        self._write_restarter_log()
+        new = self._start_jvm(api=False, login_dialog=True, **jvm)
+        redrives = []
+        with patch.object(gc, "_redrive_login",
+                          side_effect=lambda app: (redrives.append(app), False)[1]), \
+             self.assertLogs(gc.log, level="INFO") as logs:
+            ok, relaunches, elapsed = self._recover()
+        return new, redrives, ok, relaunches, elapsed, "\n".join(logs.output)
+
+    def test_refused_saved_session_gets_a_fresh_start_at_once(self):
+        # Issue #93: IBKR refused the session Gateway saved, Gateway said
+        # so in a modal dialog and kept its login fields greyed out behind
+        # it. Nothing closed the dialog, so the controller waited out a
+        # timeout before starting Gateway again.
+        new, redrives, ok, relaunches, elapsed, text = self._refused(
+            busy=True, refused_dialog=0)
+        self.assertTrue(ok)
+        self.assertEqual(relaunches, 1)
+        self.assertEqual(redrives, [], "tried to log in behind the dialog")
+        self.assertIn("status=session_expired", text)
+        self.assertNotRegex(text, r"ALERT_AUTO_RESTART[^\n]*status=failed_")
+        self.assertIsNotNone(new.poll(), "the refused Gateway was left running")
+        # Well inside the 15 s this class allows the API port.
+        self.assertLess(elapsed, 10)
+
+    def test_refused_dialog_opening_a_few_seconds_in_is_caught_then(self):
+        new, redrives, ok, relaunches, elapsed, text = self._refused(
+            busy=True, refused_dialog=3)
+        self.assertTrue(ok)
+        self.assertEqual((relaunches, redrives), (1, []))
+        self.assertIn("status=session_expired", text)
+        self.assertGreater(elapsed, 2.5)
+        self.assertLess(elapsed, 12)
+
+    def test_login_form_wait_ends_on_the_refused_dialog(self):
+        # The agent answers WAIT_LOGIN_FRAME with a timeout for as long as
+        # the dialog is up; the wait must not ask 24 times.
+        self._start_jvm(login_dialog=True, refused_dialog=0)
+        time.sleep(0.3)
+        with patch.object(gc, "agent_wait_login_frame",
+                          wraps=gc.agent_wait_login_frame) as awlf:
+            self.assertFalse(gc._wait_for_login_form())
+        self.assertEqual(awlf.call_count, 1)
+        self.assertEqual(gc._saved_session_refused_dialog(), "IBKR Gateway")
+
+    def test_login_form_without_a_dialog_is_usable(self):
+        self._start_jvm(login_dialog=True)
+        self.assertTrue(gc._wait_for_login_form())
+        self.assertIsNone(gc._saved_session_refused_dialog())
 
     def test_the_same_restart_is_not_adopted_twice(self):
         self._running_then_killed()
