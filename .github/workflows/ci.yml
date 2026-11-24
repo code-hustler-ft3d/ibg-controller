@@ -149,6 +149,8 @@ jobs:
           PY
 
   gateway-version-matrix:
+    # Named, or the check's name would include the matrix entry's checksums.
+    name: gateway-version-matrix (${{ matrix.gateway }}, ${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}
     needs: build-and-test
     # Build the shipped Dockerfile and check the image, so a change in an
