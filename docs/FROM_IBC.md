@@ -343,8 +343,9 @@ forwarder or the ports your trading code connects to. The swap is
 transparent to the client side.
 
 **What about the `run.sh`?** The shipped `Dockerfile` swaps in an
-ibg-controller-aware `run.sh` that, when `USE_IBG_CONTROLLER=yes`,
-dispatches to the controller instead of IBC's jar. If you're building
+ibg-controller-aware `run.sh` that dispatches to the controller
+instead of IBC's jar, unless `USE_IBG_CONTROLLER=no` (before v0.18.0:
+only when `USE_IBG_CONTROLLER=yes`). If you're building
 a custom image, pick up `docker/run.sh` from the release tarball.
 
 **Where's the `.env`? Can I commit it?** Keep credentials out of git.

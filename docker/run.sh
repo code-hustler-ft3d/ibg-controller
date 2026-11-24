@@ -18,6 +18,59 @@ echo "*************************************************************************"
 # shellcheck disable=SC1091
 source "${SCRIPT_PATH}/common.sh"
 
+# ── Which login automation runs ─────────────────────────────────────────
+# ibg-controller, unless USE_IBG_CONTROLLER says no:
+#   yes | true | 1 | on    ibg-controller
+#   no | false | 0 | off   the IBC build that comes with the base image
+#   unset or empty         ibg-controller; but with CUSTOM_CONFIG=yes, IBC,
+#                          because that setup maintains IBC's config.ini by
+#                          hand and may keep its credentials only there
+# Case, spaces and quotes don't matter: an unquoted YAML `yes` can reach
+# the container as `true`, and `docker run --env-file` keeps the quotes
+# around "yes". scripts/healthcheck.sh reads the value the same way.
+
+# Print yes, no or default for a USE_IBG_CONTROLLER value; fail on any other.
+use_controller_setting() {
+	local v
+	v=$(printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]' | tr -d ' \t"'"'")
+	case "$v" in
+	yes | true | 1 | on) echo yes ;;
+	no | false | 0 | off) echo no ;;
+	"") echo default ;;
+	*) return 1 ;;
+	esac
+}
+
+# Leave USE_IBG_CONTROLLER as exactly yes or no for everything below.
+# A value that is neither stops the container: a typo must not pick a
+# login path silently.
+choose_login_automation() {
+	local choice
+	if ! choice=$(use_controller_setting "${USE_IBG_CONTROLLER-}"); then
+		echo ".> ERROR: USE_IBG_CONTROLLER='${USE_IBG_CONTROLLER}' is not a value this image understands." >&2
+		echo ".> Use yes (ibg-controller, the default) or no (IBC)." >&2
+		return 78
+	fi
+	if [ "$choice" = default ]; then
+		if [ "${CUSTOM_CONFIG:-}" = "yes" ]; then
+			choice=no
+			echo ".> USE_IBG_CONTROLLER is not set and CUSTOM_CONFIG=yes: starting IBC, which reads the config.ini you maintain."
+			echo ".> Set USE_IBG_CONTROLLER=no to keep IBC without this notice, or USE_IBG_CONTROLLER=yes for ibg-controller (docs/FROM_IBC.md)."
+		else
+			choice=yes
+		fi
+	fi
+	USE_IBG_CONTROLLER="$choice"
+	export USE_IBG_CONTROLLER
+	if [ "$choice" = yes ]; then
+		echo ".> Login automation: ibg-controller (USE_IBG_CONTROLLER=no selects IBC)."
+	else
+		echo ".> Login automation: IBC (USE_IBG_CONTROLLER=no)."
+	fi
+}
+
+choose_login_automation || exit "$?"
+
 # shellcheck disable=SC2329
 stop_ibc() {
 	echo ".> 😘 Received SIGINT or SIGTERM. Shutting down IB Gateway."
@@ -76,8 +129,8 @@ stop_ibc() {
 	if [ "$USE_IBG_CONTROLLER" = "yes" ]; then
 		echo ".> Stopping window manager."
 		pkill -f matchbox-window-manager 2>/dev/null
-		# Clean up readiness file
-		rm -f /tmp/gateway_ready
+		# Clean up the readiness files (one per mode since dual mode).
+		rm -f /tmp/gateway_ready /tmp/gateway_ready_live /tmp/gateway_ready_paper
 	fi
 	# All done.
 	echo ".> Done... $?"
@@ -129,7 +182,7 @@ start_IBC() {
 }
 
 # ── ibg-controller path ─────────────────────────────────────────────────
-# Opt-in via USE_IBG_CONTROLLER=yes. Default falls back to IBC.
+# The default. USE_IBG_CONTROLLER=no selects IBC (choose_login_automation).
 
 start_window_manager() {
 	# Xvfb has no window manager by default, which leaves no focused
@@ -358,8 +411,8 @@ start_process() {
 			forwarder[$!]="${API_PORT}:${SOCAT_PORT}:${TRADING_MODE}"
 		fi
 	else
-		# IBC path (default): legacy behavior — port forwarding starts
-		# immediately, racing the IBC login flow.
+		# IBC path (USE_IBG_CONTROLLER=no): legacy behavior — port
+		# forwarding starts immediately, racing the IBC login flow.
 		port_forwarding
 		start_IBC
 	fi
