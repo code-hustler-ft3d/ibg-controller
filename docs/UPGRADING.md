@@ -76,6 +76,24 @@ Only versions that need operator attention are listed. If a version
 isn't listed, it contained only additive changes that don't require
 anything from you.
 
+### v0.19.0
+
+- **The image is built from Ubuntu and IBKR's installer, not on
+  gnzsnz's image.** Nothing to do if you pull the release image: env
+  vars, ports, volumes, the `ibgateway` user (1000:1000), paths and
+  start-up hooks (`START_SCRIPTS`, `X_SCRIPTS`, `IBC_SCRIPTS`,
+  `CONTROLLER_SCRIPTS`) are the same, and `USE_IBG_CONTROLLER=no` still
+  starts IBC 3.24.2. Gateway moves from 10.50.1g to 10.50.1h.
+- **If you build the image yourself with `--build-arg
+  UPSTREAM_IMAGE=...`**, that argument is gone. A bare `docker build .`
+  still builds the release's pins. For another Gateway version pass
+  `IB_GATEWAY_VERSION` and both installer checksums; see "Build the
+  ibg-controller image" in [`FROM_IBC.md`](FROM_IBC.md).
+- **If you install ibg-controller into your own image**
+  ([`MIGRATION.md`](MIGRATION.md)), nothing changes: the release tarball
+  is the same.
+- Images up to v0.18.x stay published and unchanged.
+
 ### v0.18.0
 
 - **The image runs ibg-controller unless told otherwise.** Until now it

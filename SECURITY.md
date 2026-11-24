@@ -129,10 +129,15 @@ What we don't protect against:
 - A compromised IBKR account via other means (phishing, credential
   reuse, SIM-swap on your 2FA phone). The controller just logs in
   with the creds you give it.
-- Supply chain compromise of `gnzsnz/ib-gateway` upstream base image.
-  We pin versions in `docs/FROM_IBC.md` §Compatibility and verify
-  against them in CI, but we depend on upstream doing its own
-  auditing.
+- A compromised input to the image build: Ubuntu's image or packages,
+  IBKR's Gateway installer, or IBC's release archive. The `Dockerfile`
+  pins Ubuntu by image digest and each downloaded file by SHA-256, so a
+  build can't silently pick up a different image or file. Ubuntu's
+  packages are not pinned to versions: each build installs the current
+  ones from Ubuntu's signed archive. And IBKR publishes no checksums or
+  signatures for its installers: a pin records what IBKR's download
+  host served on the day it was stored. We depend on IBKR, Ubuntu and
+  IBC for what is inside.
 
 ## Reporting a vulnerability
 

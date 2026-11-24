@@ -11,9 +11,8 @@ on:
   workflow_dispatch:
 
 # Read-only by default. Only build-and-test writes, to create the GitHub
-# release on a tag; it never builds an upstream image. The jobs that do
-# build upstream images run on a read-only token, so a base image's ONBUILD
-# steps can't reach anything that writes to this repo.
+# release on a tag; it never builds the image. The jobs that do build it,
+# and so run IBKR's installer, are on a read-only token.
 permissions:
   contents: read
 
@@ -150,42 +149,41 @@ jobs:
           PY
 
   gateway-version-matrix:
-    runs-on: ubuntu-24.04
+    # Named, or the check's name would include the matrix entry's checksums.
+    name: gateway-version-matrix (${{ matrix.gateway }}, ${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     needs: build-and-test
-    # Build the shipped Dockerfile against multiple gnzsnz/ib-gateway
-    # upstream tags so we catch breakage from an upstream layout change
-    # (JRE path, apt package rename, userid shift) before users do.
+    # Build the shipped Dockerfile and check the image, so a change in an
+    # installer's layout (JRE path), an Ubuntu package or a checksum shows
+    # up here before a release.
     #
-    # The matrix covers the Gateway versions we verify against: earlier
-    # pins (10.45.1c, 10.45.1g, 10.45.1j, 10.50.1e, 10.50.1f), the
-    # current stable pinned in the Dockerfile (the `pinned` entry), and
-    # a build from upstream's `latest` channel (10.51.1b). Add a new
-    # entry here when bumping verified versions in README.md /
-    # docs/FROM_IBC.md.
+    #   - `pinned`, on amd64 and arm64: the Dockerfile's own pins with no
+    #     build args, the exact files a release builds. Each architecture
+    #     has its own installer and checksum, so each is built natively. A
+    #     Gateway bump branch only edits the Dockerfile, so these entries
+    #     are what test it.
+    #   - One version from IBKR's `latest` channel: "does the image still
+    #     build and boot on the newer Gateway line" (issue #24). A build and
+    #     smoke check only. Login, 2FA and the dialog handlers are verified
+    #     against the pinned stable line; nothing here claims they are
+    #     verified on `latest`. Its installers are in the `build-inputs`
+    #     release (gateway-bump.yml, run by hand with channel `latest`).
     #
-    # Version tags, never the floating `:stable` / `:latest`, so a PR
-    # run stays deterministic and upstream moving a channel can't turn
-    # an unrelated PR red.
-    #
-    # The `latest`-channel entry answers "does the image still build and
-    # boot on the newer Gateway line" (issue #24) — it is a build and
-    # smoke check only. Login, 2FA and the dialog handlers are verified
-    # against the pinned stable line; nothing here claims they are
-    # verified on `latest`.
+    # Versions and checksums, never "whatever IBKR serves today", so a PR
+    # run stays deterministic and IBKR moving a channel can't turn an
+    # unrelated PR red.
     strategy:
       fail-fast: false
       matrix:
-        upstream:
-          - ghcr.io/gnzsnz/ib-gateway:10.45.1c
-          - ghcr.io/gnzsnz/ib-gateway:10.45.1g
-          - ghcr.io/gnzsnz/ib-gateway:10.45.1j
-          - ghcr.io/gnzsnz/ib-gateway:10.50.1e
-          - ghcr.io/gnzsnz/ib-gateway:10.50.1f
-          - ghcr.io/gnzsnz/ib-gateway:10.51.1b
-          # The Dockerfile's own digest pin, with no build args: the exact
-          # base a release builds. A base-image bump branch only edits the
-          # Dockerfile, so this entry is what tests it.
-          - pinned
+        include:
+          - gateway: pinned
+            runner: ubuntu-24.04
+          - gateway: pinned
+            runner: ubuntu-24.04-arm
+          - gateway: 10.53.1a
+            runner: ubuntu-24.04
+            sha256_x64: eba6b0f8fe9164586343b7637065a95a7480a4be72792e608ea0252cf594229b
+            sha256_arm: 10e3cb68d8597ae761b171d6f8c97bfeb9e4a1fc31130fa55ba5dcb0ae646e2d
     steps:
       - name: Check out
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -206,28 +204,84 @@ jobs:
       - name: make (populate dist/ for COPY)
         run: make
 
-      - name: Build image against ${{ matrix.upstream }}
+      - name: Build image with Gateway ${{ matrix.gateway }}
         env:
-          MATRIX_UPSTREAM: ${{ matrix.upstream }}
+          MATRIX_GATEWAY: ${{ matrix.gateway }}
+          MATRIX_SHA256_X64: ${{ matrix.sha256_x64 }}
+          MATRIX_SHA256_ARM: ${{ matrix.sha256_arm }}
         run: |
-          if [ "$MATRIX_UPSTREAM" = pinned ]; then
+          if [ "$MATRIX_GATEWAY" = pinned ]; then
             docker build -t ibg-controller:matrix-test .
             exit 0
           fi
-          # Pass IB_GATEWAY_VERSION too: since v0.9.0 the Dockerfile's
-          # ARG defaults are the release pin, so without this a matrix
-          # image built on another base would carry the release version
-          # in its label and misreport what it actually contains.
           docker build \
-            --build-arg UPSTREAM_IMAGE="$MATRIX_UPSTREAM" \
-            --build-arg IB_GATEWAY_VERSION="${MATRIX_UPSTREAM##*:}" \
+            --build-arg IB_GATEWAY_VERSION="$MATRIX_GATEWAY" \
+            --build-arg IB_GATEWAY_SHA256_X64="$MATRIX_SHA256_X64" \
+            --build-arg IB_GATEWAY_SHA256_ARM="$MATRIX_SHA256_ARM" \
             -t ibg-controller:matrix-test .
+
+      - name: The image is what the start-up scripts expect
+        # The names run.sh, IBC's mode and the controller read, the files
+        # they open, and the tools they call. The image used to inherit
+        # these from another image; now this Dockerfile provides them.
+        env:
+          MATRIX_GATEWAY: ${{ matrix.gateway }}
+        run: |
+          docker run --rm -e MATRIX_GATEWAY --entrypoint bash ibg-controller:matrix-test -c '
+            set -e
+            fail() { echo "REGRESSION: $*"; exit 1; }
+            [ "$(id -u):$(id -g)" = 1000:1000 ] || fail "runs as $(id -u):$(id -g), not 1000:1000"
+            [ "$(id -un)" = ibgateway ] || fail "user 1000 is $(id -un), not ibgateway"
+            [ "$HOME" = /home/ibgateway ] && [ "$PWD" = /home/ibgateway ] || fail "HOME=$HOME PWD=$PWD"
+            [ "$MATRIX_GATEWAY" = pinned ] || [ "$IB_GATEWAY_VERSION" = "$MATRIX_GATEWAY" ] \
+              || fail "IB_GATEWAY_VERSION=$IB_GATEWAY_VERSION, built for $MATRIX_GATEWAY"
+            [ "$TWS_MAJOR_VRSN" = "$IB_GATEWAY_VERSION" ] || fail "TWS_MAJOR_VRSN=$TWS_MAJOR_VRSN"
+            [ "$TWS_PATH" = /home/ibgateway/Jts ] || fail "TWS_PATH=$TWS_PATH"
+            [ "$TWS_INI" = jts.ini ] && [ "$TWS_INI_TMPL" = jts.ini.tmpl ] || fail "TWS_INI=$TWS_INI TWS_INI_TMPL=$TWS_INI_TMPL"
+            [ "$IBC_PATH" = /home/ibgateway/ibc ] || fail "IBC_PATH=$IBC_PATH"
+            [ "$IBC_INI" = /home/ibgateway/ibc/config.ini ] || fail "IBC_INI=$IBC_INI"
+            [ "$IBC_INI_TMPL" = /home/ibgateway/ibc/config.ini.tmpl ] || fail "IBC_INI_TMPL=$IBC_INI_TMPL"
+            [ "$SCRIPT_PATH" = /home/ibgateway/scripts ] || fail "SCRIPT_PATH=$SCRIPT_PATH"
+            [ "$GATEWAY_OR_TWS" = gateway ] || fail "GATEWAY_OR_TWS=$GATEWAY_OR_TWS"
+            gw="$TWS_PATH/ibgateway/$IB_GATEWAY_VERSION"
+            for f in "$gw/ibgateway" "$gw/ibgateway.vmoptions" "$gw/jars" \
+                     "$TWS_PATH/$TWS_INI_TMPL" "$IBC_INI_TMPL" "$IBC_PATH/IBC.jar" \
+                     "$IBC_PATH/scripts/ibcstart.sh"; do
+              [ -e "$f" ] || fail "$f is missing"
+            done
+            for f in run.sh common.sh run_socat.sh run_ssh.sh healthcheck.sh gateway_controller.py; do
+              [ -x "$SCRIPT_PATH/$f" ] || fail "$SCRIPT_PATH/$f is missing or not executable"
+            done
+            [ -x "$IBC_PATH/scripts/ibcstart.sh" ] || fail "ibcstart.sh is not executable"
+            # Everything under the home directory belongs to the user: Gateway
+            # writes its settings and logs there.
+            other=$(find "$HOME" ! -user 1000 -print -quit)
+            [ -z "$other" ] || fail "$other is not owned by 1000"
+            grep -q -- "-Xmx768m" "$gw/ibgateway.vmoptions" \
+              || fail "ibgateway.vmoptions has no -Xmx768m for JAVA_HEAP_SIZE to replace"
+            for tool in envsubst socat Xvfb x11vnc sshpass ssh ssh-agent sudo telnet \
+                        python3 matchbox-window-manager curl pgrep pkill; do
+              command -v "$tool" >/dev/null || fail "$tool is not installed"
+            done
+            sudo -n true || fail "sudo needs a password"
+            # The settings files render from the templates, as apply_settings does.
+            TIME_ZONE=Etc/UTC envsubst <"$TWS_PATH/$TWS_INI_TMPL" | grep -q "^TimeZone=Etc/UTC$" \
+              || fail "jts.ini.tmpl does not render TimeZone"
+            # The config.ini that IBC ships has Windows line endings.
+            TWS_USERID=someone envsubst <"$IBC_INI_TMPL" | tr -d "\r" | grep -q "^IbLoginId=someone$" \
+              || fail "config.ini.tmpl does not render IbLoginId"
+            # Gateway starts on its bundled JRE.
+            java=$(find "$gw" /usr/local/i4j_jres -path "*/bin/java" -type f 2>/dev/null | head -1)
+            [ -n "$java" ] || fail "no Gateway JRE found"
+            "$java" -version 2>&1 | head -1
+            echo "OK image layout, user, tools and templates"
+          '
 
       - name: Container-level module-load smoke test
         # Verify gateway_controller.py imports cleanly inside the built
         # image. v0.5.14 dropped the gi/Atspi import, so this should
-        # succeed with stdlib-only python3. Catches upstream base-image
-        # drift (missing libs, changed paths) at CI time rather than at
+        # succeed with stdlib-only python3. Catches drift in the image
+        # (missing libs, changed paths) at CI time rather than at
         # runtime on a user's host.
         env:
           TWS_USERID: x
@@ -238,7 +292,7 @@ jobs:
             -e TWS_USERID -e TWS_PASSWORD -e TRADING_MODE \
             --entrypoint python3 \
             ibg-controller:matrix-test \
-            -c 'import sys; sys.path.insert(0, "/home/ibgateway/scripts"); import gateway_controller as gc; print(f"OK upstream={gc.__version__} TRADING_MODE={gc.TRADING_MODE}")'
+            -c 'import sys; sys.path.insert(0, "/home/ibgateway/scripts"); import gateway_controller as gc; print(f"OK version={gc.__version__} TRADING_MODE={gc.TRADING_MODE}")'
 
       - name: run.sh process tests on the image's own shell
         # The runner has bash 5.2 and GNU coreutils. The image has its
@@ -268,8 +322,8 @@ jobs:
         # This step guards against three regressions:
         #   1. A future Dockerfile edit accidentally restoring the
         #      accessibility.properties write or the .so copy.
-        #   2. The upstream gnzsnz/ib-gateway base image starting to
-        #      ship libatk-wrapper-java pre-installed (which would let
+        #   2. A package on the Dockerfile's list starting to pull in
+        #      libatk-wrapper-java (which would let
         #      AtkWrapper load if the Java flag override were ever
         #      removed).
         #   3. The JVM-args-level disable
@@ -297,7 +351,7 @@ jobs:
             # 1. accessibility.properties must NOT have been written.
             if [ -f "$JAVA_HOME/conf/accessibility.properties" ]; then
               echo "REGRESSION: $JAVA_HOME/conf/accessibility.properties present —"
-              echo "v0.5.13 dropped this write. If the upstream base image now"
+              echo "v0.5.13 dropped this write. If Gateway or a package now"
               echo "ships its own copy, audit it before relaxing this guard."
               cat "$JAVA_HOME/conf/accessibility.properties"
               exit 1
@@ -307,7 +361,7 @@ jobs:
             # 2. libatk-wrapper.so must NOT be in the JRE lib dir.
             if ls "$JAVA_HOME/lib/" 2>/dev/null | grep -q libatk-wrapper; then
               echo "REGRESSION: libatk-wrapper.so present in $JAVA_HOME/lib/ —"
-              echo "v0.5.13 dropped the JNI copy step. If the upstream base"
+              echo "v0.5.13 dropped the JNI copy step. If a package"
               echo "now ships it, the AT-SPI bridge could load on a JVM that"
               echo "does not have the assistive_technologies override."
               exit 1
@@ -315,7 +369,7 @@ jobs:
             echo "OK libatk-wrapper.so absent from JRE lib dir"
 
             # 3. The JVM-args-level disable must still be in the controller.
-            #    (Belt-and-suspenders against base-image-shipped JARs.)
+            #    (Belt-and-suspenders against package-shipped JARs.)
             if ! grep -q -- "-Djavax.accessibility.assistive_technologies=" \
                  /home/ibgateway/scripts/gateway_controller.py; then
               echo "REGRESSION: gateway_controller.py no longer passes the"
@@ -337,14 +391,14 @@ jobs:
 
             # 5. v0.5.14: the gi/Atspi stack should not be installed
             #    by OUR Dockerfile. We log dpkg state informationally —
-            #    upstream may ship its own copy (we tolerate that, since
+            #    another package may pull one in (we tolerate that, since
             #    nothing imports it anymore). The strict regression
             #    guard for "controller imports without gi" lives in the
             #    smoke-test-image job, which runs on a vanilla runner
             #    with no gi packages installed.
             for pkg in python3-gi gir1.2-atspi-2.0 at-spi2-core; do
               if dpkg -l "$pkg" 2>/dev/null | grep -q "^ii"; then
-                echo "NOTE: $pkg installed (upstream base — ours does not pull it)"
+                echo "NOTE: $pkg installed (a dependency; the Dockerfile does not list it)"
               else
                 echo "OK $pkg absent"
               fi

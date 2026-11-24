@@ -3,9 +3,9 @@
 # Don't warn about unreachable commands in this file
 #
 # Derived from gnzsnz/ib-gateway-docker's run.sh (MIT License,
-# Copyright 2022 Emanuel Fernandes, 2023 gnzsnz). This variant swaps the
-# upstream IBC-first dispatch for the ibg-controller path; it still
-# sources the upstream common.sh and reuses its helpers (file_env,
+# Copyright 2022 Emanuel Fernandes, 2023 gnzsnz). This variant swaps its
+# IBC-first dispatch for the ibg-controller path; it sources common.sh,
+# which is that project's file, and reuses its helpers (file_env,
 # apply_settings, set_ports, port_forwarding, wait_x_socket, ...).
 # See NOTICE.
 
@@ -21,7 +21,7 @@ source "${SCRIPT_PATH}/common.sh"
 # ── Which login automation runs ─────────────────────────────────────────
 # ibg-controller, unless USE_IBG_CONTROLLER says no:
 #   yes | true | 1 | on    ibg-controller
-#   no | false | 0 | off   the IBC build that comes with the base image
+#   no | false | 0 | off   the IBC build that comes with the image
 #   unset or empty         ibg-controller; but with CUSTOM_CONFIG=yes, IBC,
 #                          because that setup maintains IBC's config.ini by
 #                          hand and may keep its credentials only there

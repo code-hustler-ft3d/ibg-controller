@@ -1,0 +1,182 @@
+name: Gateway bump
+
+# Daily: if IBKR's `stable` Gateway has moved past the Dockerfile's pin,
+# download its installers from IBKR, store them under the `build-inputs`
+# release, push a bump branch, start CI on it and open an issue with the
+# details. Nothing is merged or released automatically: a new Gateway
+# version needs a real login check first.
+#
+# IBKR's download URL serves only the current build of a channel, so the
+# stored copy is what lets a release be rebuilt later. The Dockerfile pins
+# each file by SHA-256; a stored file is never replaced.
+#
+# It opens an issue rather than a pull request because pull requests from
+# GITHUB_TOKEN need "Allow GitHub Actions to create and approve pull
+# requests", which also lets workflows approve them. CI is started with
+# `gh workflow run`, since pushes made with GITHUB_TOKEN don't trigger
+# workflows by themselves; its `pinned` matrix entry builds the new files.
+# The bump touches only the Dockerfile and README: GITHUB_TOKEN can't push
+# changes to workflow files. Each proposal is keyed by version; closing its
+# issue rejects that version for good.
+#
+# Run by hand with channel `latest`, it only stores that channel's current
+# installers and prints their checksums, for a build of a newer Gateway
+# line (Dockerfile header). It proposes nothing.
+
+on:
+  schedule:
+    - cron: '23 8 * * *'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: "IBKR channel. `latest` only stores the installers."
+        type: choice
+        options: [stable, latest]
+        default: stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gateway-bump
+  cancel-in-progress: false
+
+env:
+  ARCHIVE: build-inputs
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # store the installers, push the bump branch
+      actions: write    # start CI on it
+      issues: write     # report it
+    steps:
+      - name: Check out
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Compare IBKR's channel with the pinned Gateway
+        id: check
+        env:
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+        run: python3 .github/scripts/gateway_bump.py check --channel "$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Skip a version that was already proposed
+        id: seen
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANNEL" != stable ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The issue decides a version: open or closed, it was proposed. Only
+          # this workflow's own issues count, so nobody else can block a
+          # proposal. The plain issue list, not search, which can lag behind
+          # an issue opened moments ago; if the request fails, stop rather
+          # than propose twice. VERSION has the shape of a version (checked
+          # by the script that printed it).
+          proposed=$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues?state=all&creator=github-actions%5Bbot%5D&per_page=100" \
+            --jq ".[] | select(.pull_request == null and (.title | endswith(\" is ${VERSION}\"))) | .number")
+          if [ -n "$proposed" ]; then
+            echo "${VERSION} was already proposed; its issue decides. Nothing to do."
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the installers from IBKR
+        id: fetch
+        if: steps.seen.outputs.go == 'true'
+        env:
+          CHANNEL: ${{ inputs.channel || 'stable' }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/installers"
+          python3 .github/scripts/gateway_bump.py fetch --channel "$CHANNEL" --version "$VERSION" \
+            --dir "$RUNNER_TEMP/installers" --body "$RUNNER_TEMP/body.md" >> "$GITHUB_OUTPUT"
+
+      - name: Store them under the build-inputs release
+        if: steps.seen.outputs.go == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+          X64: ${{ steps.fetch.outputs.x64 }}
+          ARM: ${{ steps.fetch.outputs.arm }}
+        run: |
+          set -euo pipefail
+          # A stored file is never replaced. If one of this name is already
+          # there, it must be the same bytes: the Dockerfile's checksum is
+          # what a build trusts, and a different file under an old name
+          # would break every build that pins it.
+          store() {
+            local file="$1" want="$2" name have
+            name=$(basename "$file")
+            have=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${ARCHIVE}" \
+              --jq ".assets[] | select(.name == \"${name}\") | .digest")
+            if [ -z "$have" ]; then
+              gh release upload "$ARCHIVE" "$file"
+              echo "Stored ${name}."
+            elif [ "$have" = "sha256:${want}" ]; then
+              echo "${name} is already stored with the same checksum."
+            else
+              echo "::error::${name} is already stored with ${have}, but IBKR now serves sha256:${want}."
+              exit 1
+            fi
+          }
+          store "$RUNNER_TEMP/installers/ibgateway-${VERSION}-standalone-linux-x64.sh" "$X64"
+          store "$RUNNER_TEMP/installers/ibgateway-${VERSION}-standalone-linux-arm.sh" "$ARM"
+          {
+            echo "### Gateway ${VERSION}"
+            echo
+            echo '```'
+            echo "--build-arg IB_GATEWAY_VERSION=${VERSION}"
+            echo "--build-arg IB_GATEWAY_SHA256_X64=${X64}"
+            echo "--build-arg IB_GATEWAY_SHA256_ARM=${ARM}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Push the bump branch, start CI, open an issue
+        if: steps.seen.outputs.go == 'true' && (inputs.channel || 'stable') == 'stable'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+          X64: ${{ steps.fetch.outputs.x64 }}
+          ARM: ${{ steps.fetch.outputs.arm }}
+          UBUNTU: ${{ steps.fetch.outputs.ubuntu }}
+        run: |
+          set -euo pipefail
+          branch="gateway/${VERSION}"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            # An earlier run pushed the branch but stopped before its issue,
+            # possibly before CI started; running CI again is harmless.
+            echo "The bump branch for ${VERSION} exists without its issue; opening it."
+            gh workflow run ci.yml --ref "$branch" \
+              || echo "::warning::Could not start CI on $branch"
+          else
+            python3 .github/scripts/gateway_bump.py apply --version "$VERSION" \
+              --x64 "$X64" --arm "$ARM" --ubuntu "$UBUNTU"
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git switch -c "$branch"
+            git commit -am "chore: Gateway ${VERSION}"
+            git push origin "$branch"
+            gh workflow run ci.yml --ref "$branch"
+          fi
+          {
+            cat "$RUNNER_TEMP/body.md"
+            echo
+            echo "Branch: \`${branch}\` ([changes](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/main...${branch}))."
+          } > "$RUNNER_TEMP/issue.md"
+          url=$(gh issue create --title "Gateway: IBKR stable is ${VERSION}" \
+            --body-file "$RUNNER_TEMP/issue.md")
+          # Assigned to the repo owner, so GitHub emails them about it. A
+          # failed assignment leaves the issue in place.
+          gh issue edit "$url" --add-assignee "$GITHUB_REPOSITORY_OWNER" \
+            || echo "::warning::Opened $url but could not assign it to $GITHUB_REPOSITORY_OWNER"
