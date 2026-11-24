@@ -36,6 +36,36 @@ and the project follows [Semantic Versioning](https://semver.org/).
   (`/tmp/gateway_ready_live`, `/tmp/gateway_ready_paper`), not only the
   old single-mode name.
 
+## [0.17.2] - 2026-11-24
+
+### Fixed
+
+- With `AUTO_RESTART_TIME`, a restart at which IBKR refused Gateway's
+  saved session took two minutes longer than it needed to (issue #93).
+  IBKR refuses that session at the weekly full re-authentication, and
+  when the session ended before the restart, for example after an
+  overnight outage. Gateway (checked on 10.50.1f) then shows
+  "Connection to server failed: The security tokens associated with your
+  login credentials have expired (routinely) ..." in a modal dialog and
+  keeps its login form disabled until the dialog is closed. The controller waited 120 s
+  for the form, logged `ALERT_AUTO_RESTART status=failed_login`, and
+  only then started the fresh Gateway that logs in. It now recognises
+  the dialog and starts the fresh Gateway at once. No login is attempted
+  behind the dialog, and the number of second-factor requests is
+  unchanged: one.
+
+### Changed
+
+- `ALERT_AUTO_RESTART` has a new `status=session_expired` (INFO) for
+  that case, where it used to report `status=failed_login` (WARNING).
+  A monitor that pages on `failed_*` stops paging for the weekly
+  re-authentication; one that matches the status values by name needs
+  the new one.
+- When the login form does not become usable, the controller logs the
+  open windows and the text of every modal dialog after
+  `Login dialog never appeared`, so a dialog in front of the form is
+  named in the log.
+
 ## [0.17.1] - 2026-11-13
 
 ### Added

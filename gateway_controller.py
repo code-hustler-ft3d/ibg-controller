@@ -50,7 +50,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from zoneinfo import ZoneInfo
 
 
-__version__ = "0.17.1"
+__version__ = "0.17.2"
 
 # Wall-clock timestamp recorded when the controller module loads. Reported
 # by the /health endpoint as `uptime_seconds` so monitoring can spot a
@@ -625,10 +625,11 @@ def agent_login_state():
     return None
 
 
-def agent_wait_login_frame(timeout_ms=120_000):
+def agent_wait_login_frame(timeout_ms=120_000, quiet=False):
     """Block until a showing Window containing a JPasswordField exists
     AND no other modal dialog is blocking it. Returns True on success,
-    False on timeout.
+    False on timeout. ``quiet`` logs a timeout at DEBUG, for callers
+    that ask again.
 
     v0.4.3: replaces pyatspi ``wait_for(app, "password text")`` in
     attempt_inplace_relogin. The AT-SPI tree filters the login frame's
@@ -640,17 +641,18 @@ def agent_wait_login_frame(timeout_ms=120_000):
     blocking — only returns OK when the login frame is actually
     interactable.
     """
+    level = log.debug if quiet else log.error
     try:
         resp = _agent_request(
             f"WAIT_LOGIN_FRAME {int(timeout_ms)}",
             timeout=int(timeout_ms / 1000) + 10,
         )
     except Exception as e:
-        log.error(f"agent WAIT_LOGIN_FRAME: {type(e).__name__}: {e}")
+        level(f"agent WAIT_LOGIN_FRAME: {type(e).__name__}: {e}")
         return False
     if resp.startswith("OK"):
         return True
-    log.error(f"agent WAIT_LOGIN_FRAME: {resp}")
+    level(f"agent WAIT_LOGIN_FRAME: {resp}")
     return False
 
 
@@ -1297,6 +1299,28 @@ def launch_gateway():
 
 # ── Dialog handlers ─────────────────────────────────────────────────────
 
+_LOGIN_FORM_WAIT_SLICE_MS = 5_000
+
+
+def _wait_for_login_form(timeout_ms=120_000):
+    """Wait for a login form that can be typed into, asking the agent in
+    5 s slices. Between slices, look for Gateway's dialog saying IBKR
+    refused its saved session: Gateway keeps the form disabled behind it
+    until someone closes it, so waiting longer cannot help (issue #93).
+    Returns True when the form is usable."""
+    slices = max(1, timeout_ms // _LOGIN_FORM_WAIT_SLICE_MS)
+    for i in range(slices):
+        if agent_wait_login_frame(timeout_ms=_LOGIN_FORM_WAIT_SLICE_MS,
+                                  quiet=i < slices - 1):
+            return True
+        if _saved_session_refused_dialog() is not None:
+            log.warning("Gateway's dialog saying IBKR refused its saved "
+                        "session is in front of the login form; not "
+                        "waiting for the form any longer")
+            return False
+    return False
+
+
 def handle_login(app):
     """Drive the login dialog: select trading mode, type credentials, click Log In.
 
@@ -1318,8 +1342,10 @@ def handle_login(app):
     showing Window containing a JPasswordField).
     """
     log.info("Waiting for login dialog (JPasswordField in showing Window)")
-    if not agent_wait_login_frame(timeout_ms=120_000):
-        log.error("Login dialog never appeared (no JPasswordField in any showing Window)")
+    if not _wait_for_login_form():
+        log.error("Login dialog never appeared (no JPasswordField in any "
+                  "showing Window, or a modal dialog stayed in front of it)")
+        _log_windows_and_modals(log.error)
         return False
     log.info("Login dialog detected")
 
@@ -1468,6 +1494,46 @@ def _detect_bad_credentials(dump):
     if not dump:
         return False
     return bool(_BAD_CREDENTIALS_MATCH.search(dump))
+
+
+# Gateway's dialog when IBKR refuses the session Gateway saved before its
+# daily restart: "Connection to server failed: The security tokens
+# associated with your login credentials have expired (routinely) in
+# accordance with our security protocols. Please manually enter your
+# username and password to access IB Gateway." IBKR refuses it at the
+# weekly full re-authentication, and whenever the session ended before the
+# restart (issue #93: an overnight outage). The dialog is modal, and
+# Gateway enables its login form again only once the dialog is closed
+# (Gateway 10.50.1f).
+_SAVED_SESSION_REFUSED_MATCH = re.compile(
+    r"security\s+tokens\s+associated\s+with\s+your\s+login\s+credentials"
+    r"\s+have\s+expired",
+    re.IGNORECASE,
+)
+
+
+_SESSION_EXPIRED_WHY = (
+    "IBKR refused the session Gateway saved before restarting (the weekly "
+    "full re-authentication, or the session ended before the restart) and "
+    "Gateway's dialog saying so is in front of its login form; starting "
+    "Gateway again for a full login")
+
+
+def _saved_session_refused_dialog():
+    """Title of the showing modal in which Gateway says IBKR refused its
+    saved session, or None. Read-only: the dialog is left as it is."""
+    try:
+        windows = agent_windows()
+    except Exception:
+        return None
+    for title in dict.fromkeys(t for _w, t, modal in windows if modal):
+        try:
+            text = "\n".join(_modal_sections(agent_window(title)))
+        except Exception:
+            continue
+        if _SAVED_SESSION_REFUSED_MATCH.search(text):
+            return title
+    return None
 
 
 def _halt_credentials_rejected(evidence="Gateway reported the username or "
@@ -4355,8 +4421,9 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
     first, instead of no-op'ing on the dead ``Popen`` and leaving two
     Gateways up. Expected failure modes never raise.
 
-    Emits ``ALERT_AUTO_RESTART`` with ``status=adopted`` (INFO) or one
-    of the ``failed_*`` statuses (WARNING); see docs/OBSERVABILITY.md.
+    Emits ``ALERT_AUTO_RESTART`` with ``status=adopted`` or
+    ``session_expired`` (INFO) or one of the ``failed_*`` statuses
+    (WARNING); see docs/OBSERVABILITY.md.
     """
     global GATEWAY_PROC, CURRENT_APP, JVM_PID, _command_server_app
     global _LAST_ADOPTED_RESTART_MTIME
@@ -4483,6 +4550,14 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                        "required")
                 signal_ready()
                 return True
+            if _saved_session_refused_dialog() is not None:
+                # Gateway keeps its login form disabled behind this
+                # dialog, so a login here would wait on it and then fall
+                # back anyway (issue #93: 120 s). A fresh Gateway logs in
+                # at once.
+                _alert(log.info, "session_expired", new_pid,
+                       _SESSION_EXPIRED_WHY)
+                return False
             texts, buttons = agent_list()
             login_window = "Username" in texts or "Password" in texts
             state = agent_login_state() if login_window else None
@@ -4523,6 +4598,11 @@ def _adopt_self_restarted_gateway(reason, *, exit_code=None):
                            "session not preserved; full login re-driven on the "
                            "adopted JVM")
                     return True
+                if _saved_session_refused_dialog() is not None:
+                    # The dialog came up after the form was seen ready.
+                    _alert(log.info, "session_expired", new_pid,
+                           _SESSION_EXPIRED_WHY)
+                    return False
                 _alert(log.warning, "failed_login", new_pid,
                        "login on the adopted Gateway failed; falling back to a "
                        "controller-driven relaunch")
@@ -5436,19 +5516,24 @@ def _modal_sections(dump):
     return out
 
 
+def _log_windows_and_modals(level):
+    """Log the window list and every modal dialog's text."""
+    try:
+        windows = agent_windows()
+        level(_redact_logs(f"  windows: {windows}"))
+        for title in dict.fromkeys(t for _w, t, modal in windows if modal):
+            for ln in _modal_sections(agent_window(title))[:60]:
+                level(_redact_logs(f"  modal [{title}] {ln}"))
+    except Exception as e:
+        level(f"  windows: unavailable ({type(e).__name__}: {e})")
+
+
 def _capture_upstream_diagnostics():
     """Log what the operator would want to see before the relaunch erases
     it: the window list, every modal's text, the main-window labels, and
     the tail of this mode's launcher.log."""
     log.warning("Upstream diagnostics, captured before relaunching:")
-    try:
-        windows = agent_windows()
-        log.warning(_redact_logs(f"  windows: {windows}"))
-        for title in dict.fromkeys(t for _w, t, modal in windows if modal):
-            for ln in _modal_sections(agent_window(title))[:60]:
-                log.warning(_redact_logs(f"  modal [{title}] {ln}"))
-    except Exception as e:
-        log.warning(f"  windows: unavailable ({type(e).__name__}: {e})")
+    _log_windows_and_modals(log.warning)
     try:
         for wtitle, text in agent_labels()[:60]:
             log.warning(_redact_logs(f"  label [{wtitle}] {text!r}"))

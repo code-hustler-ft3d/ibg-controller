@@ -380,6 +380,7 @@ not failed; do not page on it.
 ALERT_AUTO_RESTART mode=live status=adopted detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=3 reason="API port 4001 open — session preserved across Gateway's auto-restart, no login and no second factor required"
 ALERT_AUTO_RESTART mode=live status=adopted detected_via=agent_socket old_pid=27 new_pid=5020 elapsed_seconds=6 reason="API port 4001 open — session preserved across Gateway's auto-restart, no login and no second factor required"
 ALERT_AUTO_RESTART mode=live status=adopted detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=94 reason="session not preserved; full login re-driven on the adopted JVM"
+ALERT_AUTO_RESTART mode=live status=session_expired detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=6 reason="IBKR refused the session Gateway saved before restarting (the weekly full re-authentication, or the session ended before the restart) and Gateway's dialog saying so is in front of its login form; starting Gateway again for a full login"
 ALERT_AUTO_RESTART mode=live status=failed_no_agent detected_via=restarter_log old_pid=27 new_pid=none elapsed_seconds=90 reason="no new Gateway JVM answered on /tmp/gateway-input-live.sock within 90s; falling back to a controller-driven relaunch"
 ALERT_AUTO_RESTART mode=live status=failed_api_timeout detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=183 reason="API port 4001 did not open within 180s of adoption and no login dialog appeared; falling back to a controller-driven relaunch"
 ALERT_AUTO_RESTART mode=live status=failed_api_timeout detected_via=restarter_log old_pid=27 new_pid=5020 elapsed_seconds=183 reason="API port 4001 did not open within 180s of adoption while Gateway was logging in with its saved session; falling back to a controller-driven relaunch"
@@ -422,20 +423,27 @@ adoption raised …`). Added v0.9.0.
 
 | status | level | meaning |
 |---|---|---|
-| `adopted` | INFO | The self-restarted Gateway is serving again. `reason` says whether the session was preserved (API port opened with no login from the controller — the normal case) or a login dialog waiting for credentials appeared and the full login was re-driven on the adopted JVM (e.g. IBKR's weekly full re-authentication). A preserved session can take a few seconds: the restarted Gateway shows its login window with the fields greyed out while it logs in with the session it saved, and the controller waits for that (`AUTORESTART: Gateway is logging in with the session it saved before restarting`, v0.16.3). |
+| `adopted` | INFO | The self-restarted Gateway is serving again. `reason` says whether the session was preserved (API port opened with no login from the controller — the normal case) or a login dialog waiting for credentials appeared and the full login was re-driven on the adopted JVM. A preserved session can take a few seconds: the restarted Gateway shows its login window with the fields greyed out while it logs in with the session it saved, and the controller waits for that (`AUTORESTART: Gateway is logging in with the session it saved before restarting`, v0.16.3). |
+| `session_expired` | INFO | IBKR refused the session the restarted Gateway saved, so a full login is needed: with second factor, and with IB Key an approval on the phone. That is the case at IBKR's weekly full re-authentication, and whenever the session ended before the restart (for example Gateway lost its connection overnight and was left at "Re-login is required"). Gateway says so in a modal dialog ("Connection to server failed: The security tokens associated with your login credentials have expired (routinely) ...") and keeps its login form disabled until that dialog is closed. The controller does not log in behind it: the adopted instance is torn down and a fresh Gateway logs in, as after any `failed_*` status. The `RESTART:` lines that follow describe that login. Added v0.17.2; until then the same night ended in `failed_login` after a 120 s wait. |
 | `failed_no_agent` | WARNING | No JVM with a new PID answered on the agent socket within `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS`. The controller fell back to its own relaunch (`do_restart_in_place`). If install4j's instance then turns up *after* the fallback started, you are back in the pre-fix two-instance race for that night — check for a second `ibgateway` process if the following login fails. |
 | `failed_jvm_exited` | WARNING | The adopted JVM died before its API port opened. Fell back to a relaunch. |
-| `failed_login` | WARNING | A login dialog appeared on the adopted JVM and the re-driven login failed. A more specific token (`ALERT_LOGIN_FAILED`, `ALERT_2FA_FAILED`) usually precedes it, but not every failure path emits one. The adopted instance is torn down, then the controller falls back to a relaunch. |
+| `failed_login` | WARNING | A login dialog appeared on the adopted JVM and the re-driven login failed. A more specific token (`ALERT_LOGIN_FAILED`, `ALERT_2FA_FAILED`) usually precedes it, but not every failure path emits one. If the login form never became usable, the lines after `Login dialog never appeared` list the open windows and the text of every modal dialog (v0.17.2). The adopted instance is torn down, then the controller falls back to a relaunch. |
 | `failed_api_timeout` | WARNING | Adopted, but the API port did not open within 180 s, either with no login dialog at all or while Gateway's own login with its saved session never finished (the `reason` says which). The adopted instance is torn down, then the controller falls back to a relaunch. |
 
 **What it means**: `status=adopted` is the benign nightly signal — a
 session-preserving restart that cost a few seconds and no second
-factor. Any `failed_*` status means the pre-fix behaviour (relaunch +
-cold login, and a 2FA push on IB Key accounts) took over for that
-night; the following `RESTART:` lines and tokens describe how that
-went.
+factor. `status=session_expired` is the expected signal on the night
+IBKR wants a full login: a fresh Gateway logs in, with a 2FA push on
+IB Key accounts. Any `failed_*` status means the pre-fix behaviour
+(relaunch + cold login, and a 2FA push on IB Key accounts) took over
+for that night; the following `RESTART:` lines and tokens describe how
+that went.
 
-**What the operator should do**: nothing on `adopted`. On repeated
+**What the operator should do**: nothing on `adopted`. On
+`session_expired`, approve the IB Key request if that is your second
+factor; if it shows up on a night other than the weekly
+re-authentication, look for an earlier `ALERT_UPSTREAM_DOWN`: a
+session that ended during an outage is refused at the next restart. On repeated
 `failed_no_agent`, check that the self-restarted JVM is actually
 coming up (`ps`, `/tmp/jvm_console_${TRADING_MODE}.log`) and consider
 raising `AUTO_RESTART_ADOPT_TIMEOUT_SECONDS` on a slow host. On

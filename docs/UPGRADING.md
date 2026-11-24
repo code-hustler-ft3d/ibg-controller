@@ -107,6 +107,16 @@ anything from you.
   containers showed unhealthy for good. If something of yours restarts
   unhealthy containers, it no longer has that reason to.
 
+### v0.17.2
+
+- **New `ALERT_AUTO_RESTART status=session_expired`.** With
+  `AUTO_RESTART_TIME`, the night IBKR wants a full login (the weekly
+  re-authentication) used to end in `status=failed_login` (WARNING)
+  after a 120 s wait. It now logs `status=session_expired` (INFO) and
+  starts the fresh Gateway at once. Nothing to do unless a monitor of
+  yours matches the status values by name: add the new one. A monitor
+  that pages on `failed_*` stops paging for that night.
+
 ### v0.17.0
 
 - **Ubuntu 26.04 base, Gateway 10.50.1g.** Release images build on
