@@ -4,7 +4,7 @@ All notable changes to `ibg-controller` are documented here. The
 format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.19.0] - 2026-11-25
 
 ### Changed
 
@@ -24,10 +24,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
   release archive and its `config.ini` template by SHA-256. The build
   stops on a file that doesn't match. Ubuntu's packages are installed at
   their current versions, as before. IBKR's download URL serves only the
-  current build of a
-  channel, so the installers are kept, as IBKR served them, under the
-  repository's `build-inputs` release, and the build reads them from
-  there.
+  current build of a channel, so the installers are kept, as IBKR served
+  them, under the repository's `build-inputs` release, and the build
+  reads them from there.
 - **Gateway 10.50.1h** (from 10.50.1g).
 - **`UPSTREAM_IMAGE` is no longer a build argument.** To build with
   another Gateway version, pass `IB_GATEWAY_VERSION`,
